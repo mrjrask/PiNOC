@@ -18,5 +18,11 @@
     }
   ],
   "raid_device": "md0",
-  "display_address": "0x3c"
+  "display_address": "0x3c",
+  "remote_temp_monitor": {
+    "enabled": true,
+    "port": 9876,
+    "max_device_age": 30,
+    "shared_secret": ""
+  }
 }
