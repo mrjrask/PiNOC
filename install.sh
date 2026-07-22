@@ -124,7 +124,7 @@ EOF_SUDOERS
 
 configure_ssh_to_cm5() {
   log "Configuring passwordless SSH to the CM5"
-  local default_host default_user default_port ssh_host ssh_user ssh_port ssh_password ssh_dir key_file target
+  local default_host default_user default_port ssh_host ssh_user ssh_port ssh_password ssh_dir key_file sshpass_file target
   default_host="$(json_value remote_host)"
   default_user="$(json_value remote_user)"
   default_port="$(json_value remote_ssh_port)"
@@ -144,11 +144,20 @@ configure_ssh_to_cm5() {
     run_as_user ssh-keygen -t ed25519 -N '' -f "$key_file" -C "${APP_NAME}@$(hostname)"
   fi
 
+  sshpass_file="$(mktemp "${ssh_dir}/sshpass.XXXXXX")"
+  chmod 600 "$sshpass_file"
+  printf '%s\n' "$ssh_password" > "$sshpass_file"
+  chown "$INSTALL_USER" "$sshpass_file"
+
   target="${ssh_user}@${ssh_host}"
-  run_as_user env SSHPASS="$ssh_password" sshpass -e ssh-copy-id \
+  if ! run_as_user sshpass -f "$sshpass_file" ssh-copy-id \
     -p "$ssh_port" \
     -o StrictHostKeyChecking=accept-new \
-    "$target"
+    "$target"; then
+    rm -f "$sshpass_file"
+    return 1
+  fi
+  rm -f "$sshpass_file"
 
   run_as_user ssh \
     -p "$ssh_port" \
