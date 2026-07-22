@@ -659,6 +659,9 @@ def parse_temp_monitor_packet(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
 
+    if not isinstance(data, dict):
+        return None
+
     if (
         data.get("type") != "temperature"
         or not data.get("hostname")
