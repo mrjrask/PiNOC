@@ -116,8 +116,7 @@ setup_venv() {
 
 install_service() {
   log "Installing systemd service"
-  local tmp_service groups=() supplementary_groups
-  local tmp_service vpn_service
+  local tmp_service vpn_service groups=() supplementary_groups
   vpn_service="$(json_value vpn_service)"
   vpn_service="${vpn_service:-wg-quick@wg0.service}"
   tmp_service="$(mktemp)"
