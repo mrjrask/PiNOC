@@ -5,7 +5,26 @@ Files:
 - pi_noc.py: main application
 - config.json: WireGuard, SSH host, paths, and refresh settings
 - requirements.txt: Python dependencies for the virtual environment
-- pi-noc.service: systemd unit for /home/pi/pi-noc
+- pi-noc.service: systemd unit template for the autostart service
+- install.sh: Raspberry Pi installer that installs system dependencies, enables
+  I2C, builds the virtual environment, configures SSH keys for the CM5, grants
+  passwordless WireGuard status/restart controls, and enables pi-noc.service
+
+Install:
+1. Copy or clone this project onto the display Pi.
+2. Review config.json and adjust the CM5 host/user, WireGuard service/interface,
+   display address, and remote paths if needed.
+3. Run the installer:
+
+   sudo ./install.sh
+
+The installer prompts for the CM5 SSH host, user, port, and password. It uses
+that password once with ssh-copy-id so the pi-noc service can use key-based SSH
+non-interactively after installation.
+
+The installer also writes /etc/sudoers.d/pi-noc-wireguard so the service user
+can run the WireGuard status command and restart the configured WireGuard
+systemd service without a password.
 
 Controls:
 - Joystick left/right/up/down: change page
