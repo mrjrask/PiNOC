@@ -73,14 +73,23 @@ enable_i2c() {
   modprobe i2c-dev || warn "Could not load i2c-dev immediately; reboot may be required"
 }
 
-setup_user_groups() {
-  log "Adding ${INSTALL_USER} to hardware access groups"
+existing_hardware_groups() {
+  local group
   for group in i2c gpio; do
     if getent group "$group" >/dev/null; then
-      usermod -aG "$group" "$INSTALL_USER"
+      printf '%s\n' "$group"
     else
-      warn "Group ${group} does not exist on this OS"
+      warn "Group ${group} does not exist on this OS" >&2
     fi
+  done
+}
+
+setup_user_groups() {
+  log "Adding ${INSTALL_USER} to hardware access groups"
+  local groups=() group
+  mapfile -t groups < <(existing_hardware_groups)
+  for group in "${groups[@]}"; do
+    usermod -aG "$group" "$INSTALL_USER"
   done
 }
 
@@ -93,10 +102,14 @@ setup_venv() {
 
 install_service() {
   log "Installing systemd service"
+  local tmp_service groups=() supplementary_groups
   local tmp_service vpn_service
   vpn_service="$(json_value vpn_service)"
   vpn_service="${vpn_service:-wg-quick@wg0.service}"
   tmp_service="$(mktemp)"
+  mapfile -t groups < <(existing_hardware_groups)
+  supplementary_groups="${groups[*]}"
+
   sed \
     -e "s#^User=.*#User=${INSTALL_USER}#" \
     -e "s#^Group=.*#Group=${INSTALL_USER}#" \
@@ -104,6 +117,13 @@ install_service() {
     -e "s#^ExecStart=.*#ExecStart=${VENV_DIR}/bin/python ${REPO_DIR}/pi_noc.py#" \
     -e "s#^After=.*#After=network-online.target ${vpn_service}#" \
     "$SERVICE_SOURCE" > "$tmp_service"
+
+  if ((${#groups[@]})); then
+    sed -i "s#^SupplementaryGroups=.*#SupplementaryGroups=${supplementary_groups}#" "$tmp_service"
+  else
+    sed -i '/^SupplementaryGroups=/d' "$tmp_service"
+  fi
+
   install -m 0644 "$tmp_service" "$SERVICE_DEST"
   rm -f "$tmp_service"
   systemctl daemon-reload
