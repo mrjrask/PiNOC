@@ -103,6 +103,9 @@ setup_venv() {
 install_service() {
   log "Installing systemd service"
   local tmp_service groups=() supplementary_groups
+  local tmp_service vpn_service
+  vpn_service="$(json_value vpn_service)"
+  vpn_service="${vpn_service:-wg-quick@wg0.service}"
   tmp_service="$(mktemp)"
   mapfile -t groups < <(existing_hardware_groups)
   supplementary_groups="${groups[*]}"
@@ -112,6 +115,7 @@ install_service() {
     -e "s#^Group=.*#Group=${INSTALL_USER}#" \
     -e "s#^WorkingDirectory=.*#WorkingDirectory=${REPO_DIR}#" \
     -e "s#^ExecStart=.*#ExecStart=${VENV_DIR}/bin/python ${REPO_DIR}/pi_noc.py#" \
+    -e "s#^After=.*#After=network-online.target ${vpn_service}#" \
     "$SERVICE_SOURCE" > "$tmp_service"
 
   if ((${#groups[@]})); then
