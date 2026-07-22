@@ -86,9 +86,24 @@ enable_i2c() {
   modprobe i2c-dev || warn "Could not load i2c-dev immediately; reboot may be required"
 }
 
+enable_spi() {
+  log "Enabling SPI"
+  if command -v raspi-config >/dev/null 2>&1; then
+    raspi-config nonint do_spi 0 || warn "raspi-config could not enable SPI"
+  else
+    warn "raspi-config not found; adding dtparam=spi=on manually"
+  fi
+
+  local boot_config="/boot/firmware/config.txt"
+  [[ -f /boot/config.txt && ! -f "$boot_config" ]] && boot_config="/boot/config.txt"
+  if [[ -f "$boot_config" ]] && ! grep -Eq '^dtparam=spi=on' "$boot_config"; then
+    printf '\ndtparam=spi=on\n' >> "$boot_config"
+  fi
+}
+
 existing_hardware_groups() {
   local group
-  for group in i2c gpio; do
+  for group in i2c gpio spi; do
     if getent group "$group" >/dev/null; then
       printf '%s\n' "$group"
     else
@@ -196,6 +211,7 @@ main() {
 
   install_system_dependencies
   enable_i2c
+  enable_spi
   setup_user_groups
   setup_venv
   configure_wireguard_controls

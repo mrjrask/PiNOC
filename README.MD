@@ -1,7 +1,7 @@
 # Desk Pi NOC
 
 Desk Pi NOC is a small Raspberry Pi network operations console for an Adafruit
-128x64 OLED Bonnet. It monitors a WireGuard tunnel, a remote CM5 file server,
+128x64 OLED Bonnet or a Pimoroni Display HAT Mini. It monitors a WireGuard tunnel, a remote CM5 file server,
 RAID health, SMB sessions, disk usage, local Pi health, and optional remote
 temperature broadcasters.
 
@@ -20,7 +20,8 @@ temperature broadcasters.
 - Optional UDP listener for
   [MMM-RemoteTempMonitor](https://github.com/mrjrask/MMM-RemoteTempMonitor)
   JSON temperature packets.
-- Joystick navigation and automatic page rotation.
+- Joystick navigation on the Adafruit Bonnet, four-button navigation on the
+  Pimoroni Display HAT Mini, and automatic page rotation.
 
 ## Repository layout
 
@@ -28,7 +29,7 @@ temperature broadcasters.
 | --- | --- |
 | `pi_noc.py` | Main Python application. |
 | `config.json` | Runtime configuration for VPN, SSH, display, storage, and temperature monitoring. |
-| `.env.example` | Template for `.env`, which stores `CM5_SSH_PASS` for install-time and runtime CM5 SSH authentication. |
+| `.env.example` | Template for `.env`, which stores `DISPLAY` and `CM5_SSH_PASS` for install-time and runtime CM5 SSH authentication. |
 | `requirements.txt` | Python package dependencies installed into the virtual environment. |
 | `install.sh` | Raspberry Pi installer for system packages, I2C, virtualenv, SSH keys, sudoers, and systemd. |
 | `pi-noc.service` | systemd unit template rewritten by `install.sh` for the install path and user. |
@@ -36,7 +37,8 @@ temperature broadcasters.
 ## Hardware and system requirements
 
 - Raspberry Pi OS or another Debian-based Raspberry Pi environment.
-- Adafruit 128x64 OLED Bonnet connected over I2C.
+- Adafruit 128x64 OLED Bonnet connected over I2C, or Pimoroni Display HAT
+  Mini connected over SPI.
 - WireGuard tools and a configured WireGuard systemd service, defaulting to
   `wg-quick@wg0.service`.
 - SSH access from the display Pi to the remote CM5/server.
@@ -44,6 +46,11 @@ temperature broadcasters.
   server.
 
 ## Configuration
+
+Edit `.env` to choose the display hardware. Accepted `DISPLAY` values are
+`ADA_BONNET` for the Adafruit 128x64 OLED Bonnet and `PIM_DHM` for the
+Pimoroni Display HAT Mini. If `DISPLAY` is omitted, PiNOC defaults to
+`ADA_BONNET` to preserve existing Adafruit installs.
 
 Edit `config.json` before installation or service start.
 
@@ -76,7 +83,8 @@ Edit `config.json` before installation or service start.
    nano .env
    ```
 
-4. Set `CM5_SSH_PASS` in `.env` to the remote CM5 SSH password. The
+4. Set `DISPLAY` in `.env` to `ADA_BONNET` for the Adafruit Bonnet or
+   `PIM_DHM` for the Pimoroni Display HAT Mini. Set `CM5_SSH_PASS` in `.env` to the remote CM5 SSH password. The
    installer uses it for `ssh-copy-id`, and the running service reads the same
    file whenever it authenticates to the CM5. Update `.env` if the remote
    password changes; no reinstall is required.
@@ -109,11 +117,15 @@ runs the service.
 
 | Control | Action |
 | --- | --- |
-| Joystick left/up | Previous page. |
-| Joystick right/down | Next page. |
-| Joystick center | Refresh status immediately. |
-| Button B | Toggle automatic page rotation. |
-| Hold Button A for 1.5 seconds | Restart the configured WireGuard service. |
+| Adafruit joystick left/up | Previous page. |
+| Adafruit joystick right/down | Next page. |
+| Adafruit joystick center | Refresh status immediately. |
+| Adafruit Button B | Toggle automatic page rotation. |
+| Hold Adafruit Button A for 1.5 seconds | Restart the configured WireGuard service. |
+| Hold Pimoroni Button A for 1.5 seconds | Restart the configured WireGuard service. |
+| Pimoroni Button B | Toggle automatic page rotation. |
+| Pimoroni Button X | Refresh status immediately. |
+| Pimoroni Button Y | Next page. |
 
 ## Display pages
 
@@ -139,8 +151,8 @@ from the page.
 
 ## Troubleshooting
 
-- **Display stays blank**: confirm I2C is enabled, the service user is in the
-  `i2c` and `gpio` groups, and the OLED address matches `display_address`.
+- **Display stays blank**: confirm I2C is enabled for the Adafruit Bonnet or SPI is enabled for the Pimoroni Display HAT Mini, the service user is in the
+  required `i2c`, `gpio`, and `spi` groups, and the OLED address matches `display_address`.
 - **VPN warning never clears**: run `wg show wg0 dump` and verify a recent peer
   handshake. Also verify `vpn_interface`, `vpn_service`, and the generated
   sudoers file.
