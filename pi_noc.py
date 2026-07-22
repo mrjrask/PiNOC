@@ -20,6 +20,8 @@ import os
 import re
 import signal
 import socket
+import hmac
+import hashlib
 import subprocess
 import threading
 import time
@@ -57,11 +59,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     ],
     "raid_device": "md0",
     "display_address": "0x3c",
+    "remote_temp_monitor": {
+        "enabled": True,
+        "port": 9876,
+        "max_device_age": 30,
+        "shared_secret": "",
+    },
 }
 
 WIDTH = 128
 HEIGHT = 64
-PAGE_NAMES = ["SUMMARY", "VPN", "STORAGE", "SERVER", "SMB", "LOCAL"]
+PAGE_NAMES = ["SUMMARY", "VPN", "STORAGE", "SERVER", "SMB", "TEMPS", "LOCAL"]
 
 FONT_PATHS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -128,6 +136,16 @@ class RemoteStatus:
 
 
 @dataclass
+class TempDevice:
+    device_id: str
+    hostname: str
+    celsius: float
+    fahrenheit: float
+    last_seen: float
+    ip: str = ""
+
+
+@dataclass
 class LocalStatus:
     hostname: str = ""
     temperature_c: Optional[float] = None
@@ -144,6 +162,7 @@ class Snapshot:
     vpn: VPNStatus
     remote: RemoteStatus
     local: LocalStatus
+    temp_devices: List[TempDevice] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +649,74 @@ def collect_remote_status(
     return result_status
 
 
+def parse_temp_monitor_packet(
+    packet: bytes,
+    ip_address: str,
+) -> Optional[TempDevice]:
+    try:
+        raw_message = packet.decode("utf-8")
+        data = json.loads(raw_message)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    if (
+        data.get("type") != "temperature"
+        or not data.get("hostname")
+        or not isinstance(data.get("temperature"), dict)
+    ):
+        return None
+
+    secret = str(
+        CONFIG.get("remote_temp_monitor", {}).get(
+            "shared_secret",
+            "",
+        )
+    )
+
+    if secret:
+        signature = str(data.get("hmac", ""))
+        unsigned = dict(data)
+        unsigned.pop("hmac", None)
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            json.dumps(
+                unsigned,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+        if not hmac.compare_digest(signature, expected):
+            return None
+
+    try:
+        celsius = float(data["temperature"]["celsius"])
+        fahrenheit = float(data["temperature"].get(
+            "fahrenheit",
+            celsius * 9 / 5 + 32,
+        ))
+    except (TypeError, ValueError, KeyError):
+        return None
+
+    if celsius < -50 or celsius > 150:
+        return None
+
+    hostname = str(data["hostname"])
+    device_id = str(
+        data.get("device_id")
+        or f"{ip_address}:{hostname}"
+    )
+
+    return TempDevice(
+        device_id=device_id,
+        hostname=hostname,
+        celsius=celsius,
+        fahrenheit=fahrenheit,
+        last_seen=time.time(),
+        ip=ip_address,
+    )
+
+
 def collect_local_status() -> LocalStatus:
     status = LocalStatus(
         hostname=socket.gethostname()
@@ -737,6 +824,7 @@ def collect_snapshot() -> Snapshot:
         vpn=vpn,
         remote=remote,
         local=local,
+        temp_devices=[],
     )
 
 
@@ -1279,6 +1367,53 @@ def draw_smb(
     )
 
 
+def draw_remote_temps(
+    draw: ImageDraw.ImageDraw,
+    snapshot: Snapshot,
+    page: int,
+) -> None:
+    devices = sorted(
+        snapshot.temp_devices,
+        key=lambda device: device.celsius,
+        reverse=True,
+    )
+
+    draw_header(
+        draw,
+        "REMOTE TEMPS",
+        page,
+        bool(devices),
+    )
+
+    if not devices:
+        draw_two_column_line(
+            draw,
+            15,
+            "No monitors found",
+            "",
+        )
+        draw_two_column_line(
+            draw,
+            27,
+            "Listening UDP",
+            str(CONFIG["remote_temp_monitor"].get("port", 9876)),
+        )
+        return
+
+    y_values = [15, 27, 39, 51]
+
+    for y, device in zip(y_values, devices[:4]):
+        age = format_duration(
+            int(time.time() - device.last_seen)
+        )
+        draw_two_column_line(
+            draw,
+            y,
+            device.hostname,
+            f"{device.celsius:.1f}C {age}",
+        )
+
+
 def draw_local(
     draw: ImageDraw.ImageDraw,
     snapshot: Snapshot,
@@ -1354,6 +1489,7 @@ PAGE_DRAWERS = [
     draw_storage,
     draw_server,
     draw_smb,
+    draw_remote_temps,
     draw_local,
 ]
 
@@ -1559,6 +1695,7 @@ class DeskNOC:
                 error="Starting"
             ),
             local=collect_local_status(),
+            temp_devices=[],
         )
 
         self.page = 0
@@ -1601,7 +1738,71 @@ class DeskNOC:
         self.display.fill(0)
         self.display.show()
 
+        self.temp_socket: Optional[socket.socket] = None
+        self.temp_devices: Dict[str, TempDevice] = {}
+        self.setup_temp_monitor_socket()
+
         self.start_refresh(force=True)
+
+    def setup_temp_monitor_socket(self) -> None:
+        temp_config = CONFIG.get("remote_temp_monitor", {})
+
+        if not temp_config.get("enabled", True):
+            return
+
+        try:
+            port = int(temp_config.get("port", 9876))
+            self.temp_socket = socket.socket(
+                socket.AF_INET,
+                socket.SOCK_DGRAM,
+            )
+            self.temp_socket.setsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_REUSEADDR,
+                1,
+            )
+            self.temp_socket.bind(("", port))
+            self.temp_socket.setblocking(False)
+        except OSError as exc:
+            self.temp_socket = None
+            self.restart_message = f"Temp UDP failed: {exc}"[:40]
+            self.restart_message_until = time.monotonic() + 5
+
+    def poll_temp_monitor(self) -> None:
+        if self.temp_socket is None:
+            return
+
+        while True:
+            try:
+                packet, address = self.temp_socket.recvfrom(4096)
+            except BlockingIOError:
+                break
+            except OSError:
+                return
+
+            device = parse_temp_monitor_packet(
+                packet,
+                address[0],
+            )
+
+            if device is not None:
+                self.temp_devices[device.device_id] = device
+
+        max_age = float(
+            CONFIG.get("remote_temp_monitor", {}).get(
+                "max_device_age",
+                30,
+            )
+        )
+        now = time.time()
+        self.temp_devices = {
+            device_id: device
+            for device_id, device in self.temp_devices.items()
+            if now - device.last_seen <= max_age
+        }
+        self.snapshot.temp_devices = list(
+            self.temp_devices.values()
+        )
 
     def start_refresh(
         self,
@@ -1818,6 +2019,7 @@ class DeskNOC:
                 )
 
                 self.accept_refresh()
+                self.poll_temp_monitor()
                 self.start_refresh()
                 self.handle_buttons()
 
@@ -1865,6 +2067,9 @@ class DeskNOC:
             self.display.show()
         except Exception:
             pass
+
+        if self.temp_socket is not None:
+            self.temp_socket.close()
 
         self.buttons.close()
 

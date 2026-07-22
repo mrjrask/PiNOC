@@ -13,7 +13,7 @@ Files:
 Install:
 1. Copy or clone this project onto the display Pi.
 2. Review config.json and adjust the CM5 host/user, WireGuard service/interface,
-   display address, and remote paths if needed.
+   display address, remote paths, and MMM-RemoteTempMonitor UDP settings if needed.
 3. Run the installer:
 
    sudo ./install.sh
@@ -34,3 +34,14 @@ Controls:
 
 The application displays a flashing full-screen warning whenever wg0 has no
 handshake newer than 150 seconds.
+
+MMM-RemoteTempMonitor:
+- PiNOC listens for the same UDP JSON packets emitted by
+  https://github.com/mrjrask/MMM-RemoteTempMonitor and shows the hottest recent
+  devices on the REMOTE TEMPS page.
+- Configure `remote_temp_monitor.port` if your broadcasters do not use the
+  default UDP port 9876.
+- Set `remote_temp_monitor.shared_secret` to the same value as
+  `TEMP_MONITOR_SHARED_SECRET` on the broadcasters when packet authentication is
+  enabled.
+- Devices older than `remote_temp_monitor.max_device_age` seconds are hidden.
