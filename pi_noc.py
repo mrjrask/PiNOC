@@ -1761,10 +1761,10 @@ class Buttons:
         "CENTER": board.D4,
     }
     PIMORONI_PIN_MAP = {
-        "LEFT": board.D5,
-        "RIGHT": board.D6,
-        "UP": board.D16,
-        "DOWN": board.D24,
+        "A": board.D5,
+        "B": board.D6,
+        "CENTER": board.D16,
+        "RIGHT": board.D24,
     }
 
     def __init__(self) -> None:

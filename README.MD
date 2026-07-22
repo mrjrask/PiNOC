@@ -122,9 +122,9 @@ runs the service.
 | Adafruit joystick center | Refresh status immediately. |
 | Adafruit Button B | Toggle automatic page rotation. |
 | Hold Adafruit Button A for 1.5 seconds | Restart the configured WireGuard service. |
-| Pimoroni Button A | Previous page. |
-| Pimoroni Button B | Next page. |
-| Pimoroni Button X | Previous page. |
+| Hold Pimoroni Button A for 1.5 seconds | Restart the configured WireGuard service. |
+| Pimoroni Button B | Toggle automatic page rotation. |
+| Pimoroni Button X | Refresh status immediately. |
 | Pimoroni Button Y | Next page. |
 
 ## Display pages
@@ -152,7 +152,7 @@ from the page.
 ## Troubleshooting
 
 - **Display stays blank**: confirm I2C is enabled for the Adafruit Bonnet or SPI is enabled for the Pimoroni Display HAT Mini, the service user is in the
-  `i2c` and `gpio` groups, and the OLED address matches `display_address`.
+  required `i2c`, `gpio`, and `spi` groups, and the OLED address matches `display_address`.
 - **VPN warning never clears**: run `wg show wg0 dump` and verify a recent peer
   handshake. Also verify `vpn_interface`, `vpn_service`, and the generated
   sudoers file.

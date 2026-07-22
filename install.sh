@@ -103,7 +103,7 @@ enable_spi() {
 
 existing_hardware_groups() {
   local group
-  for group in i2c gpio; do
+  for group in i2c gpio spi; do
     if getent group "$group" >/dev/null; then
       printf '%s\n' "$group"
     else
