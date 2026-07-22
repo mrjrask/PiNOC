@@ -59,7 +59,6 @@ load_env_file() {
     [[ "$line" == CM5_SSH_PASS=* ]] || continue
     CM5_SSH_PASS="${line#CM5_SSH_PASS=}"
   done < "$ENV_FILE"
-  export CM5_SSH_PASS
   [[ -n "$CM5_SSH_PASS" ]] || fail "Set CM5_SSH_PASS in ${ENV_FILE} before running the installer"
 }
 
@@ -173,10 +172,11 @@ configure_ssh_to_cm5() {
   fi
 
   target="${ssh_user}@${ssh_host}"
-  SSHPASS="$CM5_SSH_PASS" run_as_user sshpass -e ssh-copy-id \
-    -p "$ssh_port" \
-    -o StrictHostKeyChecking=accept-new \
-    "$target"
+  SSHPASS="$CM5_SSH_PASS" sudo --preserve-env=SSHPASS -H -u "${INSTALL_USER}" \
+    sshpass -e ssh-copy-id \
+      -p "$ssh_port" \
+      -o StrictHostKeyChecking=accept-new \
+      "$target"
 
   run_as_user ssh \
     -p "$ssh_port" \
