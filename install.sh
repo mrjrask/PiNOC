@@ -52,12 +52,15 @@ prompt_default() {
 
 load_env_file() {
   [[ -f "$ENV_FILE" ]] || fail "Missing ${ENV_FILE}; copy .env.example to .env and set CM5_SSH_PASS"
-  unset CM5_SSH_PASS
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-  [[ -n "${CM5_SSH_PASS:-}" ]] || fail "Set CM5_SSH_PASS in ${ENV_FILE} before running the installer"
+  local line
+  CM5_SSH_PASS=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" == CM5_SSH_PASS=* ]] || continue
+    CM5_SSH_PASS="${line#CM5_SSH_PASS=}"
+  done < "$ENV_FILE"
+  export CM5_SSH_PASS
+  [[ -n "$CM5_SSH_PASS" ]] || fail "Set CM5_SSH_PASS in ${ENV_FILE} before running the installer"
 }
 
 install_system_dependencies() {
