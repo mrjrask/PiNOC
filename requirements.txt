@@ -8,7 +8,7 @@
 # apt: git
 # apt: i2c-tools
 # apt: python3-smbus
-# apt: libgpiod2
+# apt alternative: libgpiod2 libgpiod3
 # apt: fonts-dejavu-core
 # apt: wireguard-tools
 # apt: iproute2
