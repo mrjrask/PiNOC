@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Desk NOC display for an Adafruit 128x64 OLED Bonnet.
+"""Desk NOC display for Adafruit or Pimoroni Raspberry Pi displays.
 
 Controls:
   Joystick left/right/up/down: change page
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import importlib
 import json
 import os
 import re
@@ -31,9 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import adafruit_ssd1306
 import board
-import busio
 from digitalio import DigitalInOut, Direction, Pull
 from PIL import Image, ImageDraw, ImageFont
 
@@ -68,6 +67,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "shared_secret": "",
     },
 }
+
+DISPLAY_ADA_BONNET = "ADA_BONNET"
+DISPLAY_PIM_DHM = "PIM_DHM"
+DISPLAY_TYPES = (DISPLAY_ADA_BONNET, DISPLAY_PIM_DHM)
 
 WIDTH = 128
 HEIGHT = 64
@@ -243,6 +246,21 @@ def read_env_value(key: str) -> str:
             return line[len(prefix):]
 
     return ""
+
+
+def load_display_type() -> str:
+    display_type = read_env_value("DISPLAY") or DISPLAY_ADA_BONNET
+
+    if display_type not in DISPLAY_TYPES:
+        raise RuntimeError(
+            f"DISPLAY must be one of {', '.join(DISPLAY_TYPES)}; "
+            f"got {display_type!r}"
+        )
+
+    return display_type
+
+
+DISPLAY_TYPE = load_display_type()
 
 
 # ---------------------------------------------------------------------------
@@ -1640,11 +1658,100 @@ def draw_vpn_warning(
 
 
 # ---------------------------------------------------------------------------
-# Input handling
+# Display and input handling
 # ---------------------------------------------------------------------------
 
+class DisplayDevice:
+    def image(self, image: Image.Image) -> None:
+        raise NotImplementedError
+
+    def fill(self, value: int) -> None:
+        raise NotImplementedError
+
+    def show(self) -> None:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        pass
+
+
+class AdafruitOLEDDisplay(DisplayDevice):
+    def __init__(self) -> None:
+        busio_module = importlib.import_module("busio")
+        ssd1306_module = importlib.import_module("adafruit_ssd1306")
+        i2c = busio_module.I2C(
+            board.SCL,
+            board.SDA,
+        )
+        address = int(
+            str(CONFIG["display_address"]),
+            0,
+        )
+        self.display = ssd1306_module.SSD1306_I2C(
+            WIDTH,
+            HEIGHT,
+            i2c,
+            addr=address,
+        )
+
+    def image(self, image: Image.Image) -> None:
+        self.display.image(image)
+
+    def fill(self, value: int) -> None:
+        self.display.fill(value)
+
+    def show(self) -> None:
+        self.display.show()
+
+
+class PimoroniDisplayHATMiniDisplay(DisplayDevice):
+    LCD_WIDTH = 320
+    LCD_HEIGHT = 240
+
+    def __init__(self) -> None:
+        displayhatmini_module = importlib.import_module("displayhatmini")
+        self.buffer = Image.new(
+            "RGB",
+            (self.LCD_WIDTH, self.LCD_HEIGHT),
+        )
+        self.display = displayhatmini_module.DisplayHATMini(self.buffer)
+        self.display.set_backlight(1.0)
+        self.display.set_led(0.0, 0.0, 0.0)
+
+    def image(self, image: Image.Image) -> None:
+        scaled = image.convert("RGB").resize(
+            (self.LCD_WIDTH, 160),
+            Image.Resampling.NEAREST,
+        )
+        self.buffer.paste(
+            Image.new("RGB", self.buffer.size),
+            (0, 0),
+        )
+        self.buffer.paste(scaled, (0, 40))
+
+    def fill(self, value: int) -> None:
+        fill = 255 if value else 0
+        self.buffer.paste(
+            Image.new("RGB", self.buffer.size, (fill, fill, fill)),
+            (0, 0),
+        )
+
+    def show(self) -> None:
+        self.display.display()
+
+    def close(self) -> None:
+        self.display.set_led(0.0, 0.0, 0.0)
+
+
+def create_display() -> DisplayDevice:
+    if DISPLAY_TYPE == DISPLAY_PIM_DHM:
+        return PimoroniDisplayHATMiniDisplay()
+
+    return AdafruitOLEDDisplay()
+
+
 class Buttons:
-    PIN_MAP = {
+    ADAFRUIT_PIN_MAP = {
         "A": board.D5,
         "B": board.D6,
         "LEFT": board.D27,
@@ -1652,6 +1759,12 @@ class Buttons:
         "UP": board.D17,
         "DOWN": board.D22,
         "CENTER": board.D4,
+    }
+    PIMORONI_PIN_MAP = {
+        "LEFT": board.D5,
+        "RIGHT": board.D6,
+        "UP": board.D16,
+        "DOWN": board.D24,
     }
 
     def __init__(self) -> None:
@@ -1669,7 +1782,13 @@ class Buttons:
             bool,
         ] = {}
 
-        for name, pin in self.PIN_MAP.items():
+        pin_map = (
+            self.PIMORONI_PIN_MAP
+            if DISPLAY_TYPE == DISPLAY_PIM_DHM
+            else self.ADAFRUIT_PIN_MAP
+        )
+
+        for name, pin in pin_map.items():
             device = DigitalInOut(pin)
             device.direction = Direction.INPUT
             device.pull = Pull.UP
@@ -1753,24 +1872,7 @@ class DeskNOC:
         self.restart_message = ""
         self.restart_message_until = 0.0
 
-        i2c = busio.I2C(
-            board.SCL,
-            board.SDA,
-        )
-
-        address = int(
-            str(CONFIG["display_address"]),
-            0,
-        )
-
-        self.display = (
-            adafruit_ssd1306.SSD1306_I2C(
-                WIDTH,
-                HEIGHT,
-                i2c,
-                addr=address,
-            )
-        )
+        self.display = create_display()
 
         self.image = Image.new(
             "1",
@@ -2118,6 +2220,7 @@ class DeskNOC:
             self.temp_socket.close()
 
         self.buttons.close()
+        self.display.close()
 
 
 def main() -> None:
