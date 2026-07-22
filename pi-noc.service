@@ -1,0 +1,18 @@
+[Unit]
+Description=Desk Pi Network Operations Console
+Wants=network-online.target
+After=network-online.target wg-quick@wg0.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+SupplementaryGroups=i2c gpio
+WorkingDirectory=/home/pi/pi-noc
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/pi-noc/.venv/bin/python /home/pi/pi-noc/pi_noc.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
