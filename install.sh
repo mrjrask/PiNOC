@@ -19,6 +19,7 @@ APT_PACKAGES=(
   git
   i2c-tools
   python3-smbus
+  libgpiod3
   fonts-dejavu-core
   wireguard-tools
   iproute2
@@ -26,10 +27,6 @@ APT_PACKAGES=(
   sshpass
   rsync
 )
-APT_PACKAGE_ALTERNATIVES=(
-  "libgpiod2 libgpiod3"
-)
-
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -64,34 +61,12 @@ load_env_file() {
   [[ -n "$CM5_SSH_PASS" ]] || fail "Set CM5_SSH_PASS in ${ENV_FILE} before running the installer"
 }
 
-resolve_apt_alternative() {
-  local candidate
-  for candidate in "$@"; do
-    if apt-cache show "$candidate" >/dev/null 2>&1; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  return 1
-}
-
 install_system_dependencies() {
   log "Installing/verifying system dependencies"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
 
-  local packages=("${APT_PACKAGES[@]}") alternative resolved
-  local -a candidates
-  for alternative in "${APT_PACKAGE_ALTERNATIVES[@]}"; do
-    read -r -a candidates <<< "$alternative"
-    if resolved="$(resolve_apt_alternative "${candidates[@]}")"; then
-      packages+=("$resolved")
-    else
-      fail "None of these alternative packages are available from apt: ${alternative}"
-    fi
-  done
-
-  apt-get install -y --no-install-recommends "${packages[@]}"
+  apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
 }
 
 enable_i2c() {
