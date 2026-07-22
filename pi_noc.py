@@ -20,6 +20,7 @@ import os
 import re
 import signal
 import socket
+import shlex
 import hmac
 import hashlib
 import subprocess
@@ -43,6 +44,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
+ENV_FILE = APP_DIR / ".env"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "vpn_interface": "wg0",
@@ -192,7 +194,13 @@ def run_command(
     *,
     timeout: float = 5.0,
     input_text: Optional[str] = None,
+    env_extra: Optional[Dict[str, str]] = None,
 ) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "LC_ALL": "C"}
+
+    if env_extra:
+        env.update(env_extra)
+
     try:
         return subprocess.run(
             list(command),
@@ -202,7 +210,7 @@ def run_command(
             stderr=subprocess.PIPE,
             timeout=timeout,
             check=False,
-            env={**os.environ, "LC_ALL": "C"},
+            env=env,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         return subprocess.CompletedProcess(
@@ -218,6 +226,23 @@ def read_text(path: str) -> str:
         return Path(path).read_text().strip()
     except OSError:
         return ""
+
+
+def read_env_value(key: str) -> str:
+    try:
+        lines = ENV_FILE.read_text().splitlines()
+    except OSError:
+        return ""
+
+    prefix = f"{key}="
+
+    for line in lines:
+        line = line.rstrip("\r")
+
+        if line.startswith(prefix):
+            return line[len(prefix):]
+
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -352,11 +377,11 @@ def build_remote_script() -> str:
     disk_commands: List[str] = []
 
     for index, item in enumerate(CONFIG["remote_paths"]):
-        name = str(item["name"]).replace("'", "")
-        path = str(item["path"]).replace("'", "'\"'\"'")
+        name = shlex.quote(str(item["name"]))
+        path = shlex.quote(str(item["path"]))
 
         disk_commands.append(
-            f"disk_status 'D{index}' '{name}' '{path}'"
+            f"disk_status D{index} {name} {path}"
         )
 
     return """#!/bin/sh
@@ -495,13 +520,10 @@ def collect_remote_status(
     port = str(CONFIG["remote_ssh_port"])
     target = f"{user}@{host}"
 
-    ssh_command = [
-        "/usr/bin/ssh",
+    ssh_options = [
         "-T",
         "-p",
         port,
-        "-o",
-        "BatchMode=yes",
         "-o",
         "ConnectTimeout=4",
         "-o",
@@ -512,14 +534,35 @@ def collect_remote_status(
         "ServerAliveCountMax=1",
         "-o",
         "StrictHostKeyChecking=accept-new",
-        target,
-        "sh -s",
     ]
+    env_extra: Optional[Dict[str, str]] = None
+    cm5_password = read_env_value("CM5_SSH_PASS")
+
+    if cm5_password:
+        ssh_command = [
+            "/usr/bin/sshpass",
+            "-e",
+            "/usr/bin/ssh",
+            *ssh_options,
+            target,
+            "sh -s",
+        ]
+        env_extra = {"SSHPASS": cm5_password}
+    else:
+        ssh_command = [
+            "/usr/bin/ssh",
+            *ssh_options,
+            "-o",
+            "BatchMode=yes",
+            target,
+            "sh -s",
+        ]
 
     result = run_command(
         ssh_command,
         timeout=8,
         input_text=build_remote_script(),
+        env_extra=env_extra,
     )
 
     if result.returncode != 0:
