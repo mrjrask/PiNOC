@@ -9,6 +9,7 @@ VENV_DIR="${REPO_DIR}/.venv"
 SERVICE_SOURCE="${REPO_DIR}/${SERVICE_NAME}"
 SERVICE_DEST="/etc/systemd/system/${SERVICE_NAME}"
 SUDOERS_DEST="/etc/sudoers.d/pi-noc-wireguard"
+ENV_FILE="${REPO_DIR}/.env"
 APT_PACKAGES=(
   python3
   python3-venv
@@ -47,6 +48,16 @@ prompt_default() {
   local var_name="$1" prompt="$2" default="$3" value
   read -r -p "${prompt} [${default}]: " value
   printf -v "$var_name" '%s' "${value:-$default}"
+}
+
+load_env_file() {
+  [[ -f "$ENV_FILE" ]] || fail "Missing ${ENV_FILE}; copy .env.example to .env and set CM5_SSH_PASS"
+  unset CM5_SSH_PASS
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+  [[ -n "${CM5_SSH_PASS:-}" ]] || fail "Set CM5_SSH_PASS in ${ENV_FILE} before running the installer"
 }
 
 install_system_dependencies() {
@@ -124,23 +135,20 @@ EOF_SUDOERS
 
 configure_ssh_to_cm5() {
   log "Configuring passwordless SSH to the CM5"
-  local default_host default_user default_port ssh_host ssh_user ssh_port ssh_password key_file target
+  local default_host default_user default_port ssh_host ssh_user ssh_port key_file target
   default_host="$(json_value remote_host)"
   default_user="$(json_value remote_user)"
   default_port="$(json_value remote_ssh_port)"
   prompt_default ssh_host "CM5 SSH host" "${default_host:-cm5}"
   prompt_default ssh_user "CM5 SSH user" "${default_user:-pi}"
   prompt_default ssh_port "CM5 SSH port" "${default_port:-22}"
-  read -r -s -p "CM5 SSH password for ${ssh_user}@${ssh_host}: " ssh_password
-  printf '\n'
-
   key_file="$(eval echo "~${INSTALL_USER}/.ssh/id_ed25519")"
   if [[ ! -f "$key_file" ]]; then
     run_as_user ssh-keygen -t ed25519 -N '' -f "$key_file" -C "${APP_NAME}@$(hostname)"
   fi
 
   target="${ssh_user}@${ssh_host}"
-  SSHPASS="$ssh_password" run_as_user sshpass -e ssh-copy-id \
+  SSHPASS="$CM5_SSH_PASS" run_as_user sshpass -e ssh-copy-id \
     -p "$ssh_port" \
     -o StrictHostKeyChecking=accept-new \
     "$target"
@@ -159,6 +167,7 @@ main() {
   id "$INSTALL_USER" >/dev/null 2>&1 || fail "Install user ${INSTALL_USER} does not exist"
   [[ -f "$CONFIG_FILE" ]] || fail "Missing ${CONFIG_FILE}"
   [[ -f "$SERVICE_SOURCE" ]] || fail "Missing ${SERVICE_SOURCE}"
+  load_env_file
 
   install_system_dependencies
   enable_i2c

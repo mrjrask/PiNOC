@@ -14,13 +14,14 @@ Install:
 1. Copy or clone this project onto the display Pi.
 2. Review config.json and adjust the CM5 host/user, WireGuard service/interface,
    display address, remote paths, and MMM-RemoteTempMonitor UDP settings if needed.
-3. Run the installer:
+3. Copy .env.example to .env and set CM5_SSH_PASS to the CM5 SSH password.
+4. Run the installer:
 
    sudo ./install.sh
 
-The installer prompts for the CM5 SSH host, user, port, and password. It uses
-that password once with ssh-copy-id so the pi-noc service can use key-based SSH
-non-interactively after installation.
+The installer prompts for the CM5 SSH host, user, and port only. It requires
+CM5_SSH_PASS in .env and uses that password once with ssh-copy-id so the
+pi-noc service can use key-based SSH non-interactively after installation.
 
 The installer also writes /etc/sudoers.d/pi-noc-wireguard so the service user
 can run the WireGuard status command and restart the configured WireGuard
