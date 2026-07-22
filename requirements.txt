@@ -1,3 +1,22 @@
+# System packages required by install.sh (install with apt-get).
+# Keep this list synchronized with the APT_PACKAGES array in install.sh.
+# apt: python3
+# apt: python3-venv
+# apt: python3-pip
+# apt: python3-dev
+# apt: build-essential
+# apt: git
+# apt: i2c-tools
+# apt: python3-smbus
+# apt: libgpiod2
+# apt: fonts-dejavu-core
+# apt: wireguard-tools
+# apt: iproute2
+# apt: openssh-client
+# apt: sshpass
+# apt: rsync
+
+# Python packages installed into the virtual environment by install.sh.
 Adafruit-Blinka
 adafruit-circuitpython-ssd1306
 Pillow
