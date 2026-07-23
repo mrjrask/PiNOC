@@ -26,5 +26,15 @@
     "timeout_seconds": 3,
     "max_device_age": 60,
     "shared_secret": ""
+  },
+  "inside_sensor": {
+    "enabled": true,
+    "type": "auto",
+    "i2c_addresses": [
+      "0x76",
+      "0x77",
+      "0x44",
+      "0x45"
+    ]
   }
 }

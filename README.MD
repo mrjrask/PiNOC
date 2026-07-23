@@ -3,7 +3,7 @@
 Desk Pi NOC is a small Raspberry Pi network operations console for an Adafruit
 128x64 OLED Bonnet or a Pimoroni Display HAT Mini. It monitors a WireGuard tunnel, a remote CM5 file server,
 RAID health, SMB sessions, disk usage, local Pi health, and optional remote
-temperature broadcasters.
+temperature broadcasters, and local StemmaQT/Qwiic indoor sensors.
 
 ## Features
 
@@ -19,6 +19,8 @@ temperature broadcasters.
 - Local Desk Pi checks for temperature, load, uptime, memory use, and Wi-Fi IP.
 - Optional remote temperature page loaded from a single JSON endpoint such as
   `http://192.168.1.201:9877/temps`.
+- Local StemmaQT/Qwiic indoor sensor screen for BME280, BME680/BME688,
+  and SHT4x temperature/humidity/pressure/air-quality sensors.
 - Joystick navigation on the Adafruit Bonnet, color dashboard rendering and
   multi-click four-button navigation on the Pimoroni Display HAT Mini, and
   automatic page rotation.
@@ -73,6 +75,9 @@ Edit `config.json` before installation or service start.
 | `remote_temp_monitor.poll_seconds` | `10` | Minimum seconds between endpoint requests. |
 | `remote_temp_monitor.timeout_seconds` | `3` | HTTP request timeout for the temperature endpoint. |
 | `remote_temp_monitor.max_device_age` | `60` | Hide temperature devices older than this many seconds. |
+| `inside_sensor.enabled` | `true` | Enables probing for a local StemmaQT/Qwiic indoor sensor on the display Pi I2C bus. |
+| `inside_sensor.type` | `auto` | Sensor driver to probe: `auto`, `bme280`, `bme680`, `bme688`, or `sht4x`. |
+| `inside_sensor.i2c_addresses` | `0x76`, `0x77`, `0x44`, `0x45` | I2C addresses to try for BME and SHT4x sensors. |
 
 ## Installation
 
@@ -162,6 +167,19 @@ more visible rows per page, status colors, and a wider two-column layout.
 5. **Samba**: active SMB session count and users.
 6. **Remote Temps**: hottest recent devices from the configured temperature endpoint.
 7. **Desk Pi**: local hostname/IP, temperature/load, memory, and uptime.
+8. **Sensors**: local StemmaQT/Qwiic BME280, BME680/BME688, or SHT4x readings.
+9. **Network**: Desk Pi, CM5, WireGuard, and temperature API addressing.
+
+## Local StemmaQT/Qwiic sensor screen
+
+Both supported displays expose StemmaQT/Qwiic-compatible I2C expansion. PiNOC
+can probe the shared I2C bus for a local indoor sensor and adds a Sensors page
+when readings are available. The supported sensor families match the indoor
+sensor support from `mrjrask/desk_display`: BME280, BME680/BME688, and SHT4x.
+
+Set `inside_sensor.type` to `auto` for normal installs, or pin it to a specific
+sensor family to reduce startup probing. The default address list covers common
+BME addresses (`0x76`, `0x77`) and SHT4x addresses (`0x44`, `0x45`).
 
 ## Remote temperature monitor endpoint
 
@@ -189,6 +207,8 @@ removed from the page.
   the remote user to run `smbstatus` if root privileges are required.
 - **No remote temperatures**: check that `remote_temp_monitor.endpoint` is
   reachable from the display Pi and returns fresh JSON temperature data.
+- **No local sensor**: run `i2cdetect -y 1`, confirm the StemmaQT cable is
+  seated, and verify `inside_sensor.type` and `inside_sensor.i2c_addresses`.
 
 ## Development checks
 
