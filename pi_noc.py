@@ -27,6 +27,8 @@ import hashlib
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,8 +64,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "display_address": "0x3c",
     "remote_temp_monitor": {
         "enabled": True,
-        "port": 9876,
-        "max_device_age": 30,
+        "endpoint": "http://mirror.local/temps",
+        "poll_seconds": 10,
+        "timeout_seconds": 3,
+        "max_device_age": 60,
         "shared_secret": "",
     },
 }
@@ -781,6 +785,106 @@ def parse_temp_monitor_packet(
     )
 
 
+def parse_temp_monitor_device(
+    data: Any,
+    source: str,
+) -> Optional[TempDevice]:
+    if not isinstance(data, dict):
+        return None
+
+    if isinstance(data.get("temperature"), dict):
+        temp_data = data["temperature"]
+    else:
+        temp_data = data
+
+    try:
+        celsius_value = (
+            temp_data.get("celsius")
+            if isinstance(temp_data, dict)
+            else None
+        )
+        if celsius_value is None:
+            celsius_value = data.get("celsius")
+        if celsius_value is None:
+            celsius_value = data.get("temp_c")
+        if celsius_value is None:
+            celsius_value = data.get("temperature_c")
+
+        celsius = float(celsius_value)
+
+        fahrenheit_value = (
+            temp_data.get("fahrenheit")
+            if isinstance(temp_data, dict)
+            else None
+        )
+        if fahrenheit_value is None:
+            fahrenheit_value = data.get("fahrenheit")
+        if fahrenheit_value is None:
+            fahrenheit_value = data.get("temp_f")
+        if fahrenheit_value is None:
+            fahrenheit_value = celsius * 9 / 5 + 32
+
+        fahrenheit = float(fahrenheit_value)
+    except (TypeError, ValueError):
+        return None
+
+    if celsius < -50 or celsius > 150:
+        return None
+
+    hostname = str(
+        data.get("hostname")
+        or data.get("name")
+        or data.get("device")
+        or data.get("id")
+        or "Remote"
+    )
+    device_id = str(
+        data.get("device_id")
+        or data.get("id")
+        or f"{source}:{hostname}"
+    )
+
+    return TempDevice(
+        device_id=device_id,
+        hostname=hostname,
+        celsius=celsius,
+        fahrenheit=fahrenheit,
+        last_seen=time.time(),
+        ip=source,
+    )
+
+
+def parse_temp_monitor_response(
+    payload: bytes,
+    source: str,
+) -> List[TempDevice]:
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return []
+
+    if isinstance(data, dict):
+        if isinstance(data.get("temps"), list):
+            entries = data["temps"]
+        elif isinstance(data.get("devices"), list):
+            entries = data["devices"]
+        elif isinstance(data.get("temperatures"), list):
+            entries = data["temperatures"]
+        else:
+            entries = [data]
+    elif isinstance(data, list):
+        entries = data
+    else:
+        return []
+
+    devices: List[TempDevice] = []
+    for entry in entries:
+        device = parse_temp_monitor_device(entry, source)
+        if device is not None:
+            devices.append(device)
+    return devices
+
+
 def collect_local_status() -> LocalStatus:
     status = LocalStatus(
         hostname=socket.gethostname()
@@ -1456,11 +1560,17 @@ def draw_remote_temps(
             "No monitors found",
             "",
         )
+        endpoint = str(
+            CONFIG["remote_temp_monitor"].get(
+                "endpoint",
+                "http://mirror.local/temps",
+            )
+        )
         draw_two_column_line(
             draw,
             27,
-            "Listening UDP",
-            str(CONFIG["remote_temp_monitor"].get("port", 9876)),
+            "Endpoint",
+            endpoint.replace("http://", ""),
         )
         return
 
@@ -1886,60 +1996,72 @@ class DeskNOC:
         self.display.fill(0)
         self.display.show()
 
-        self.temp_socket: Optional[socket.socket] = None
+        self.temp_endpoint = ""
+        self.last_temp_poll = 0.0
         self.temp_devices: Dict[str, TempDevice] = {}
-        self.setup_temp_monitor_socket()
+        self.setup_temp_monitor()
 
         self.start_refresh(force=True)
 
-    def setup_temp_monitor_socket(self) -> None:
+    def setup_temp_monitor(self) -> None:
         temp_config = CONFIG.get("remote_temp_monitor", {})
 
         if not temp_config.get("enabled", True):
             return
 
-        try:
-            port = int(temp_config.get("port", 9876))
-            self.temp_socket = socket.socket(
-                socket.AF_INET,
-                socket.SOCK_DGRAM,
+        self.temp_endpoint = str(
+            temp_config.get(
+                "endpoint",
+                "http://mirror.local/temps",
             )
-            self.temp_socket.setsockopt(
-                socket.SOL_SOCKET,
-                socket.SO_REUSEADDR,
-                1,
-            )
-            self.temp_socket.bind(("", port))
-            self.temp_socket.setblocking(False)
-        except OSError as exc:
-            self.temp_socket = None
-            self.restart_message = f"Temp UDP failed: {exc}"[:40]
+        )
+
+        if not self.temp_endpoint:
+            self.restart_message = "Temp endpoint missing"
             self.restart_message_until = time.monotonic() + 5
 
     def poll_temp_monitor(self) -> None:
-        if self.temp_socket is None:
+        if not self.temp_endpoint:
             return
 
-        while True:
-            try:
-                packet, address = self.temp_socket.recvfrom(4096)
-            except BlockingIOError:
-                break
-            except OSError:
-                return
-
-            device = parse_temp_monitor_packet(
-                packet,
-                address[0],
+        now_monotonic = time.monotonic()
+        poll_interval = float(
+            CONFIG.get("remote_temp_monitor", {}).get(
+                "poll_seconds",
+                CONFIG.get("refresh_seconds", 10),
             )
+        )
 
-            if device is not None:
-                self.temp_devices[device.device_id] = device
+        if now_monotonic - self.last_temp_poll < poll_interval:
+            return
+
+        self.last_temp_poll = now_monotonic
+
+        try:
+            timeout = float(
+                CONFIG.get("remote_temp_monitor", {}).get(
+                    "timeout_seconds",
+                    3,
+                )
+            )
+            with urllib.request.urlopen(
+                self.temp_endpoint,
+                timeout=timeout,
+            ) as response:
+                payload = response.read(65536)
+        except (OSError, urllib.error.URLError, ValueError):
+            payload = b""
+
+        for device in parse_temp_monitor_response(
+            payload,
+            self.temp_endpoint,
+        ):
+            self.temp_devices[device.device_id] = device
 
         max_age = float(
             CONFIG.get("remote_temp_monitor", {}).get(
                 "max_device_age",
-                30,
+                60,
             )
         )
         now = time.time()
@@ -2215,9 +2337,6 @@ class DeskNOC:
             self.display.show()
         except Exception:
             pass
-
-        if self.temp_socket is not None:
-            self.temp_socket.close()
 
         self.buttons.close()
         self.display.close()

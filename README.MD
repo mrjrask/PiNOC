@@ -17,9 +17,8 @@ temperature broadcasters.
   - Disk usage for configured paths.
   - Samba session count and unique users from `smbstatus` when available.
 - Local Desk Pi checks for temperature, load, uptime, memory use, and Wi-Fi IP.
-- Optional UDP listener for
-  [MMM-RemoteTempMonitor](https://github.com/mrjrask/MMM-RemoteTempMonitor)
-  JSON temperature packets.
+- Optional remote temperature page loaded from a single JSON endpoint such as
+  `http://mirror.local/temps`.
 - Joystick navigation on the Adafruit Bonnet, four-button navigation on the
   Pimoroni Display HAT Mini, and automatic page rotation.
 
@@ -68,10 +67,11 @@ Edit `config.json` before installation or service start.
 | `remote_paths` | two sample paths | Named remote paths shown on the storage page. |
 | `raid_device` | `md0` | MD RAID device name to find in `/proc/mdstat`. |
 | `display_address` | `0x3c` | I2C address for the OLED display. |
-| `remote_temp_monitor.enabled` | `true` | Enables the UDP temperature packet listener. |
-| `remote_temp_monitor.port` | `9876` | UDP port for temperature packets. |
-| `remote_temp_monitor.max_device_age` | `30` | Hide temperature devices older than this many seconds. |
-| `remote_temp_monitor.shared_secret` | empty | Optional HMAC shared secret for authenticated temperature packets. |
+| `remote_temp_monitor.enabled` | `true` | Enables the remote temperature endpoint poller. |
+| `remote_temp_monitor.endpoint` | `http://mirror.local/temps` | JSON endpoint that returns all remote temperatures. |
+| `remote_temp_monitor.poll_seconds` | `10` | Minimum seconds between endpoint requests. |
+| `remote_temp_monitor.timeout_seconds` | `3` | HTTP request timeout for the temperature endpoint. |
+| `remote_temp_monitor.max_device_age` | `60` | Hide temperature devices older than this many seconds. |
 
 ## Installation
 
@@ -149,19 +149,20 @@ runs the service.
 3. **Storage**: usage for the first two configured remote paths.
 4. **CM5 Server**: remote status, temperature, load, and uptime.
 5. **Samba**: active SMB session count and users.
-6. **Remote Temps**: hottest recent MMM-RemoteTempMonitor devices.
+6. **Remote Temps**: hottest recent devices from the configured temperature endpoint.
 7. **Desk Pi**: local hostname/IP, temperature/load, memory, and uptime.
 
-## Remote temperature monitor packets
+## Remote temperature monitor endpoint
 
-When enabled, PiNOC listens for UDP JSON packets compatible with
-MMM-RemoteTempMonitor. If `remote_temp_monitor.shared_secret` is set, packets
-must include a valid `hmac` field calculated over the JSON payload without the
-`hmac` key using compact JSON separators.
+When enabled, PiNOC polls `remote_temp_monitor.endpoint` for JSON containing all
+remote temperatures. The endpoint may return a list directly or an object with a
+`temps`, `devices`, or `temperatures` list. Each device can provide
+`temperature.celsius`, `celsius`, `temp_c`, or `temperature_c`; host labels are
+read from `hostname`, `name`, `device`, or `id`.
 
-Devices are keyed by `device_id` when present, otherwise by source IP and
-hostname. Devices older than `remote_temp_monitor.max_device_age` are removed
-from the page.
+Devices are keyed by `device_id` when present, then `id`, otherwise by endpoint
+and hostname. Devices older than `remote_temp_monitor.max_device_age` are
+removed from the page.
 
 ## Troubleshooting
 
@@ -175,8 +176,8 @@ from the page.
   user, or confirm key-based SSH is still valid if `.env` omits the password.
 - **SMB shows unavailable**: install Samba tools on the remote server and allow
   the remote user to run `smbstatus` if root privileges are required.
-- **No remote temperatures**: check UDP reachability, port configuration, packet
-  age, and the shared secret on both broadcaster and PiNOC.
+- **No remote temperatures**: check that `remote_temp_monitor.endpoint` is
+  reachable from the display Pi and returns fresh JSON temperature data.
 
 ## Development checks
 

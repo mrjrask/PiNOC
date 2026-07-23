@@ -21,8 +21,10 @@
   "display_address": "0x3c",
   "remote_temp_monitor": {
     "enabled": true,
-    "port": 9876,
-    "max_device_age": 30,
+    "endpoint": "http://mirror.local/temps",
+    "poll_seconds": 10,
+    "timeout_seconds": 3,
+    "max_device_age": 60,
     "shared_secret": ""
   }
 }
