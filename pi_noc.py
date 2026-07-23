@@ -2149,8 +2149,11 @@ class DeskNOC:
             now = time.monotonic()
 
             for name in released:
-                self.pending_pim_clicks[name] = self.pending_pim_clicks.get(name, 0) + 1
+                self.pending_pim_clicks[name] = (
+                    self.pending_pim_clicks.get(name, 0) + 1
+                )
                 self.last_pim_click[name] = now
+                self.last_page_change = now
 
             for name, count in list(self.pending_pim_clicks.items()):
                 if now - self.last_pim_click.get(name, now) >= 0.35:
