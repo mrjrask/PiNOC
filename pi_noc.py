@@ -77,8 +77,12 @@ DISPLAY_ADA_BONNET = "ADA_BONNET"
 DISPLAY_PIM_DHM = "PIM_DHM"
 DISPLAY_TYPES = (DISPLAY_ADA_BONNET, DISPLAY_PIM_DHM)
 
-WIDTH = 128
-HEIGHT = 64
+ADA_WIDTH = 128
+ADA_HEIGHT = 64
+PIM_WIDTH = 320
+PIM_HEIGHT = 240
+WIDTH = ADA_WIDTH
+HEIGHT = ADA_HEIGHT
 PAGE_NAMES = [
     "SUMMARY",
     "VPN",
@@ -276,6 +280,10 @@ def load_display_type() -> str:
 
 
 DISPLAY_TYPE = load_display_type()
+
+if DISPLAY_TYPE == DISPLAY_PIM_DHM:
+    WIDTH = PIM_WIDTH
+    HEIGHT = PIM_HEIGHT
 
 
 # ---------------------------------------------------------------------------
@@ -1044,14 +1052,28 @@ def load_font(
     return ImageFont.load_default()
 
 
-FONT_SMALL = load_font(FONT_PATHS, 9)
-FONT_NORMAL = load_font(FONT_PATHS, 10)
-FONT_BOLD = load_font(BOLD_FONT_PATHS, 10)
-FONT_ALERT = load_font(BOLD_FONT_PATHS, 13)
+FONT_SMALL = load_font(FONT_PATHS, 14 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 9)
+FONT_NORMAL = load_font(FONT_PATHS, 18 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 10)
+FONT_BOLD = load_font(BOLD_FONT_PATHS, 20 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 10)
+FONT_ALERT = load_font(BOLD_FONT_PATHS, 28 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 13)
 
-ROW_Y_VALUES = [15, 27, 39, 51]
+ROW_Y_VALUES = (
+    [50, 78, 106, 134, 162, 190]
+    if DISPLAY_TYPE == DISPLAY_PIM_DHM
+    else [15, 27, 39, 51]
+)
 VISIBLE_DATA_ROWS = len(ROW_Y_VALUES)
 ScreenRow = Tuple[str, str, ImageFont.ImageFont]
+
+COLOR_BG = (8, 12, 18) if DISPLAY_TYPE == DISPLAY_PIM_DHM else 0
+COLOR_PANEL = (18, 26, 38) if DISPLAY_TYPE == DISPLAY_PIM_DHM else 0
+COLOR_TEXT = (235, 244, 255) if DISPLAY_TYPE == DISPLAY_PIM_DHM else 255
+COLOR_MUTED = (155, 170, 190) if DISPLAY_TYPE == DISPLAY_PIM_DHM else 255
+COLOR_ACCENT = (77, 171, 247) if DISPLAY_TYPE == DISPLAY_PIM_DHM else 255
+COLOR_OK = (81, 207, 102) if DISPLAY_TYPE == DISPLAY_PIM_DHM else 255
+COLOR_WARN = (255, 212, 59) if DISPLAY_TYPE == DISPLAY_PIM_DHM else 255
+COLOR_BAD = (255, 107, 107) if DISPLAY_TYPE == DISPLAY_PIM_DHM else 255
+COLOR_INVERT_TEXT = (8, 12, 18) if DISPLAY_TYPE == DISPLAY_PIM_DHM else 0
 
 
 def text_width(
@@ -1099,10 +1121,10 @@ def draw_header(
     status_ok: Optional[bool] = None,
 ) -> None:
     draw.text(
-        (1, 0),
+        ((10, 8) if DISPLAY_TYPE == DISPLAY_PIM_DHM else (1, 0)),
         title,
         font=FONT_BOLD,
-        fill=255,
+        fill=COLOR_TEXT,
     )
 
     page_text = (
@@ -1115,33 +1137,35 @@ def draw_header(
             page_text,
             FONT_SMALL,
         )
-        - 1
+        - (10 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 1)
     )
 
     draw.text(
-        (page_x, 1),
+        (page_x, 11 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 1),
         page_text,
         font=FONT_SMALL,
-        fill=255,
+        fill=COLOR_MUTED,
     )
 
     if status_ok is not None:
-        circle_x = page_x - 8
+        circle_x = page_x - (18 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 8)
+        circle_y = 15 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 3
+        circle_size = 8 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 4
 
         draw.ellipse(
             (
                 circle_x,
-                3,
-                circle_x + 4,
-                7,
+                circle_y,
+                circle_x + circle_size,
+                circle_y + circle_size,
             ),
-            outline=255,
-            fill=255 if status_ok else 0,
+            outline=COLOR_OK if status_ok else COLOR_BAD,
+            fill=COLOR_OK if status_ok else COLOR_BG,
         )
 
     draw.line(
-        (0, 12, WIDTH - 1, 12),
-        fill=255,
+        (0, 40 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 12, WIDTH - 1, 40 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 12),
+        fill=COLOR_ACCENT,
     )
 
 
@@ -1162,11 +1186,11 @@ def draw_two_column_line(
     left_width = (
         WIDTH
         - right_width
-        - (5 if right else 2)
+        - (36 if DISPLAY_TYPE == DISPLAY_PIM_DHM and right else 24 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 5 if right else 2)
     )
 
     draw.text(
-        (1, y),
+        ((12, y) if DISPLAY_TYPE == DISPLAY_PIM_DHM else (1, y)),
         fit_text(
             draw,
             left,
@@ -1174,7 +1198,7 @@ def draw_two_column_line(
             font,
         ),
         font=font,
-        fill=255,
+        fill=COLOR_TEXT,
     )
 
     if right:
@@ -1182,12 +1206,12 @@ def draw_two_column_line(
             (
                 WIDTH
                 - right_width
-                - 1,
+                - (12 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 1),
                 y,
             ),
             right,
             font=font,
-            fill=255,
+            fill=COLOR_MUTED,
         )
 
 
@@ -1528,12 +1552,16 @@ def draw_vpn_warning(
     flash_on: bool,
     restart_message: str,
 ) -> None:
-    fill = 255 if flash_on else 0
-    text_fill = 0 if flash_on else 255
+    if DISPLAY_TYPE == DISPLAY_PIM_DHM:
+        fill = COLOR_BAD if flash_on else COLOR_BG
+        text_fill = COLOR_INVERT_TEXT if flash_on else COLOR_BAD
+    else:
+        fill = 255 if flash_on else 0
+        text_fill = 0 if flash_on else 255
 
     draw.rectangle(
         (0, 0, WIDTH - 1, HEIGHT - 1),
-        outline=255,
+        outline=COLOR_BAD if DISPLAY_TYPE == DISPLAY_PIM_DHM else 255,
         fill=fill,
     )
 
@@ -1558,7 +1586,7 @@ def draw_vpn_warning(
     )
 
     draw.text(
-        (title_x, 6),
+        (title_x, 62 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 6),
         title,
         font=FONT_ALERT,
         fill=text_fill,
@@ -1593,7 +1621,7 @@ def draw_vpn_warning(
     )
 
     draw.text(
-        (detail_x, 30),
+        (detail_x, 104 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 30),
         detail,
         font=FONT_SMALL,
         fill=text_fill,
@@ -1614,7 +1642,7 @@ def draw_vpn_warning(
     )
 
     draw.text(
-        (action_x, 47),
+        (action_x, 166 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 47),
         action,
         font=FONT_SMALL,
         fill=text_fill,
@@ -1652,8 +1680,8 @@ class AdafruitOLEDDisplay(DisplayDevice):
             0,
         )
         self.display = ssd1306_module.SSD1306_I2C(
-            WIDTH,
-            HEIGHT,
+            ADA_WIDTH,
+            ADA_HEIGHT,
             i2c,
             addr=address,
         )
@@ -1669,8 +1697,8 @@ class AdafruitOLEDDisplay(DisplayDevice):
 
 
 class PimoroniDisplayHATMiniDisplay(DisplayDevice):
-    LCD_WIDTH = 320
-    LCD_HEIGHT = 240
+    LCD_WIDTH = PIM_WIDTH
+    LCD_HEIGHT = PIM_HEIGHT
 
     def __init__(self) -> None:
         displayhatmini_module = importlib.import_module("displayhatmini")
@@ -1683,20 +1711,12 @@ class PimoroniDisplayHATMiniDisplay(DisplayDevice):
         self.display.set_led(0.0, 0.0, 0.0)
 
     def image(self, image: Image.Image) -> None:
-        scaled = image.rotate(180).convert("RGB").resize(
-            (self.LCD_WIDTH, 160),
-            Image.Resampling.NEAREST,
-        )
-        self.buffer.paste(
-            Image.new("RGB", self.buffer.size),
-            (0, 0),
-        )
-        self.buffer.paste(scaled, (0, 40))
+        self.buffer.paste(image.rotate(180).convert("RGB"), (0, 0))
 
     def fill(self, value: int) -> None:
-        fill = 255 if value else 0
+        fill = (255, 255, 255) if value else (0, 0, 0)
         self.buffer.paste(
-            Image.new("RGB", self.buffer.size, (fill, fill, fill)),
+            Image.new("RGB", self.buffer.size, fill),
             (0, 0),
         )
 
@@ -1764,10 +1784,11 @@ class Buttons:
 
     def poll(
         self,
-    ) -> Tuple[List[str], List[str]]:
+    ) -> Tuple[List[str], List[str], List[str]]:
         now = time.monotonic()
         pressed_events: List[str] = []
         hold_events: List[str] = []
+        released_events: List[str] = []
 
         for name, device in self.devices.items():
             pressed = not device.value
@@ -1777,6 +1798,9 @@ class Buttons:
                 self.press_started[name] = now
                 self.hold_fired[name] = False
                 pressed_events.append(name)
+
+            if not pressed and was_pressed and not self.hold_fired[name]:
+                released_events.append(name)
 
             if (
                 pressed
@@ -1793,7 +1817,7 @@ class Buttons:
 
             self.previous[name] = pressed
 
-        return pressed_events, hold_events
+        return pressed_events, hold_events, released_events
 
     def close(self) -> None:
         for device in self.devices.values():
@@ -1838,11 +1862,13 @@ class DeskNOC:
         self.last_refresh_started = 0.0
         self.restart_message = ""
         self.restart_message_until = 0.0
+        self.pending_pim_clicks: Dict[str, int] = {}
+        self.last_pim_click: Dict[str, float] = {}
 
         self.display = create_display()
 
         self.image = Image.new(
-            "1",
+            "RGB" if DISPLAY_TYPE == DISPLAY_PIM_DHM else "1",
             (WIDTH, HEIGHT),
         )
         self.draw = ImageDraw.Draw(
@@ -2096,45 +2122,75 @@ class DeskNOC:
         self.last_refresh_started = 0
         self.start_refresh(force=True)
 
+    def toggle_auto_rotate(self) -> None:
+        self.auto_rotate = not self.auto_rotate
+        self.restart_message = (
+            "Auto rotate ON" if self.auto_rotate else "Auto rotate OFF"
+        )
+        self.restart_message_until = time.monotonic() + 2
+
+    def refresh_now(self) -> None:
+        self.last_refresh_started = 0
+        self.start_refresh(force=True)
+
+    def handle_pimoroni_click(self, name: str, count: int) -> None:
+        if name == "A":
+            if count >= 3:
+                self.restart_vpn()
+            elif count == 2:
+                self.scroll_page(-1)
+            else:
+                self.change_page(-1)
+        elif name == "B":
+            if count >= 2:
+                self.scroll_page(1)
+            else:
+                self.change_page(1)
+        elif name == "CENTER":
+            self.refresh_now()
+        elif name == "RIGHT":
+            self.toggle_auto_rotate()
+
     def handle_buttons(self) -> None:
-        pressed, held = self.buttons.poll()
+        pressed, held, released = self.buttons.poll()
+
+        if DISPLAY_TYPE == DISPLAY_PIM_DHM:
+            now = time.monotonic()
+
+            for name in released:
+                self.pending_pim_clicks[name] = (
+                    self.pending_pim_clicks.get(name, 0) + 1
+                )
+                self.last_pim_click[name] = now
+                self.last_page_change = now
+
+            for name, count in list(self.pending_pim_clicks.items()):
+                if now - self.last_pim_click.get(name, now) >= 0.35:
+                    self.handle_pimoroni_click(name, count)
+                    self.pending_pim_clicks.pop(name, None)
+                    self.last_pim_click.pop(name, None)
+
+            if "A" in held:
+                self.pending_pim_clicks.pop("A", None)
+                self.restart_vpn()
+
+            return
 
         for name in pressed:
             name = self.display_direction(name)
 
             if name == "LEFT":
                 self.change_page(-1)
-
             elif name == "RIGHT":
                 self.change_page(1)
-
             elif name == "UP":
                 self.scroll_page(-1)
-
             elif name == "DOWN":
                 self.scroll_page(1)
-
             elif name == "CENTER":
-                self.last_refresh_started = 0
-                self.start_refresh(force=True)
-
+                self.refresh_now()
             elif name == "B":
-                self.auto_rotate = (
-                    not self.auto_rotate
-                )
-
-                if self.auto_rotate:
-                    self.restart_message = (
-                        "Auto rotate ON"
-                    )
-                else:
-                    self.restart_message = (
-                        "Auto rotate OFF"
-                    )
-
-                self.restart_message_until = (
-                    time.monotonic() + 2
-                )
+                self.toggle_auto_rotate()
 
         if "A" in held:
             self.restart_vpn()
@@ -2142,8 +2198,8 @@ class DeskNOC:
     def render(self) -> None:
         self.draw.rectangle(
             (0, 0, WIDTH - 1, HEIGHT - 1),
-            outline=0,
-            fill=0,
+            outline=COLOR_BG,
+            fill=COLOR_BG,
         )
 
         now = time.monotonic()
@@ -2185,15 +2241,19 @@ class DeskNOC:
                     WIDTH - box_width
                 ) // 2
 
+                message_y0 = 202 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 45
+                message_y1 = 228 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 61
+                text_y = 207 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 49
+
                 self.draw.rectangle(
                     (
                         x0,
-                        45,
+                        message_y0,
                         x0 + box_width,
-                        61,
+                        message_y1,
                     ),
-                    outline=255,
-                    fill=0,
+                    outline=COLOR_ACCENT,
+                    fill=COLOR_PANEL,
                 )
 
                 message = fit_text(
@@ -2204,10 +2264,10 @@ class DeskNOC:
                 )
 
                 self.draw.text(
-                    (x0 + 2, 49),
+                    (x0 + 2, text_y),
                     message,
                     font=FONT_SMALL,
-                    fill=255,
+                    fill=COLOR_TEXT,
                 )
 
         self.display.image(self.image)
