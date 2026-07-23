@@ -71,6 +71,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_device_age": 60,
         "shared_secret": "",
     },
+    "inside_sensor": {
+        "enabled": True,
+        "type": "auto",
+        "i2c_addresses": ["0x76", "0x77", "0x44", "0x45"],
+    },
 }
 
 DISPLAY_ADA_BONNET = "ADA_BONNET"
@@ -92,6 +97,7 @@ PAGE_NAMES = [
     "SMB",
     "TEMPS",
     "LOCAL",
+    "SENSORS",
     "NETWORK",
 ]
 
@@ -170,6 +176,17 @@ class TempDevice:
 
 
 @dataclass
+class SensorStatus:
+    name: str = ""
+    found: bool = False
+    temperature_c: Optional[float] = None
+    humidity: Optional[float] = None
+    pressure_hpa: Optional[float] = None
+    gas_ohms: Optional[float] = None
+    error: str = ""
+
+
+@dataclass
 class LocalStatus:
     hostname: str = ""
     temperature_c: Optional[float] = None
@@ -186,6 +203,7 @@ class Snapshot:
     vpn: VPNStatus
     remote: RemoteStatus
     local: LocalStatus
+    sensor: SensorStatus = field(default_factory=SensorStatus)
     temp_devices: List[TempDevice] = field(default_factory=list)
 
 
@@ -923,6 +941,77 @@ def parse_temp_monitor_response(
     return devices
 
 
+def create_i2c_bus() -> Any:
+    busio_module = importlib.import_module("busio")
+    return busio_module.I2C(board.SCL, board.SDA)
+
+
+def configured_i2c_addresses() -> List[int]:
+    addresses = CONFIG.get("inside_sensor", {}).get(
+        "i2c_addresses",
+        ["0x76", "0x77", "0x44", "0x45"],
+    )
+    parsed: List[int] = []
+    for address in addresses:
+        try:
+            parsed.append(int(str(address), 0))
+        except (TypeError, ValueError):
+            continue
+    return parsed
+
+
+def collect_inside_sensor_status() -> SensorStatus:
+    sensor_config = CONFIG.get("inside_sensor", {})
+    if not sensor_config.get("enabled", True):
+        return SensorStatus(error="Disabled")
+
+    requested_type = str(sensor_config.get("type", "auto")).lower()
+    addresses = configured_i2c_addresses()
+    errors: List[str] = []
+
+    try:
+        i2c = create_i2c_bus()
+    except Exception as exc:
+        return SensorStatus(error=f"I2C unavailable: {exc}"[:100])
+
+    probes = []
+    if requested_type in ("auto", "bme280"):
+        probes.append(("BME280", "adafruit_bme280.basic", "Adafruit_BME280_I2C"))
+    if requested_type in ("auto", "bme680", "bme688"):
+        probes.append(("BME680/BME688", "adafruit_bme680", "Adafruit_BME680_I2C"))
+    if requested_type in ("auto", "sht4x", "sht40", "sht41", "sht45"):
+        probes.append(("SHT4x", "adafruit_sht4x", "SHT4x"))
+
+    for label, module_name, class_name in probes:
+        try:
+            module = importlib.import_module(module_name)
+            sensor_class = getattr(module, class_name)
+        except (ImportError, AttributeError) as exc:
+            errors.append(f"{label} library: {exc}")
+            continue
+
+        for address in addresses:
+            try:
+                sensor = sensor_class(i2c, address=address)
+                status = SensorStatus(name=f"{label} 0x{address:02x}", found=True)
+                status.temperature_c = float(sensor.temperature)
+                if hasattr(sensor, "relative_humidity"):
+                    status.humidity = float(sensor.relative_humidity)
+                elif hasattr(sensor, "humidity"):
+                    status.humidity = float(sensor.humidity)
+                if hasattr(sensor, "pressure"):
+                    status.pressure_hpa = float(sensor.pressure)
+                if hasattr(sensor, "gas"):
+                    gas_value = sensor.gas
+                    if gas_value is not None:
+                        status.gas_ohms = float(gas_value)
+                return status
+            except Exception as exc:
+                errors.append(f"{label} 0x{address:02x}: {exc}")
+
+    return SensorStatus(error=("; ".join(errors) or "No supported sensor found")[:100])
+
+
 def collect_local_status() -> LocalStatus:
     status = LocalStatus(
         hostname=socket.gethostname()
@@ -1021,6 +1110,7 @@ def collect_local_status() -> LocalStatus:
 def collect_snapshot() -> Snapshot:
     vpn = collect_vpn_status()
     local = collect_local_status()
+    sensor = collect_inside_sensor_status()
     remote = collect_remote_status(
         vpn.connected
     )
@@ -1030,6 +1120,7 @@ def collect_snapshot() -> Snapshot:
         vpn=vpn,
         remote=remote,
         local=local,
+        sensor=sensor,
         temp_devices=[],
     )
 
@@ -1348,6 +1439,9 @@ def build_summary_rows(snapshot: Snapshot) -> List[ScreenRow]:
         hottest = max(snapshot.temp_devices, key=lambda device: device.celsius)
         rows.append(("Hot sensor", f"{hottest.hostname} {hottest.celsius:.1f}C", FONT_SMALL))
 
+    if snapshot.sensor.found and snapshot.sensor.temperature_c is not None:
+        rows.append(("Inside", f"{snapshot.sensor.temperature_c:.1f}C", FONT_SMALL))
+
     if snapshot.local.wlan_ip:
         rows.append(("Desk IP", snapshot.local.wlan_ip, FONT_SMALL))
 
@@ -1471,6 +1565,28 @@ def build_local_rows(snapshot: Snapshot) -> List[ScreenRow]:
     ]
 
 
+def build_sensor_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    sensor = snapshot.sensor
+    if not sensor.found:
+        return [
+            ("No sensor found", "", FONT_NORMAL),
+            ("Configured", str(CONFIG.get("inside_sensor", {}).get("type", "auto")), FONT_SMALL),
+            ("Addresses", ", ".join(f"0x{address:02x}" for address in configured_i2c_addresses()), FONT_SMALL),
+            ("Error", sensor.error or "N/A", FONT_SMALL),
+        ]
+
+    rows: List[ScreenRow] = [("Sensor", sensor.name, FONT_NORMAL)]
+    if sensor.temperature_c is not None:
+        rows.append(("Temperature", f"{sensor.temperature_c:.1f}C", FONT_NORMAL))
+    if sensor.humidity is not None:
+        rows.append(("Humidity", f"{sensor.humidity:.0f}%", FONT_NORMAL))
+    if sensor.pressure_hpa is not None:
+        rows.append(("Pressure", f"{sensor.pressure_hpa:.1f} hPa", FONT_NORMAL))
+    if sensor.gas_ohms is not None:
+        rows.append(("Gas", f"{sensor.gas_ohms:.0f} ohm", FONT_NORMAL))
+    return rows
+
+
 def build_network_rows(snapshot: Snapshot) -> List[ScreenRow]:
     return [
         ("Desk Wi-Fi", snapshot.local.wlan_ip or "No IP", FONT_NORMAL),
@@ -1491,6 +1607,7 @@ PAGE_ROW_BUILDERS = [
     build_smb_rows,
     build_remote_temp_rows,
     build_local_rows,
+    build_sensor_rows,
     build_network_rows,
 ]
 
@@ -1539,6 +1656,10 @@ def draw_local(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_
     draw_page_from_rows(draw, snapshot, page, "DESK PI", True, scroll_offset)
 
 
+def draw_sensors(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    draw_page_from_rows(draw, snapshot, page, "SENSORS", snapshot.sensor.found, scroll_offset)
+
+
 def draw_network(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
     draw_page_from_rows(draw, snapshot, page, "NETWORK", bool(snapshot.local.wlan_ip), scroll_offset)
 
@@ -1552,6 +1673,7 @@ PAGE_DRAWERS = [
     draw_smb,
     draw_remote_temps,
     draw_local,
+    draw_sensors,
     draw_network,
 ]
 
@@ -1878,6 +2000,7 @@ class DeskNOC:
                 error="Starting"
             ),
             local=collect_local_status(),
+            sensor=SensorStatus(error="Starting"),
             temp_devices=[],
         )
 

@@ -21,3 +21,6 @@ Adafruit-Blinka
 adafruit-circuitpython-ssd1306
 Pillow
 displayhatmini
+adafruit-circuitpython-bme280
+adafruit-circuitpython-bme680
+adafruit-circuitpython-sht4x
