@@ -22,7 +22,7 @@ def install_import_stubs():
 
 install_import_stubs()
 
-from pi_noc import parse_raid
+from pi_noc import normalize_raid_device, parse_raid
 
 
 MDSTAT = """Personalities : [raid1]
@@ -34,6 +34,12 @@ unused devices: <none>
 
 
 class ParseRaidTest(unittest.TestCase):
+
+    def test_normalize_raid_device_without_removeprefix(self):
+        self.assertEqual(normalize_raid_device(" /dev/md0 "), "md0")
+        self.assertEqual(normalize_raid_device("dev/md0"), "md0")
+        self.assertEqual(normalize_raid_device("md0"), "md0")
+
     def test_accepts_bare_md_device_name(self):
         self.assertEqual(parse_raid(MDSTAT, "md0"), ("CLEAN", "UU"))
 
