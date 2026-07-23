@@ -79,7 +79,17 @@ DISPLAY_TYPES = (DISPLAY_ADA_BONNET, DISPLAY_PIM_DHM)
 
 WIDTH = 128
 HEIGHT = 64
-PAGE_NAMES = ["SUMMARY", "VPN", "STORAGE", "SERVER", "SMB", "TEMPS", "LOCAL"]
+PAGE_NAMES = [
+    "SUMMARY",
+    "VPN",
+    "RAID",
+    "STORAGE",
+    "SERVER",
+    "SMB",
+    "TEMPS",
+    "LOCAL",
+    "NETWORK",
+]
 
 FONT_PATHS = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -1020,6 +1030,10 @@ FONT_NORMAL = load_font(FONT_PATHS, 10)
 FONT_BOLD = load_font(BOLD_FONT_PATHS, 10)
 FONT_ALERT = load_font(BOLD_FONT_PATHS, 13)
 
+ROW_Y_VALUES = [15, 27, 39, 51]
+VISIBLE_DATA_ROWS = len(ROW_Y_VALUES)
+ScreenRow = Tuple[str, str, ImageFont.ImageFont]
+
 
 def text_width(
     draw: ImageDraw.ImageDraw,
@@ -1210,182 +1224,16 @@ def format_duration(
     return f"{secs}s"
 
 
-def draw_summary(
+def draw_rows(
     draw: ImageDraw.ImageDraw,
-    snapshot: Snapshot,
-    page: int,
+    rows: Sequence[ScreenRow],
     scroll_offset: int = 0,
 ) -> None:
-    draw_header(
-        draw,
-        "DESK NOC",
-        page,
-        snapshot.vpn.connected,
-    )
+    visible_rows = rows[
+        scroll_offset:scroll_offset + VISIBLE_DATA_ROWS
+    ]
 
-    vpn_text = (
-        "OK"
-        if snapshot.vpn.connected
-        else "DOWN"
-    )
-
-    draw_two_column_line(
-        draw,
-        15,
-        "VPN",
-        (
-            f"{vpn_text} "
-            f"{format_duration(snapshot.vpn.handshake_age)}"
-        ),
-    )
-
-    remote_text = (
-        "ONLINE"
-        if snapshot.remote.online
-        else "OFFLINE"
-    )
-
-    temp_text = (
-        f" {snapshot.remote.temperature_c:.0f}C"
-        if snapshot.remote.temperature_c
-        is not None
-        else ""
-    )
-
-    draw_two_column_line(
-        draw,
-        27,
-        "CM5",
-        remote_text + temp_text,
-    )
-
-    raid = (
-        snapshot.remote.raid_status
-        if snapshot.remote.online
-        else "UNKNOWN"
-    )
-
-    draw_two_column_line(
-        draw,
-        39,
-        "RAID",
-        raid,
-    )
-
-    if snapshot.remote.smb_sessions is None:
-        smb_right = "N/A"
-    else:
-        smb_right = str(
-            snapshot.remote.smb_sessions
-        )
-
-    draw_two_column_line(
-        draw,
-        51,
-        "SMB sessions",
-        smb_right,
-    )
-
-
-def draw_vpn(
-    draw: ImageDraw.ImageDraw,
-    snapshot: Snapshot,
-    page: int,
-    scroll_offset: int = 0,
-) -> None:
-    vpn = snapshot.vpn
-
-    draw_header(
-        draw,
-        "WIREGUARD",
-        page,
-        vpn.connected,
-    )
-
-    draw_two_column_line(
-        draw,
-        15,
-        "Service",
-        (
-            "ACTIVE"
-            if vpn.service_active
-            else "DOWN"
-        ),
-    )
-
-    draw_two_column_line(
-        draw,
-        27,
-        "Handshake",
-        format_duration(
-            vpn.handshake_age,
-            compact=False,
-        ),
-    )
-
-    draw_two_column_line(
-        draw,
-        39,
-        "RX / TX",
-        (
-            f"{format_bytes(vpn.rx_bytes)} / "
-            f"{format_bytes(vpn.tx_bytes)}"
-        ),
-    )
-
-    if (
-        vpn.full_tunnel_v4
-        and vpn.full_tunnel_v6
-    ):
-        tunnel = "IPv4+IPv6"
-    elif vpn.full_tunnel_v4:
-        tunnel = "IPv4"
-    else:
-        tunnel = "NO"
-
-    draw_two_column_line(
-        draw,
-        51,
-        "Full tunnel",
-        tunnel,
-    )
-
-
-def draw_storage(
-    draw: ImageDraw.ImageDraw,
-    snapshot: Snapshot,
-    page: int,
-    scroll_offset: int = 0,
-) -> None:
-    draw_header(
-        draw,
-        "STORAGE",
-        page,
-        snapshot.remote.online,
-    )
-
-    rows: List[Tuple[str, str, ImageFont.ImageFont]] = []
-
-    for disk in snapshot.remote.disks:
-        if disk.error:
-            rows.append((disk.name, "ERROR", FONT_NORMAL))
-            rows.append((disk.path, "", FONT_NORMAL))
-            continue
-
-        rows.append((disk.name, f"{disk.percent}% used", FONT_NORMAL))
-        rows.append((
-            f"Free {format_bytes(disk.available)}",
-            f"Total {format_bytes(disk.total)}",
-            FONT_SMALL,
-        ))
-
-    if not rows:
-        rows.append(("No disk data", "", FONT_NORMAL))
-
-    y_values = [15, 27, 39, 51]
-    visible_rows = rows[scroll_offset:scroll_offset + len(y_values)]
-
-    for y, (left, right, font) in zip(y_values, visible_rows):
+    for y, (left, right, font) in zip(ROW_Y_VALUES, visible_rows):
         draw_two_column_line(
             draw,
             y,
@@ -1395,279 +1243,241 @@ def draw_storage(
         )
 
 
-def draw_server(
-    draw: ImageDraw.ImageDraw,
-    snapshot: Snapshot,
-    page: int,
-    scroll_offset: int = 0,
-) -> None:
-    remote = snapshot.remote
-
-    draw_header(
-        draw,
-        "CM5 SERVER",
-        page,
-        remote.online,
+def build_summary_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    vpn_text = "OK" if snapshot.vpn.connected else "DOWN"
+    remote_text = "ONLINE" if snapshot.remote.online else "OFFLINE"
+    temp_text = (
+        f" {snapshot.remote.temperature_c:.0f}C"
+        if snapshot.remote.temperature_c is not None
+        else ""
     )
+    raid = snapshot.remote.raid_status if snapshot.remote.online else "UNKNOWN"
+    smb_right = "N/A" if snapshot.remote.smb_sessions is None else str(snapshot.remote.smb_sessions)
 
-    draw_two_column_line(
-        draw,
-        15,
-        "Status",
-        (
-            "ONLINE"
-            if remote.online
-            else "OFFLINE"
-        ),
-    )
+    rows: List[ScreenRow] = [
+        ("VPN", f"{vpn_text} {format_duration(snapshot.vpn.handshake_age)}", FONT_NORMAL),
+        ("CM5", remote_text + temp_text, FONT_NORMAL),
+        ("RAID", raid, FONT_NORMAL),
+        ("SMB sessions", smb_right, FONT_NORMAL),
+    ]
 
-    temp = (
-        f"{remote.temperature_c:.1f}C"
-        if remote.temperature_c is not None
-        else "N/A"
-    )
+    for disk in snapshot.remote.disks:
+        if disk.error:
+            rows.append((disk.name, "ERROR", FONT_SMALL))
+        else:
+            rows.append((disk.name, f"{disk.percent}% used", FONT_SMALL))
 
-    draw_two_column_line(
-        draw,
-        27,
-        "Temperature",
-        temp,
-    )
+    if snapshot.temp_devices:
+        hottest = max(snapshot.temp_devices, key=lambda device: device.celsius)
+        rows.append(("Hot sensor", f"{hottest.hostname} {hottest.celsius:.1f}C", FONT_SMALL))
 
-    load = (
-        f"{remote.load_1m:.2f}"
-        if remote.load_1m is not None
-        else "N/A"
-    )
+    if snapshot.local.wlan_ip:
+        rows.append(("Desk IP", snapshot.local.wlan_ip, FONT_SMALL))
 
-    draw_two_column_line(
-        draw,
-        39,
-        "Load 1m",
-        load,
-    )
-
-    draw_two_column_line(
-        draw,
-        51,
-        "Uptime",
-        format_duration(
-            remote.uptime_seconds
-        ),
-    )
+    return rows
 
 
-def draw_smb(
-    draw: ImageDraw.ImageDraw,
-    snapshot: Snapshot,
-    page: int,
-    scroll_offset: int = 0,
-) -> None:
-    remote = snapshot.remote
-
-    draw_header(
-        draw,
-        "SAMBA",
-        page,
-        (
-            remote.online
-            and remote.smb_sessions is not None
-        ),
-    )
-
-    sessions = (
-        "N/A"
-        if remote.smb_sessions is None
-        else str(remote.smb_sessions)
-    )
-
-    draw_two_column_line(
-        draw,
-        15,
-        "Sessions",
-        sessions,
-    )
-
-    users = (
-        ", ".join(remote.smb_users)
-        if remote.smb_users
-        else "None"
-    )
-
-    draw_two_column_line(
-        draw,
-        27,
-        "Users",
-        users,
-    )
-
-    draw_two_column_line(
-        draw,
-        39,
-        "Share host",
-        str(CONFIG["remote_host"]),
-    )
-
-    detail = (
-        remote.smb_error
-        if remote.smb_error
-        else "Live smbstatus"
-    )
-
-    draw_two_column_line(
-        draw,
-        51,
-        detail,
-        "",
-        font=FONT_SMALL,
-    )
-
-
-def draw_remote_temps(
-    draw: ImageDraw.ImageDraw,
-    snapshot: Snapshot,
-    page: int,
-    scroll_offset: int = 0,
-) -> None:
-    devices = sorted(
-        snapshot.temp_devices,
-        key=lambda device: device.celsius,
-        reverse=True,
-    )
-
-    draw_header(
-        draw,
-        "REMOTE TEMPS",
-        page,
-        bool(devices),
-    )
-
-    if not devices:
-        draw_two_column_line(
-            draw,
-            15,
-            "No monitors found",
-            "",
-        )
-        endpoint = str(
-            CONFIG["remote_temp_monitor"].get(
-                "endpoint",
-                "http://192.168.1.201:9877/temps",
-            )
-        )
-        draw_two_column_line(
-            draw,
-            27,
-            "Endpoint",
-            endpoint.replace("http://", ""),
-        )
-        return
-
-    y_values = [15, 27, 39, 51]
-    visible_devices = devices[scroll_offset:scroll_offset + len(y_values)]
-
-    for y, device in zip(y_values, visible_devices):
-        age = format_duration(
-            int(time.time() - device.last_seen)
-        )
-        draw_two_column_line(
-            draw,
-            y,
-            device.hostname,
-            f"{device.celsius:.1f}C {age}",
-        )
-
-
-def draw_local(
-    draw: ImageDraw.ImageDraw,
-    snapshot: Snapshot,
-    page: int,
-    scroll_offset: int = 0,
-) -> None:
-    local = snapshot.local
-
-    draw_header(
-        draw,
-        "DESK PI",
-        page,
-        True,
-    )
-
-    draw_two_column_line(
-        draw,
-        14,
-        local.hostname,
-        local.wlan_ip or "No Wi-Fi IP",
-        font=FONT_SMALL,
-    )
-
-    temp = (
-        f"{local.temperature_c:.1f}C"
-        if local.temperature_c is not None
-        else "N/A"
-    )
-
-    load = (
-        f"{local.load_1m:.2f}"
-        if local.load_1m is not None
-        else "N/A"
-    )
-
-    draw_two_column_line(
-        draw,
-        24,
-        "Temp",
-        temp,
-        font=FONT_SMALL,
-    )
-
-    draw_two_column_line(
-        draw,
-        34,
-        "Load",
-        load,
-        font=FONT_SMALL,
-    )
-
-    if local.memory_total:
-        mem_percent = int(
-            100
-            * local.memory_used
-            / local.memory_total
-        )
+def build_vpn_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    vpn = snapshot.vpn
+    if vpn.full_tunnel_v4 and vpn.full_tunnel_v6:
+        tunnel = "IPv4+IPv6"
+    elif vpn.full_tunnel_v4:
+        tunnel = "IPv4"
     else:
-        mem_percent = 0
+        tunnel = "NO"
 
-    draw_two_column_line(
-        draw,
-        44,
-        "Memory",
-        (
-            f"{mem_percent}% "
-            f"{format_bytes(local.memory_used)}"
-        ),
-        font=FONT_SMALL,
-    )
+    return [
+        ("Service", "ACTIVE" if vpn.service_active else "DOWN", FONT_NORMAL),
+        ("Handshake", format_duration(vpn.handshake_age, compact=False), FONT_NORMAL),
+        ("RX / TX", f"{format_bytes(vpn.rx_bytes)} / {format_bytes(vpn.tx_bytes)}", FONT_NORMAL),
+        ("Full tunnel", tunnel, FONT_NORMAL),
+        ("Interface", "PRESENT" if vpn.interface_present else "MISSING", FONT_SMALL),
+        ("Endpoint", vpn.endpoint or "N/A", FONT_SMALL),
+        ("Address", vpn.tunnel_addresses or "N/A", FONT_SMALL),
+        ("Error", vpn.error or "None", FONT_SMALL),
+    ]
 
-    draw_two_column_line(
-        draw,
-        52,
-        "Uptime",
-        format_duration(
-            local.uptime_seconds
-        ),
-        font=FONT_SMALL,
-    )
+
+def build_raid_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    remote = snapshot.remote
+    rows: List[ScreenRow] = [
+        ("Status", remote.raid_status if remote.online else "UNKNOWN", FONT_NORMAL),
+        ("Detail", remote.raid_detail or "N/A", FONT_NORMAL),
+        ("Device", f"/dev/{CONFIG['raid_device']}", FONT_NORMAL),
+        ("CM5", "ONLINE" if remote.online else "OFFLINE", FONT_NORMAL),
+    ]
+    if remote.error:
+        rows.append(("Remote error", remote.error, FONT_SMALL))
+    return rows
+
+
+def build_storage_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    rows: List[ScreenRow] = []
+
+    for disk in sorted(snapshot.remote.disks, key=lambda item: item.percent, reverse=True):
+        if disk.error:
+            rows.append((disk.name, "ERROR", FONT_NORMAL))
+            rows.append((disk.path, disk.error, FONT_SMALL))
+            continue
+
+        rows.append((disk.name, f"{disk.percent}% used", FONT_NORMAL))
+        rows.append((f"Free {format_bytes(disk.available)}", f"Total {format_bytes(disk.total)}", FONT_SMALL))
+        rows.append(("Path", disk.path, FONT_SMALL))
+
+    if not rows:
+        rows.append(("No disk data", "", FONT_NORMAL))
+
+    return rows
+
+
+def build_server_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    remote = snapshot.remote
+    temp = f"{remote.temperature_c:.1f}C" if remote.temperature_c is not None else "N/A"
+    load = f"{remote.load_1m:.2f}" if remote.load_1m is not None else "N/A"
+    rows: List[ScreenRow] = [
+        ("Status", "ONLINE" if remote.online else "OFFLINE", FONT_NORMAL),
+        ("Temperature", temp, FONT_NORMAL),
+        ("Load 1m", load, FONT_NORMAL),
+        ("Uptime", format_duration(remote.uptime_seconds), FONT_NORMAL),
+    ]
+    if remote.error:
+        rows.append(("Error", remote.error, FONT_SMALL))
+    rows.extend(build_raid_rows(snapshot)[:3])
+    return rows
+
+
+def build_smb_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    remote = snapshot.remote
+    sessions = "N/A" if remote.smb_sessions is None else str(remote.smb_sessions)
+    users = ", ".join(remote.smb_users) if remote.smb_users else "None"
+    detail = remote.smb_error if remote.smb_error else "Live smbstatus"
+    rows: List[ScreenRow] = [
+        ("Sessions", sessions, FONT_NORMAL),
+        ("Users", users, FONT_NORMAL),
+        ("Share host", str(CONFIG["remote_host"]), FONT_NORMAL),
+        ("Status", detail, FONT_SMALL),
+    ]
+    for user_name in remote.smb_users:
+        rows.append(("User", user_name, FONT_SMALL))
+    return rows
+
+
+def build_remote_temp_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    devices = sorted(snapshot.temp_devices, key=lambda device: device.celsius, reverse=True)
+    if not devices:
+        endpoint = str(CONFIG["remote_temp_monitor"].get("endpoint", "http://192.168.1.201:9876/temps"))
+        return [
+            ("No monitors found", "", FONT_NORMAL),
+            ("Endpoint", endpoint.replace("http://", ""), FONT_SMALL),
+        ]
+
+    rows: List[ScreenRow] = []
+    for device in devices:
+        age = format_duration(int(time.time() - device.last_seen))
+        rows.append((device.hostname, f"{device.celsius:.1f}C {age}", FONT_NORMAL))
+        if device.ip:
+            rows.append(("IP", device.ip, FONT_SMALL))
+    return rows
+
+
+def build_local_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    local = snapshot.local
+    temp = f"{local.temperature_c:.1f}C" if local.temperature_c is not None else "N/A"
+    load = f"{local.load_1m:.2f}" if local.load_1m is not None else "N/A"
+    mem_percent = int(100 * local.memory_used / local.memory_total) if local.memory_total else 0
+    return [
+        ("Hostname", local.hostname, FONT_NORMAL),
+        ("Wi-Fi IP", local.wlan_ip or "No Wi-Fi IP", FONT_NORMAL),
+        ("Temp", temp, FONT_NORMAL),
+        ("Load", load, FONT_NORMAL),
+        ("Memory", f"{mem_percent}% {format_bytes(local.memory_used)}", FONT_SMALL),
+        ("Mem total", format_bytes(local.memory_total), FONT_SMALL),
+        ("Uptime", format_duration(local.uptime_seconds), FONT_SMALL),
+    ]
+
+
+def build_network_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    return [
+        ("Desk Wi-Fi", snapshot.local.wlan_ip or "No IP", FONT_NORMAL),
+        ("CM5 host", str(CONFIG["remote_host"]), FONT_NORMAL),
+        ("SSH", f"{CONFIG['remote_user']}:{CONFIG['remote_ssh_port']}", FONT_NORMAL),
+        ("WG endpoint", snapshot.vpn.endpoint or "N/A", FONT_NORMAL),
+        ("WG address", snapshot.vpn.tunnel_addresses or "N/A", FONT_SMALL),
+        ("Temp API", str(CONFIG["remote_temp_monitor"].get("endpoint", "N/A")).replace("http://", ""), FONT_SMALL),
+    ]
+
+
+PAGE_ROW_BUILDERS = [
+    build_summary_rows,
+    build_vpn_rows,
+    build_raid_rows,
+    build_storage_rows,
+    build_server_rows,
+    build_smb_rows,
+    build_remote_temp_rows,
+    build_local_rows,
+    build_network_rows,
+]
+
+
+def draw_page_from_rows(
+    draw: ImageDraw.ImageDraw,
+    snapshot: Snapshot,
+    page: int,
+    title: str,
+    status_ok: Optional[bool],
+    scroll_offset: int = 0,
+) -> None:
+    draw_header(draw, title, page, status_ok)
+    draw_rows(draw, PAGE_ROW_BUILDERS[page](snapshot), scroll_offset)
+
+
+def draw_summary(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    draw_page_from_rows(draw, snapshot, page, "DESK NOC", snapshot.vpn.connected, scroll_offset)
+
+
+def draw_vpn(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    draw_page_from_rows(draw, snapshot, page, "WIREGUARD", snapshot.vpn.connected, scroll_offset)
+
+
+def draw_raid(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    draw_page_from_rows(draw, snapshot, page, "RAID", snapshot.remote.online, scroll_offset)
+
+
+def draw_storage(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    draw_page_from_rows(draw, snapshot, page, "STORAGE", snapshot.remote.online, scroll_offset)
+
+
+def draw_server(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    draw_page_from_rows(draw, snapshot, page, "CM5 SERVER", snapshot.remote.online, scroll_offset)
+
+
+def draw_smb(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    draw_page_from_rows(draw, snapshot, page, "SAMBA", snapshot.remote.online and snapshot.remote.smb_sessions is not None, scroll_offset)
+
+
+def draw_remote_temps(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    draw_page_from_rows(draw, snapshot, page, "REMOTE TEMPS", bool(snapshot.temp_devices), scroll_offset)
+
+
+def draw_local(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    draw_page_from_rows(draw, snapshot, page, "DESK PI", True, scroll_offset)
+
+
+def draw_network(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    draw_page_from_rows(draw, snapshot, page, "NETWORK", bool(snapshot.local.wlan_ip), scroll_offset)
 
 
 PAGE_DRAWERS = [
     draw_summary,
     draw_vpn,
+    draw_raid,
     draw_storage,
     draw_server,
     draw_smb,
     draw_remote_temps,
     draw_local,
+    draw_network,
 ]
 
 
@@ -1675,16 +1485,10 @@ def page_row_count(
     snapshot: Snapshot,
     page: int,
 ) -> int:
-    if PAGE_DRAWERS[page] == draw_storage:
-        return max(
-            1,
-            len(snapshot.remote.disks) * 2,
-        )
-
-    if PAGE_DRAWERS[page] == draw_remote_temps:
-        return max(1, len(snapshot.temp_devices))
-
-    return 4
+    return max(
+        1,
+        len(PAGE_ROW_BUILDERS[page](snapshot)),
+    )
 
 
 def max_scroll_offset(
@@ -1693,7 +1497,7 @@ def max_scroll_offset(
 ) -> int:
     return max(
         0,
-        page_row_count(snapshot, page) - 4,
+        page_row_count(snapshot, page) - VISIBLE_DATA_ROWS,
     )
 
 
