@@ -65,7 +65,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "display_address": "0x3c",
     "remote_temp_monitor": {
         "enabled": True,
-        "endpoint": "http://192.168.1.201:9876/temps",
+        "endpoint": "http://192.168.1.201:9877/temps",
         "poll_seconds": 10,
         "timeout_seconds": 3,
         "max_device_age": 60,
@@ -1848,7 +1848,7 @@ class DeskNOC:
         self.temp_endpoint = str(
             temp_config.get(
                 "endpoint",
-                "http://192.168.1.201:9876/temps",
+                "http://192.168.1.201:9877/temps",
             )
         )
 
