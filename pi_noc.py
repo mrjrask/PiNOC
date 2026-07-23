@@ -1382,15 +1382,13 @@ def build_remote_temp_rows(snapshot: Snapshot) -> List[ScreenRow]:
         endpoint = str(CONFIG["remote_temp_monitor"].get("endpoint", "http://192.168.1.201:9876/temps"))
         return [
             ("No monitors found", "", FONT_NORMAL),
-            ("Endpoint", endpoint.replace("http://", ""), FONT_SMALL),
+            ("Looking for", endpoint, FONT_SMALL),
         ]
 
     rows: List[ScreenRow] = []
     for device in devices:
         age = format_duration(int(time.time() - device.last_seen))
         rows.append((device.hostname, f"{device.celsius:.1f}C {age}", FONT_NORMAL))
-        if device.ip:
-            rows.append(("IP", device.ip, FONT_SMALL))
     return rows
 
 
