@@ -21,7 +21,7 @@
   "display_address": "0x3c",
   "remote_temp_monitor": {
     "enabled": true,
-    "endpoint": "http://mirror.local/temps",
+    "endpoint": "http://192.168.1.201:9876/temps",
     "poll_seconds": 10,
     "timeout_seconds": 3,
     "max_device_age": 60,
