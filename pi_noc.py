@@ -468,13 +468,23 @@ def parse_raid(
     mdstat: str,
     raid_device: str,
 ) -> Tuple[str, str]:
+    normalized_device = raid_device.strip()
+
+    if normalized_device.startswith("/dev/"):
+        normalized_device = normalized_device[5:]
+    elif normalized_device.startswith("dev/"):
+        normalized_device = normalized_device[4:]
+
+    if not normalized_device:
+        return "UNKNOWN", "No RAID device configured"
+
     lines = mdstat.splitlines()
     block: List[str] = []
     collecting = False
 
     for line in lines:
         if re.match(
-            rf"^{re.escape(raid_device)}\s*:",
+            rf"^{re.escape(normalized_device)}\s*:",
             line,
         ):
             collecting = True
@@ -493,7 +503,7 @@ def parse_raid(
     if not block:
         return (
             "MISSING",
-            f"/dev/{raid_device} not in mdstat",
+            f"/dev/{normalized_device} not in mdstat",
         )
 
     text = " ".join(
