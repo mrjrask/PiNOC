@@ -1695,7 +1695,7 @@ class AdafruitOLEDDisplay(DisplayDevice):
         )
 
     def image(self, image: Image.Image) -> None:
-        self.display.image(image)
+        self.display.image(image.rotate(180))
 
     def fill(self, value: int) -> None:
         self.display.fill(value)
@@ -1719,7 +1719,7 @@ class PimoroniDisplayHATMiniDisplay(DisplayDevice):
         self.display.set_led(0.0, 0.0, 0.0)
 
     def image(self, image: Image.Image) -> None:
-        scaled = image.convert("RGB").resize(
+        scaled = image.rotate(180).convert("RGB").resize(
             (self.LCD_WIDTH, 160),
             Image.Resampling.NEAREST,
         )
