@@ -1595,9 +1595,10 @@ def draw_local(
 
     draw_two_column_line(
         draw,
-        15,
+        14,
         local.hostname,
         local.wlan_ip or "No Wi-Fi IP",
+        font=FONT_SMALL,
     )
 
     temp = (
@@ -1614,9 +1615,18 @@ def draw_local(
 
     draw_two_column_line(
         draw,
-        27,
-        "Temp / Load",
-        f"{temp} / {load}",
+        24,
+        "Temp",
+        temp,
+        font=FONT_SMALL,
+    )
+
+    draw_two_column_line(
+        draw,
+        34,
+        "Load",
+        load,
+        font=FONT_SMALL,
     )
 
     if local.memory_total:
@@ -1630,21 +1640,23 @@ def draw_local(
 
     draw_two_column_line(
         draw,
-        39,
+        44,
         "Memory",
         (
             f"{mem_percent}% "
             f"{format_bytes(local.memory_used)}"
         ),
+        font=FONT_SMALL,
     )
 
     draw_two_column_line(
         draw,
-        51,
+        52,
         "Uptime",
         format_duration(
             local.uptime_seconds
         ),
+        font=FONT_SMALL,
     )
 
 
