@@ -1229,6 +1229,10 @@ def draw_rows(
     rows: Sequence[ScreenRow],
     scroll_offset: int = 0,
 ) -> None:
+    scroll_offset = min(
+        max(0, scroll_offset),
+        max(0, len(rows) - VISIBLE_DATA_ROWS),
+    )
     visible_rows = rows[
         scroll_offset:scroll_offset + VISIBLE_DATA_ROWS
     ]
