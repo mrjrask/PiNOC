@@ -2033,6 +2033,7 @@ class DeskNOC:
         )
 
         if now_monotonic - self.last_temp_poll < poll_interval:
+            self.sync_temp_devices()
             return
 
         self.last_temp_poll = now_monotonic
@@ -2058,6 +2059,9 @@ class DeskNOC:
         ):
             self.temp_devices[device.device_id] = device
 
+        self.sync_temp_devices()
+
+    def sync_temp_devices(self) -> None:
         max_age = float(
             CONFIG.get("remote_temp_monitor", {}).get(
                 "max_device_age",
