@@ -178,7 +178,7 @@ configure_ssh_to_cm5() {
   default_host="$(json_value remote_host)"
   default_user="$(json_value remote_user)"
   default_port="$(json_value remote_ssh_port)"
-  prompt_default ssh_host "CM5 SSH host" "${default_host:-cm5}"
+  prompt_default ssh_host "CM5 SSH host" "${default_host:-192.168.1.200}"
   prompt_default ssh_user "CM5 SSH user" "${default_user:-pi}"
   prompt_default ssh_port "CM5 SSH port" "${default_port:-22}"
   key_file="$(eval echo "~${INSTALL_USER}/.ssh/id_ed25519")"
