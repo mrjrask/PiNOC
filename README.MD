@@ -18,7 +18,7 @@ temperature broadcasters.
   - Samba session count and unique users from `smbstatus` when available.
 - Local Desk Pi checks for temperature, load, uptime, memory use, and Wi-Fi IP.
 - Optional remote temperature page loaded from a single JSON endpoint such as
-  `http://192.168.1.201:9876/temps`.
+  `http://192.168.1.201:9877/temps`.
 - Joystick navigation on the Adafruit Bonnet, four-button navigation on the
   Pimoroni Display HAT Mini, and automatic page rotation.
 
@@ -68,7 +68,7 @@ Edit `config.json` before installation or service start.
 | `raid_device` | `md0` | MD RAID device name to find in `/proc/mdstat`. |
 | `display_address` | `0x3c` | I2C address for the OLED display. |
 | `remote_temp_monitor.enabled` | `true` | Enables the remote temperature endpoint poller. |
-| `remote_temp_monitor.endpoint` | `http://192.168.1.201:9876/temps` | JSON endpoint that returns all remote temperatures. |
+| `remote_temp_monitor.endpoint` | `http://192.168.1.201:9877/temps` | JSON endpoint that returns all remote temperatures. |
 | `remote_temp_monitor.poll_seconds` | `10` | Minimum seconds between endpoint requests. |
 | `remote_temp_monitor.timeout_seconds` | `3` | HTTP request timeout for the temperature endpoint. |
 | `remote_temp_monitor.max_device_age` | `60` | Hide temperature devices older than this many seconds. |
