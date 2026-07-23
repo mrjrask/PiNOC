@@ -1060,7 +1060,7 @@ FONT_ALERT = load_font(BOLD_FONT_PATHS, 28 if DISPLAY_TYPE == DISPLAY_PIM_DHM el
 ROW_Y_VALUES = (
     [50, 78, 106, 134, 162, 190]
     if DISPLAY_TYPE == DISPLAY_PIM_DHM
-    else [15, 27, 39, 51]
+    else [15, 39]
 )
 VISIBLE_DATA_ROWS = len(ROW_Y_VALUES)
 ScreenRow = Tuple[str, str, ImageFont.ImageFont]
@@ -1177,6 +1177,36 @@ def draw_two_column_line(
     *,
     font: ImageFont.ImageFont = FONT_NORMAL,
 ) -> None:
+    if DISPLAY_TYPE == DISPLAY_ADA_BONNET:
+        draw.text(
+            (1, y),
+            fit_text(
+                draw,
+                left,
+                WIDTH - 2,
+                font,
+            ),
+            font=font,
+            fill=COLOR_TEXT,
+        )
+
+        if right:
+            fitted_right = fit_text(
+                draw,
+                right,
+                WIDTH - 2,
+                font,
+            )
+            right_width = text_width(draw, fitted_right, font)
+            draw.text(
+                (WIDTH - right_width - 1, y + 12),
+                fitted_right,
+                font=font,
+                fill=COLOR_MUTED,
+            )
+
+        return
+
     right_width = (
         text_width(draw, right, font)
         if right
@@ -1186,11 +1216,11 @@ def draw_two_column_line(
     left_width = (
         WIDTH
         - right_width
-        - (36 if DISPLAY_TYPE == DISPLAY_PIM_DHM and right else 24 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 5 if right else 2)
+        - (36 if DISPLAY_TYPE == DISPLAY_PIM_DHM and right else 24)
     )
 
     draw.text(
-        ((12, y) if DISPLAY_TYPE == DISPLAY_PIM_DHM else (1, y)),
+        (12, y),
         fit_text(
             draw,
             left,
@@ -1206,7 +1236,7 @@ def draw_two_column_line(
             (
                 WIDTH
                 - right_width
-                - (12 if DISPLAY_TYPE == DISPLAY_PIM_DHM else 1),
+                - 12,
                 y,
             ),
             right,
