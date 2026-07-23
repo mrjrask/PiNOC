@@ -1550,7 +1550,7 @@ def draw_local(
 
     draw_two_column_line(
         draw,
-        54,
+        52,
         "Uptime",
         format_duration(
             local.uptime_seconds
