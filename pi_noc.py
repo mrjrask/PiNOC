@@ -63,6 +63,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     ],
     "raid_device": "md0",
     "display_address": "0x3c",
+    "vpn_optional_wifi_networks": ["wiffy", "wiffyToo"],
     "remote_temp_monitor": {
         "enabled": True,
         "endpoint": "http://192.168.1.201:9877/temps",
@@ -178,6 +179,7 @@ class LocalStatus:
     memory_used: int = 0
     memory_total: int = 0
     wlan_ip: str = ""
+    wifi_ssid: str = ""
 
 
 @dataclass
@@ -923,6 +925,27 @@ def parse_temp_monitor_response(
     return devices
 
 
+def get_vpn_optional_wifi_networks() -> List[str]:
+    networks = CONFIG.get("vpn_optional_wifi_networks", [])
+
+    if not isinstance(networks, list):
+        return []
+
+    return [
+        str(network)
+        for network in networks
+        if str(network)
+    ]
+
+
+def vpn_required(local: LocalStatus) -> bool:
+    return local.wifi_ssid not in get_vpn_optional_wifi_networks()
+
+
+def network_available(snapshot: Snapshot) -> bool:
+    return snapshot.vpn.connected or not vpn_required(snapshot.local)
+
+
 def collect_local_status() -> LocalStatus:
     status = LocalStatus(
         hostname=socket.gethostname()
@@ -1015,6 +1038,35 @@ def collect_local_status() -> LocalStatus:
 
             break
 
+    for ssid_command in (
+        ["/usr/bin/iwgetid", "-r"],
+        ["/sbin/iwgetid", "-r"],
+        [
+            "/usr/bin/nmcli",
+            "-t",
+            "-f",
+            "active,ssid",
+            "dev",
+            "wifi",
+        ],
+    ):
+        ssid_result = run_command(ssid_command, timeout=2)
+
+        if ssid_result.returncode != 0:
+            continue
+
+        if "nmcli" in ssid_command[0]:
+            for line in ssid_result.stdout.splitlines():
+                active, separator, ssid = line.partition(":")
+                if separator and active == "yes" and ssid:
+                    status.wifi_ssid = ssid
+                    break
+        else:
+            status.wifi_ssid = ssid_result.stdout.strip()
+
+        if status.wifi_ssid:
+            break
+
     return status
 
 
@@ -1022,7 +1074,7 @@ def collect_snapshot() -> Snapshot:
     vpn = collect_vpn_status()
     local = collect_local_status()
     remote = collect_remote_status(
-        vpn.connected
+        vpn.connected or not vpn_required(local)
     )
 
     return Snapshot(
@@ -1321,7 +1373,7 @@ def draw_rows(
 
 
 def build_summary_rows(snapshot: Snapshot) -> List[ScreenRow]:
-    vpn_text = "OK" if snapshot.vpn.connected else "DOWN"
+    vpn_text = "OK" if network_available(snapshot) else "DOWN"
     remote_text = "ONLINE" if snapshot.remote.online else "OFFLINE"
     temp_text = (
         f" {snapshot.remote.temperature_c:.0f}C"
@@ -1462,6 +1514,7 @@ def build_local_rows(snapshot: Snapshot) -> List[ScreenRow]:
     mem_percent = int(100 * local.memory_used / local.memory_total) if local.memory_total else 0
     return [
         ("Hostname", local.hostname, FONT_NORMAL),
+        ("Wi-Fi", local.wifi_ssid or "Unknown SSID", FONT_NORMAL),
         ("Wi-Fi IP", local.wlan_ip or "No Wi-Fi IP", FONT_NORMAL),
         ("Temp", temp, FONT_NORMAL),
         ("Load", load, FONT_NORMAL),
@@ -1473,7 +1526,8 @@ def build_local_rows(snapshot: Snapshot) -> List[ScreenRow]:
 
 def build_network_rows(snapshot: Snapshot) -> List[ScreenRow]:
     return [
-        ("Desk Wi-Fi", snapshot.local.wlan_ip or "No IP", FONT_NORMAL),
+        ("Desk Wi-Fi", snapshot.local.wifi_ssid or "Unknown", FONT_NORMAL),
+        ("Wi-Fi IP", snapshot.local.wlan_ip or "No IP", FONT_NORMAL),
         ("CM5 host", str(CONFIG["remote_host"]), FONT_NORMAL),
         ("SSH", f"{CONFIG['remote_user']}:{CONFIG['remote_ssh_port']}", FONT_NORMAL),
         ("WG endpoint", snapshot.vpn.endpoint or "N/A", FONT_NORMAL),
@@ -1508,11 +1562,11 @@ def draw_page_from_rows(
 
 
 def draw_summary(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
-    draw_page_from_rows(draw, snapshot, page, "DESK NOC", snapshot.vpn.connected, scroll_offset)
+    draw_page_from_rows(draw, snapshot, page, "DESK NOC", network_available(snapshot), scroll_offset)
 
 
 def draw_vpn(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
-    draw_page_from_rows(draw, snapshot, page, "WIREGUARD", snapshot.vpn.connected, scroll_offset)
+    draw_page_from_rows(draw, snapshot, page, "WIREGUARD", network_available(snapshot), scroll_offset)
 
 
 def draw_raid(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
@@ -2237,7 +2291,7 @@ class DeskNOC:
         if now > self.restart_message_until:
             self.restart_message = ""
 
-        if not self.snapshot.vpn.connected:
+        if not network_available(self.snapshot):
             flash_on = (
                 int(now * 2) % 2 == 0
             )
@@ -2317,7 +2371,7 @@ class DeskNOC:
 
                 if (
                     self.auto_rotate
-                    and self.snapshot.vpn.connected
+                    and network_available(self.snapshot)
                     and not self.pending_pim_clicks
                     and (
                         loop_started

@@ -26,5 +26,9 @@
     "timeout_seconds": 3,
     "max_device_age": 60,
     "shared_secret": ""
-  }
+  },
+  "vpn_optional_wifi_networks": [
+    "wiffy",
+    "wiffyToo"
+  ]
 }

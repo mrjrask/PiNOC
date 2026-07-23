@@ -60,6 +60,7 @@ Edit `config.json` before installation or service start.
 | `vpn_interface` | `wg0` | WireGuard interface to inspect with `wg show`. |
 | `vpn_service` | `wg-quick@wg0.service` | systemd service restarted when Button A is held. |
 | `vpn_stale_seconds` | `150` | Maximum acceptable WireGuard handshake age. |
+| `vpn_optional_wifi_networks` | `["wiffy", "wiffyToo"]` | Wi-Fi SSIDs that can reach the monitored network without WireGuard; the VPN warning is suppressed on these networks. |
 | `refresh_seconds` | `10` | Minimum interval between background status refreshes. |
 | `auto_rotate_seconds` | `8` | Page rotation interval while VPN is healthy. |
 | `remote_host` | `192.168.1.200` | Remote server hostname or IP. |
