@@ -51,7 +51,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "vpn_stale_seconds": 150,
     "refresh_seconds": 10,
     "auto_rotate_seconds": 8,
-    "remote_host": "cm5",
+    "remote_host": "192.168.1.200",
     "remote_user": "pi",
     "remote_ssh_port": 22,
     "remote_paths": [

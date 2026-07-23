@@ -62,7 +62,7 @@ Edit `config.json` before installation or service start.
 | `vpn_stale_seconds` | `150` | Maximum acceptable WireGuard handshake age. |
 | `refresh_seconds` | `10` | Minimum interval between background status refreshes. |
 | `auto_rotate_seconds` | `8` | Page rotation interval while VPN is healthy. |
-| `remote_host` | `cm5` | Remote server hostname or IP. |
+| `remote_host` | `192.168.1.200` | Remote server hostname or IP. |
 | `remote_user` | `pi` | SSH user for remote checks. |
 | `remote_ssh_port` | `22` | SSH port for remote checks. |
 | `remote_paths` | two sample paths | Named remote paths shown on the storage page. |
