@@ -32,6 +32,7 @@ temperature broadcasters.
 | `.env.example` | Template for `.env`, which stores `DISPLAY` and `CM5_SSH_PASS` for install-time and runtime CM5 SSH authentication. |
 | `requirements.txt` | Python package dependencies installed into the virtual environment. |
 | `install.sh` | Raspberry Pi installer for system packages, I2C, virtualenv, SSH keys, sudoers, and systemd. |
+| `uninstall.sh` | Raspberry Pi uninstaller that stops and removes the systemd service, sudoers rule, and virtualenv. |
 | `pi-noc.service` | systemd unit template rewritten by `install.sh` for the install path and user. |
 
 ## Hardware and system requirements
@@ -105,6 +106,19 @@ The installer writes `/etc/sudoers.d/pi-noc-wireguard` so the service user can
 run WireGuard status checks and restart only the configured WireGuard service
 without a password.
 
+## Uninstallation
+
+Run the uninstaller from the repository root to stop and disable the service,
+remove the installed systemd unit and managed sudoers rule, reload systemd, and
+delete the project virtual environment:
+
+```bash
+sudo ./uninstall.sh
+```
+
+The uninstaller leaves the repository checkout, `config.json`, and `.env` in
+place so configuration can be reviewed or reused later.
+
 ## Runtime CM5 password behavior
 
 At runtime, `pi_noc.py` reads `CM5_SSH_PASS` directly from `.env` in the
@@ -171,5 +185,6 @@ Run these before committing changes:
 ```bash
 python3 -m py_compile pi_noc.py
 bash -n install.sh
+bash -n uninstall.sh
 python3 -m json.tool config.json >/dev/null
 ```
