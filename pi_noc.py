@@ -2288,6 +2288,7 @@ class DeskNOC:
                 if (
                     self.auto_rotate
                     and self.snapshot.vpn.connected
+                    and not self.pending_pim_clicks
                     and (
                         loop_started
                         - self.last_page_change
