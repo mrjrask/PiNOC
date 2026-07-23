@@ -19,8 +19,9 @@ temperature broadcasters.
 - Local Desk Pi checks for temperature, load, uptime, memory use, and Wi-Fi IP.
 - Optional remote temperature page loaded from a single JSON endpoint such as
   `http://192.168.1.201:9877/temps`.
-- Joystick navigation on the Adafruit Bonnet, four-button navigation on the
-  Pimoroni Display HAT Mini, and automatic page rotation.
+- Joystick navigation on the Adafruit Bonnet, color dashboard rendering and
+  multi-click four-button navigation on the Pimoroni Display HAT Mini, and
+  automatic page rotation.
 
 ## Repository layout
 
@@ -137,12 +138,21 @@ runs the service.
 | Adafruit joystick center | Refresh status immediately. |
 | Adafruit Button B | Toggle automatic page rotation. |
 | Hold Adafruit Button A for 1.5 seconds | Restart the configured WireGuard service. |
+| Pimoroni Button A | Previous page. |
+| Double-click Pimoroni Button A | Scroll up on pages with additional rows. |
+| Triple-click Pimoroni Button A | Restart the configured WireGuard service. |
 | Hold Pimoroni Button A for 1.5 seconds | Restart the configured WireGuard service. |
-| Pimoroni Button B | Toggle automatic page rotation. |
+| Pimoroni Button B | Next page. |
+| Double-click Pimoroni Button B | Scroll down on pages with additional rows. |
 | Pimoroni Button X | Refresh status immediately. |
-| Pimoroni Button Y | Next page. |
+| Pimoroni Button Y | Toggle automatic page rotation. |
 
 ## Display pages
+
+The Adafruit Bonnet uses the native 128x64 black-and-white OLED layout. The
+Pimoroni Display HAT Mini uses its full 320x240 color display with larger fonts,
+more visible rows per page, status colors, and a wider two-column layout.
+
 
 1. **Summary**: VPN, CM5, RAID, and SMB session overview.
 2. **WireGuard**: service state, latest handshake age, traffic counters, and
