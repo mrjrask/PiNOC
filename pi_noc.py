@@ -2,7 +2,8 @@
 """Desk NOC display for Adafruit or Pimoroni Raspberry Pi displays.
 
 Controls:
-  Joystick left/right/up/down: change page
+  Joystick left/right: change page
+  Joystick up/down: scroll current page when more rows are available
   Joystick press: refresh immediately
   Button B: toggle automatic page rotation
   Hold Button A for 1.5 seconds: restart WireGuard
@@ -1213,6 +1214,7 @@ def draw_summary(
     draw: ImageDraw.ImageDraw,
     snapshot: Snapshot,
     page: int,
+    scroll_offset: int = 0,
 ) -> None:
     draw_header(
         draw,
@@ -1289,6 +1291,7 @@ def draw_vpn(
     draw: ImageDraw.ImageDraw,
     snapshot: Snapshot,
     page: int,
+    scroll_offset: int = 0,
 ) -> None:
     vpn = snapshot.vpn
 
@@ -1352,6 +1355,7 @@ def draw_storage(
     draw: ImageDraw.ImageDraw,
     snapshot: Snapshot,
     page: int,
+    scroll_offset: int = 0,
 ) -> None:
     draw_header(
         draw,
@@ -1360,59 +1364,42 @@ def draw_storage(
         snapshot.remote.online,
     )
 
-    y_values = [15, 27, 39, 51]
-    line_index = 0
+    rows: List[Tuple[str, str, ImageFont.ImageFont]] = []
 
-    for disk in snapshot.remote.disks[:2]:
+    for disk in snapshot.remote.disks:
         if disk.error:
-            draw_two_column_line(
-                draw,
-                y_values[line_index],
-                disk.name,
-                "ERROR",
-            )
-            line_index += 1
-
-            draw_two_column_line(
-                draw,
-                y_values[line_index],
-                disk.path,
-                "",
-            )
-            line_index += 1
+            rows.append((disk.name, "ERROR", FONT_NORMAL))
+            rows.append((disk.path, "", FONT_NORMAL))
             continue
 
-        draw_two_column_line(
-            draw,
-            y_values[line_index],
-            disk.name,
-            f"{disk.percent}% used",
-        )
-        line_index += 1
-
-        draw_two_column_line(
-            draw,
-            y_values[line_index],
+        rows.append((disk.name, f"{disk.percent}% used", FONT_NORMAL))
+        rows.append((
             f"Free {format_bytes(disk.available)}",
             f"Total {format_bytes(disk.total)}",
-            font=FONT_SMALL,
-        )
-        line_index += 1
+            FONT_SMALL,
+        ))
 
-    while line_index < len(y_values):
+    if not rows:
+        rows.append(("No disk data", "", FONT_NORMAL))
+
+    y_values = [15, 27, 39, 51]
+    visible_rows = rows[scroll_offset:scroll_offset + len(y_values)]
+
+    for y, (left, right, font) in zip(y_values, visible_rows):
         draw_two_column_line(
             draw,
-            y_values[line_index],
-            "No disk data",
-            "",
+            y,
+            left,
+            right,
+            font=font,
         )
-        line_index += 1
 
 
 def draw_server(
     draw: ImageDraw.ImageDraw,
     snapshot: Snapshot,
     page: int,
+    scroll_offset: int = 0,
 ) -> None:
     remote = snapshot.remote
 
@@ -1474,6 +1461,7 @@ def draw_smb(
     draw: ImageDraw.ImageDraw,
     snapshot: Snapshot,
     page: int,
+    scroll_offset: int = 0,
 ) -> None:
     remote = snapshot.remote
 
@@ -1539,6 +1527,7 @@ def draw_remote_temps(
     draw: ImageDraw.ImageDraw,
     snapshot: Snapshot,
     page: int,
+    scroll_offset: int = 0,
 ) -> None:
     devices = sorted(
         snapshot.temp_devices,
@@ -1575,8 +1564,9 @@ def draw_remote_temps(
         return
 
     y_values = [15, 27, 39, 51]
+    visible_devices = devices[scroll_offset:scroll_offset + len(y_values)]
 
-    for y, device in zip(y_values, devices[:4]):
+    for y, device in zip(y_values, visible_devices):
         age = format_duration(
             int(time.time() - device.last_seen)
         )
@@ -1592,6 +1582,7 @@ def draw_local(
     draw: ImageDraw.ImageDraw,
     snapshot: Snapshot,
     page: int,
+    scroll_offset: int = 0,
 ) -> None:
     local = snapshot.local
 
@@ -1666,6 +1657,32 @@ PAGE_DRAWERS = [
     draw_remote_temps,
     draw_local,
 ]
+
+
+def page_row_count(
+    snapshot: Snapshot,
+    page: int,
+) -> int:
+    if PAGE_DRAWERS[page] == draw_storage:
+        return max(
+            1,
+            len(snapshot.remote.disks) * 2,
+        )
+
+    if PAGE_DRAWERS[page] == draw_remote_temps:
+        return max(1, len(snapshot.temp_devices))
+
+    return 4
+
+
+def max_scroll_offset(
+    snapshot: Snapshot,
+    page: int,
+) -> int:
+    return max(
+        0,
+        page_row_count(snapshot, page) - 4,
+    )
 
 
 def draw_vpn_warning(
@@ -1974,6 +1991,9 @@ class DeskNOC:
         )
 
         self.page = 0
+        self.scroll_offsets = [
+            0 for _ in PAGE_NAMES
+        ]
         self.auto_rotate = True
         self.last_page_change = (
             time.monotonic()
@@ -2118,6 +2138,18 @@ class DeskNOC:
             self.snapshot = (
                 self.refresh_future.result()
             )
+            self.scroll_offsets = [
+                min(
+                    offset,
+                    max_scroll_offset(
+                        self.snapshot,
+                        page,
+                    ),
+                )
+                for page, offset in enumerate(
+                    self.scroll_offsets
+                )
+            ]
         except Exception as exc:
             self.snapshot.remote.error = (
                 str(exc)[:100]
@@ -2132,9 +2164,59 @@ class DeskNOC:
         self.page = (
             self.page + delta
         ) % len(PAGE_NAMES)
+        self.scroll_offsets[self.page] = min(
+            self.scroll_offsets[self.page],
+            max_scroll_offset(
+                self.snapshot,
+                self.page,
+            ),
+        )
 
         self.last_page_change = (
             time.monotonic()
+        )
+
+    def scroll_page(
+        self,
+        delta: int,
+    ) -> None:
+        max_offset = max_scroll_offset(
+            self.snapshot,
+            self.page,
+        )
+
+        if max_offset == 0:
+            return
+
+        current_offset = self.scroll_offsets[self.page]
+        self.scroll_offsets[self.page] = min(
+            max(
+                0,
+                current_offset + delta,
+            ),
+            max_offset,
+        )
+        self.last_page_change = (
+            time.monotonic()
+        )
+
+    def display_direction(
+        self,
+        name: str,
+    ) -> str:
+        if DISPLAY_TYPE != DISPLAY_ADA_BONNET:
+            return name
+
+        rotated_directions = {
+            "LEFT": "RIGHT",
+            "RIGHT": "LEFT",
+            "UP": "DOWN",
+            "DOWN": "UP",
+        }
+
+        return rotated_directions.get(
+            name,
+            name,
         )
 
     def restart_vpn(self) -> None:
@@ -2181,11 +2263,19 @@ class DeskNOC:
         pressed, held = self.buttons.poll()
 
         for name in pressed:
-            if name in ("LEFT", "UP"):
+            name = self.display_direction(name)
+
+            if name == "LEFT":
                 self.change_page(-1)
 
-            elif name in ("RIGHT", "DOWN"):
+            elif name == "RIGHT":
                 self.change_page(1)
+
+            elif name == "UP":
+                self.scroll_page(-1)
+
+            elif name == "DOWN":
+                self.scroll_page(1)
 
             elif name == "CENTER":
                 self.last_refresh_started = 0
@@ -2240,6 +2330,7 @@ class DeskNOC:
                 self.draw,
                 self.snapshot,
                 self.page,
+                self.scroll_offsets[self.page],
             )
 
             if self.restart_message:

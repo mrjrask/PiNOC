@@ -131,8 +131,9 @@ runs the service.
 
 | Control | Action |
 | --- | --- |
-| Adafruit joystick left/up | Previous page. |
-| Adafruit joystick right/down | Next page. |
+| Adafruit joystick left | Previous page. |
+| Adafruit joystick right | Next page. |
+| Adafruit joystick up/down | Scroll the current page when more rows are available. |
 | Adafruit joystick center | Refresh status immediately. |
 | Adafruit Button B | Toggle automatic page rotation. |
 | Hold Adafruit Button A for 1.5 seconds | Restart the configured WireGuard service. |
