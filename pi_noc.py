@@ -464,16 +464,25 @@ fi
 """
 
 
+def normalize_raid_device(raid_device: str) -> str:
+    normalized_device = raid_device.strip()
+
+    # Keep this Python 3.8 compatible for Raspberry Pi/Debian installs that
+    # create the service virtualenv from the distribution python3 package.
+    if normalized_device.startswith("/dev/"):
+        return normalized_device[len("/dev/"):]
+
+    if normalized_device.startswith("dev/"):
+        return normalized_device[len("dev/"):]
+
+    return normalized_device
+
+
 def parse_raid(
     mdstat: str,
     raid_device: str,
 ) -> Tuple[str, str]:
-    normalized_device = raid_device.strip()
-
-    if normalized_device.startswith("/dev/"):
-        normalized_device = normalized_device[5:]
-    elif normalized_device.startswith("dev/"):
-        normalized_device = normalized_device[4:]
+    normalized_device = normalize_raid_device(raid_device)
 
     if not normalized_device:
         return "UNKNOWN", "No RAID device configured"
