@@ -37,4 +37,8 @@
       "0x45"
     ]
   }
+  "vpn_optional_wifi_networks": [
+    "wiffy",
+    "wiffyToo"
+  ]
 }
