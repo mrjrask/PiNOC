@@ -30,9 +30,15 @@ def evaluate(device: Dict[str, Any], thresholds: Dict[str, float] | None = None,
     temp = cpu.get("temperature_c")
     if temp is not None and temp > t["temperature_critical"]: critical.append("critical CPU temperature")
     elif temp is not None and temp > t["temperature_warning"]: warnings.append("high CPU temperature")
+    important_paths = device.get("important_paths", [])
     for disk in device.get("storage", []):
         pct = disk.get("percent")
-        if disk.get("read_only"): critical.append(f"{disk.get('mount_point', 'filesystem')} is read-only")
+        mount_point = disk.get("mount_point") or disk.get("path")
+        important = bool(mount_point) and any(
+            path == mount_point or path.startswith(mount_point.rstrip("/") + "/")
+            for path in important_paths
+        )
+        if disk.get("read_only") and important: critical.append(f"{mount_point} is read-only")
         if pct is not None and pct > t["disk_critical"]: critical.append("filesystem nearly full")
         elif pct is not None and pct > t["disk_warning"]: warnings.append("filesystem usage high")
     if hw.get("undervoltage_now") or hw.get("throttled_now"): critical.append("current Pi power/throttle condition")

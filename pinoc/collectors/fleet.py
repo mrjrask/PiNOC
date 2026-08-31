@@ -172,6 +172,7 @@ class FleetCollector:
                  "os_version":os_values.get("VERSION_ID",""),"kernel":uname[1] if len(uname)>1 else "","cpu":cpu,
                  "hardware":parse_throttled(data.get("THROTTLED","")),"memory":parse_memory(data.get("MEM","")),
                  "storage":parse_storage(data.get("DF",""),data.get("MOUNTS","")),"network":network,
+                 "important_paths":list(device.important_paths),
                  "services":services,"critical_services":list(device.critical_services),
                  "collector_status":{"system":{"status":"ok"},"storage":{"status":"ok"},"network":{"status":"ok"},"services":{"status":"ok"}}}
             health,reasons,stale=evaluate(raw,device.thresholds); raw.update(health=health,health_reasons=reasons,stale=stale)

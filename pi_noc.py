@@ -2127,6 +2127,7 @@ class SharedSnapshotCoordinator:
         self.fleet_collector = FleetCollector(
             devices, int(CONFIG.get("fleet_max_workers", 4)),
             float(CONFIG.get("ssh_command_timeout", 8)), read_env_value("CM5_SSH_PASS"))
+        self.local_fleet_ids = {device.id for device in devices if device.collection_method == "local"}
         self.fleet_devices: List[Any] = []
         polling = CONFIG.get("polling", {})
         temp_config = CONFIG.get("remote_temp_monitor", {})
@@ -2147,7 +2148,11 @@ class SharedSnapshotCoordinator:
             snapshot = copy.deepcopy(self.snapshot)
             legacy = list(normalize_snapshot(snapshot, CONFIG))
             fleet_ids = {device.id for device in self.fleet_devices}
-            devices = [device for device in legacy if device.id not in fleet_ids] + list(self.fleet_devices)
+            local_fleet_published = bool(fleet_ids & self.local_fleet_ids)
+            legacy_local_id = str(CONFIG.get("local_device_id") or f"local:{socket.gethostname()}")
+            devices = [device for device in legacy
+                       if device.id not in fleet_ids
+                       and not (local_fleet_published and device.id == legacy_local_id)] + list(self.fleet_devices)
             setattr(snapshot, "fleet_devices", [device.to_dict() for device in devices])
             self.state.publish(devices, snapshot, replace=True)
 

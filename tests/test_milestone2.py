@@ -60,6 +60,12 @@ class HealthTest(unittest.TestCase):
         d=self.base(); d["last_seen"]=(datetime.now(timezone.utc)-timedelta(seconds=40)).isoformat(); self.assertEqual(evaluate(d)[0],"degraded")
         d["last_seen"]=(datetime.now(timezone.utc)-timedelta(seconds=121)).isoformat(); self.assertEqual(evaluate(d)[0],"offline")
 
+    def test_read_only_mount_is_critical_only_when_it_contains_an_important_path(self):
+        d=self.base(); d["storage"]=[{"mount_point":"/media/archive","read_only":True}]
+        self.assertEqual(evaluate(d)[0],"healthy")
+        d["important_paths"]=["/media/archive/backups"]
+        self.assertEqual(evaluate(d)[0],"critical")
+
 
 class ConcurrencyTest(unittest.TestCase):
     def test_slow_failure_does_not_prevent_healthy_result(self):

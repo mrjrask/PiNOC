@@ -78,6 +78,9 @@ class PiNOCState:
             "devices": len(devices), "online": sum(bool(d.get("online")) for d in devices),
             **counts, "warnings": counts["warning"] + counts["degraded"],
             "failed_services": failed_services,
+            "updates_available": sum(
+                int(d.get("applications", {}).get("updates_available", 0) or 0) for d in devices
+            ),
             "database": "not_configured", "started_at": self._started_at,
             "last_collection": self._last_collection,
         }

@@ -30,6 +30,7 @@ class DeviceState:
     hardware: Dict[str, Any] = field(default_factory=dict)
     memory: Dict[str, Any] = field(default_factory=dict)
     storage: List[Dict[str, Any]] = field(default_factory=list)
+    important_paths: List[str] = field(default_factory=list)
     network: Dict[str, Any] = field(default_factory=dict)
     services: List[Dict[str, Any]] = field(default_factory=list)
     applications: Dict[str, Any] = field(default_factory=dict)
