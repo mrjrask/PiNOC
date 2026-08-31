@@ -2185,7 +2185,7 @@ class SharedSnapshotCoordinator:
                 fleet_devices.append(DeviceState.from_dict(raw))
             devices = [device for device in legacy
                        if device.id not in fleet_ids
-                       and not (local_fleet_published and device.id == legacy_local_id)] + list(self.fleet_devices)
+                       and not (local_fleet_published and device.id == legacy_local_id)] + fleet_devices
             device_rows = [device.to_dict() for device in devices]
             alerts_by_device: Dict[str, List[Dict[str, Any]]] = {}
             for alert in self.state.alerts():

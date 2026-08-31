@@ -39,6 +39,24 @@ class Milestone3Test(unittest.TestCase):
    con.executemany('insert into device_metrics(timestamp,device_id,cpu_percent) values(?,?,?)',(((start+timedelta(minutes=i)).isoformat(),'pi',i) for i in range(5001)))
   response=create_app(PiNOCState(),history=self.history).test_client().get('/api/devices/pi/metrics?range=7d')
   core=response.get_json()['core'];self.assertEqual(len(core),5000);self.assertEqual(core[0]['cpu_percent'],1);self.assertEqual(core[-1]['cpu_percent'],5000)
+ def test_mixed_metric_range_includes_complete_raw_segment(self):
+  now=datetime.now(timezone.utc);start=now-timedelta(days=6)
+  with self.db.connect() as con:
+   con.executemany('insert into device_metrics(timestamp,device_id,cpu_percent) values(?,?,?)',(((start+timedelta(minutes=i)).isoformat(),'pi',i) for i in range(6001)))
+  response=create_app(PiNOCState(),history=self.history).test_client().get('/api/devices/pi/metrics?range=30d')
+  core=response.get_json()['core'];self.assertEqual(len(core),6001);self.assertEqual(core[0]['cpu_percent'],0);self.assertEqual(core[-1]['cpu_percent'],6000)
+ def test_disabled_history_does_not_degrade_health(self):
+  state=PiNOCState();state.publish([])
+  disabled=HistoryManager(Database(self.tmp.name+'/disabled.db'),{'enabled':False})
+  response=create_app(state,history=disabled).test_client().get('/health')
+  self.assertEqual(response.status_code,200);self.assertEqual(response.get_json()['database']['status'],'disabled')
+ def test_mute_endpoint_rejects_invalid_or_naive_deadline(self):
+  now=datetime.now(timezone.utc);self.history._snapshot([self.device(now.isoformat())],now.isoformat())
+  alert_id=self.db.scalar('select min(alert_id) from alerts');client=create_app(PiNOCState(),history=self.history).test_client()
+  for deadline in ('not-a-date','2026-08-31T12:00:00'):
+   response=client.post(f'/api/alerts/{alert_id}/mute',json={'muted_until':deadline})
+   self.assertEqual(response.status_code,400)
+  self.assertIsNone(self.db.scalar('select muted_until from alerts where alert_id=?',(alert_id,)))
  def test_maintenance_preserves_storage_and_network_aggregates(self):
   now=datetime.now(timezone.utc);old=now-timedelta(days=8);device=self.device(old.isoformat());device['network'].update(rx_rate=12,tx_rate=8,signal_dbm=-45,signal_quality_percent=90)
   self.history._snapshot([device],old.isoformat());self.history.maintenance(now)
