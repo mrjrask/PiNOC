@@ -24,3 +24,5 @@ displayhatmini
 adafruit-circuitpython-bme280
 adafruit-circuitpython-bme680
 adafruit-circuitpython-sht4x
+Flask>=3.0,<4
+waitress>=3.0,<4

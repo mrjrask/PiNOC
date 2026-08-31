@@ -4,6 +4,9 @@
   "vpn_stale_seconds": 150,
   "refresh_seconds": 10,
   "auto_rotate_seconds": 8,
+  "web_enabled": true,
+  "web_host": "0.0.0.0",
+  "web_port": 8088,
   "remote_host": "192.168.1.200",
   "remote_user": "pi",
   "remote_ssh_port": 22,
@@ -36,7 +39,7 @@
       "0x44",
       "0x45"
     ]
-  }
+  },
   "vpn_optional_wifi_networks": [
     "wiffy",
     "wiffyToo"

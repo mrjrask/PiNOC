@@ -1,0 +1,5 @@
+{% extends "base.html" %}{% block title %}Fleet · PiNOC{% endblock %}{% block content %}
+<h1>Fleet overview</h1><p class="muted">Live cached monitoring state</p><section id="summary" class="summary"></section>
+<section class="panel"><div class="toolbar"><h2>Devices</h2><input id="search" type="search" placeholder="Search fleet…"></div>
+<div id="devices" class="device-grid"><p>Waiting for the first background collection…</p></div></section>
+{% endblock %}{% block scripts %}<script>PiNOC.dashboard();</script>{% endblock %}

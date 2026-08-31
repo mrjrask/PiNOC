@@ -30,6 +30,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import logging
+from logging.handlers import RotatingFileHandler
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +40,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import board
 from digitalio import DigitalInOut, Direction, Pull
 from PIL import Image, ImageDraw, ImageFont
+from pinoc.collectors import BackgroundCollector
+from pinoc.legacy import normalize_snapshot
+from pinoc.state import PiNOCState
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +59,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "vpn_stale_seconds": 150,
     "refresh_seconds": 10,
     "auto_rotate_seconds": 8,
+    "web_enabled": True,
+    "web_host": "0.0.0.0",
+    "web_port": 8088,
     "remote_host": "192.168.1.200",
     "remote_user": "pi",
     "remote_ssh_port": 22,
@@ -1165,7 +1173,7 @@ def collect_snapshot() -> Snapshot:
         vpn.connected or not vpn_required(local)
     )
 
-    return Snapshot(
+    snapshot = Snapshot(
         collected_at=time.time(),
         vpn=vpn,
         remote=remote,
@@ -1173,6 +1181,15 @@ def collect_snapshot() -> Snapshot:
         sensor=sensor,
         temp_devices=[],
     )
+    temp_config = CONFIG.get("remote_temp_monitor", {})
+    endpoint = str(temp_config.get("endpoint", ""))
+    if temp_config.get("enabled", True) and endpoint:
+        try:
+            with urllib.request.urlopen(endpoint, timeout=float(temp_config.get("timeout_seconds", 3))) as response:
+                snapshot.temp_devices = parse_temp_monitor_response(response.read(65536), endpoint)
+        except (OSError, urllib.error.URLError, ValueError):
+            pass
+    return snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -2033,8 +2050,10 @@ class Buttons:
 # ---------------------------------------------------------------------------
 
 class DeskNOC:
-    def __init__(self) -> None:
+    def __init__(self, shared_state: Optional[PiNOCState] = None, coordinator: Optional[BackgroundCollector] = None) -> None:
         self.stop_event = threading.Event()
+        self.shared_state = shared_state
+        self.coordinator = coordinator
 
         self.executor = ThreadPoolExecutor(
             max_workers=1,
@@ -2170,6 +2189,10 @@ class DeskNOC:
         self,
         force: bool = False,
     ) -> None:
+        if self.coordinator is not None:
+            if force:
+                self.coordinator.refresh()
+            return
         if (
             self.refresh_future is not None
             and not self.refresh_future.done()
@@ -2196,6 +2219,11 @@ class DeskNOC:
         )
 
     def accept_refresh(self) -> None:
+        if self.shared_state is not None:
+            cached = self.shared_state.legacy_snapshot()
+            if cached is not None:
+                self.snapshot = cached
+            return
         if (
             self.refresh_future is None
             or not self.refresh_future.done()
@@ -2486,7 +2514,8 @@ class DeskNOC:
                 )
 
                 self.accept_refresh()
-                self.poll_temp_monitor()
+                if self.shared_state is None:
+                    self.poll_temp_monitor()
                 self.start_refresh()
                 self.handle_buttons()
 
@@ -2541,13 +2570,38 @@ class DeskNOC:
 
 
 def main() -> None:
-    app = DeskNOC()
+    log_dir = APP_DIR / "logs"
+    try:
+        log_dir.mkdir(exist_ok=True)
+        handler: logging.Handler = RotatingFileHandler(log_dir / "pinoc.log", maxBytes=1_000_000, backupCount=3)
+    except OSError:
+        handler = logging.StreamHandler()
+    logging.basicConfig(level=logging.INFO, handlers=[handler], format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    state = PiNOCState()
+    coordinator = BackgroundCollector(
+        state, collect_snapshot, lambda snapshot: normalize_snapshot(snapshot, CONFIG),
+        interval=float(CONFIG.get("refresh_seconds", 10)),
+    )
+    coordinator.start()
+
+    web_enabled = (read_env_value("PINOC_WEB_ENABLED") or str(CONFIG.get("web_enabled", True))).lower() not in ("0", "false", "no")
+    if web_enabled:
+        from pinoc.web import create_app, serve
+        host = read_env_value("PINOC_WEB_HOST") or str(CONFIG.get("web_host", "0.0.0.0"))
+        port = int(read_env_value("PINOC_WEB_PORT") or CONFIG.get("web_port", 8088))
+        web_app = create_app(state)
+        threading.Thread(target=serve, args=(web_app, host, port), name="pinoc-web", daemon=True).start()
+
+    display_enabled = (read_env_value("PINOC_DISPLAY_ENABLED") or "1").lower() not in ("0", "false", "no")
+    app = DeskNOC(state, coordinator) if display_enabled else None
+    stop_event = app.stop_event if app else threading.Event()
 
     def request_stop(
         _signum: int,
         _frame: Any,
     ) -> None:
-        app.stop_event.set()
+        stop_event.set()
 
     signal.signal(
         signal.SIGTERM,
@@ -2558,7 +2612,14 @@ def main() -> None:
         request_stop,
     )
 
-    app.run()
+    try:
+        if app:
+            app.run()
+        else:
+            while not stop_event.wait(1):
+                pass
+    finally:
+        coordinator.stop()
 
 
 if __name__ == "__main__":

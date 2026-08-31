@@ -1,223 +1,180 @@
-# Desk Pi NOC
+# PiNOC 2.0
 
-Desk Pi NOC is a small Raspberry Pi network operations console for an Adafruit
-128x64 OLED Bonnet or a Pimoroni Display HAT Mini. It monitors a WireGuard tunnel, a remote CM5 file server,
-RAID health, SMB sessions, disk usage, local Pi health, and optional remote
-temperature broadcasters, and local StemmaQT/Qwiic indoor sensors.
+PiNOC is a centralized Raspberry Pi network operations console with one shared,
+cached monitoring backend and two frontends: a responsive web console and the
+existing Adafruit 128x64 OLED Bonnet or Pimoroni Display HAT Mini. Milestone 1
+preserves the established WireGuard, CM5/file-server, RAID, SMB, storage, local
+Pi, remote-temperature, and StemmaQT sensor monitoring and makes that same data
+available on the web.
 
-## Features
+## Architecture
 
-- Full-screen flashing warning when the WireGuard tunnel has no recent
-  handshake.
-- One-button WireGuard restart via a passwordless sudo rule created by the
-  installer.
-- Remote CM5 checks over SSH, using `CM5_SSH_PASS` from `.env` when present:
-  - CPU temperature, load average, and uptime.
-  - `/proc/mdstat` RAID state for the configured array.
-  - Disk usage for configured paths.
-  - Samba session count and unique users from `smbstatus` when available.
-- Local Desk Pi checks for temperature, load, uptime, memory use, and Wi-Fi IP.
-- Optional remote temperature page loaded from a single JSON endpoint such as
-  `http://192.168.1.201:9877/temps`.
-- Local StemmaQT/Qwiic indoor sensor screen for BME280, BME680/BME688,
-  and SHT4x temperature/humidity/pressure/air-quality sensors.
-- Joystick navigation on the Adafruit Bonnet, color dashboard rendering and
-  multi-click four-button navigation on the Pimoroni Display HAT Mini, and
-  automatic page rotation.
+```text
+                          bounded background work
+┌──────────────────────────────────────────────────────────┐
+│ Collectors: local, WireGuard, SSH/CM5, RAID, SMB, disks, │
+│ remote temperatures, and local environmental sensor      │
+└───────────────────────────┬──────────────────────────────┘
+                            ▼
+                 ┌──────────────────────┐
+                 │ thread-safe PiNOC    │
+                 │ current-state cache  │
+                 └──────────┬───────────┘
+                         ┌──┴───────────────┐
+                         ▼                  ▼
+              Flask/Waitress web     Physical display
+              (cache reads only)     (cache reads only)
+```
+
+HTTP requests never run SSH, subprocesses, probes, or remote HTTP calls. The
+background coordinator catches collection-cycle failures, retains the service,
+and publishes normalized devices with persistent configured IDs rather than
+using IP addresses as identity. Current state is in memory; database history is
+a Milestone 3 feature.
+
+## Features and URLs
+
+* Responsive fleet dashboard: `http://<pinoc-host>:8088/`
+* Device details: `/devices/<device_id>`
+* Health probe: `GET /health`
+* Cached REST API: `GET /api/status`, `/api/devices`,
+  `/api/devices/<id>`, `/api/devices/<id>/services`, and `/api/alerts`
+* Fleet summary counts for online/healthy/warning/degraded/critical/offline,
+  failed services, and updates (fields are already stable for later collectors).
+* Existing physical pages and controls remain: Summary, WireGuard, RAID,
+  Storage, CM5 Server, Samba, Remote Temps, Desk Pi, Sensors, and Network.
+* Explicit command timeouts, SSH connection limits, and remote HTTP timeouts.
+* Rotating runtime/collector logging in `logs/pinoc.log` (three 1 MB backups).
 
 ## Repository layout
 
-| File | Purpose |
+| Path | Purpose |
 | --- | --- |
-| `pi_noc.py` | Main Python application. |
-| `config.json` | Runtime configuration for VPN, SSH, display, storage, and temperature monitoring. |
-| `.env.example` | Template for `.env`, which stores `DISPLAY` and `CM5_SSH_PASS` for install-time and runtime CM5 SSH authentication. |
-| `requirements.txt` | Python package dependencies installed into the virtual environment. |
-| `install.sh` | Raspberry Pi installer for system packages, I2C, virtualenv, SSH keys, sudoers, and systemd. |
-| `uninstall.sh` | Raspberry Pi uninstaller that stops and removes the systemd service, sudoers rule, and virtualenv. |
-| `pi-noc.service` | systemd unit template rewritten by `install.sh` for the install path and user. |
-
-## Hardware and system requirements
-
-- Raspberry Pi OS or another Debian-based Raspberry Pi environment.
-- Adafruit 128x64 OLED Bonnet connected over I2C, or Pimoroni Display HAT
-  Mini connected over SPI.
-- WireGuard tools and a configured WireGuard systemd service, defaulting to
-  `wg-quick@wg0.service`.
-- SSH access from the display Pi to the remote CM5/server.
-- Optional: Samba `smbstatus` and Linux MD RAID `/proc/mdstat` on the remote
-  server.
+| `pi_noc.py` | Compatibility entry point, existing collection/display implementation, and unified process orchestration. |
+| `pinoc/models.py` | Normalized, JSON-safe device model. |
+| `pinoc/state.py` | Locked current-state cache and fleet summaries. |
+| `pinoc/collectors/base.py` | Collector interface and failure-isolated background coordinator. |
+| `pinoc/legacy.py` | Adapter from existing snapshots to normalized fleet devices. |
+| `pinoc/web/` | Flask app, cached API, Jinja pages, responsive CSS, and lightweight JavaScript. |
+| `config.json` / `.env` | Backward-compatible monitoring and frontend configuration. |
+| `install.sh` / `uninstall.sh` | Raspberry Pi install and safe component removal. |
+| `pi-noc.service` | Unified collector, web, and optional display systemd unit. |
 
 ## Configuration
 
-Edit `.env` to choose the display hardware. Accepted `DISPLAY` values are
-`ADA_BONNET` for the Adafruit 128x64 OLED Bonnet and `PIM_DHM` for the
-Pimoroni Display HAT Mini. If `DISPLAY` is omitted, PiNOC defaults to
-`ADA_BONNET` to preserve existing Adafruit installs.
+Existing `config.json` keys remain supported. Important defaults are:
 
-Edit `config.json` before installation or service start.
-
-| Key | Default | Description |
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `vpn_interface` | `wg0` | WireGuard interface to inspect with `wg show`. |
-| `vpn_service` | `wg-quick@wg0.service` | systemd service restarted when Button A is held. |
-| `vpn_stale_seconds` | `150` | Maximum acceptable WireGuard handshake age. |
-| `vpn_optional_wifi_networks` | `["wiffy", "wiffyToo"]` | Wi-Fi SSIDs that can reach the monitored network without WireGuard; the VPN warning is suppressed on these networks. |
-| `refresh_seconds` | `10` | Minimum interval between background status refreshes. |
-| `auto_rotate_seconds` | `8` | Page rotation interval while VPN is healthy. |
-| `remote_host` | `192.168.1.200` | Remote server hostname or IP. |
-| `remote_user` | `pi` | SSH user for remote checks. |
-| `remote_ssh_port` | `22` | SSH port for remote checks. |
-| `remote_paths` | two sample paths | Named remote paths shown on the storage page. |
-| `raid_device` | `md0` | MD RAID device name to find in `/proc/mdstat`. |
-| `display_address` | `0x3c` | I2C address for the OLED display. |
-| `remote_temp_monitor.enabled` | `true` | Enables the remote temperature endpoint poller. |
-| `remote_temp_monitor.endpoint` | `http://192.168.1.201:9877/temps` | JSON endpoint that returns all remote temperatures. |
-| `remote_temp_monitor.poll_seconds` | `10` | Minimum seconds between endpoint requests. |
-| `remote_temp_monitor.timeout_seconds` | `3` | HTTP request timeout for the temperature endpoint. |
-| `remote_temp_monitor.max_device_age` | `60` | Hide temperature devices older than this many seconds. |
-| `inside_sensor.enabled` | `true` | Enables probing for a local StemmaQT/Qwiic indoor sensor on the display Pi I2C bus. |
-| `inside_sensor.type` | `auto` | Sensor driver to probe: `auto`, `bme280`, `bme680`, `bme688`, or `sht4x`. |
-| `inside_sensor.i2c_addresses` | `0x76`, `0x77`, `0x44`, `0x45` | I2C addresses to try for BME and SHT4x sensors. |
+| `refresh_seconds` | `10` | Complete background snapshot interval. |
+| `web_enabled` | `true` | Config fallback for the integrated web console. |
+| `web_host` / `web_port` | `0.0.0.0` / `8088` | Web listener. |
+| `remote_device_id` | `cm5-file-server` | Optional stable remote identity. |
+| `remote_host`, `remote_user`, `remote_ssh_port` | existing values | CM5 SSH target. |
+| `remote_paths` | configured paths | Remote filesystems to collect. |
+| `raid_device` | `md0` | Array parsed from remote `/proc/mdstat`. |
+| `vpn_interface`, `vpn_service`, `vpn_stale_seconds` | `wg0`, `wg-quick@wg0.service`, `150` | WireGuard monitoring. |
+| `vpn_optional_wifi_networks` | `wiffy`, `wiffyToo` | LANs on which the VPN is not required. |
+| `remote_temp_monitor` | enabled | Endpoint, interval/age metadata, and explicit HTTP timeout. |
+| `inside_sensor` | enabled/auto | BME280, BME680/BME688, or SHT4x probing. |
 
-## Installation
+Environment values take precedence for frontends:
 
-1. Copy or clone this repository onto the display Pi.
-2. Review and edit `config.json`.
-3. Create the installer environment file:
+```dotenv
+DISPLAY=ADA_BONNET                 # or PIM_DHM
+PINOC_DISPLAY_ENABLED=1            # 0 supports a headless web deployment
+PINOC_WEB_ENABLED=1
+PINOC_WEB_HOST=0.0.0.0
+PINOC_WEB_PORT=8088
+CM5_SSH_PASS=change-me             # password fallback; keys are preferred
+```
 
-   ```bash
-   cp .env.example .env
-   nano .env
-   ```
+The installer still provisions an Ed25519 key. If `CM5_SSH_PASS` is absent at
+runtime, SSH uses key-only `BatchMode=yes`; the password behavior remains as a
+backward-compatible fallback. Keep `.env` mode-restricted.
 
-4. Set `DISPLAY` in `.env` to `ADA_BONNET` for the Adafruit Bonnet or
-   `PIM_DHM` for the Pimoroni Display HAT Mini. Set `CM5_SSH_PASS` in `.env` to the remote CM5 SSH password. The
-   installer uses it for `ssh-copy-id`, and the running service reads the same
-   file whenever it authenticates to the CM5. Update `.env` if the remote
-   password changes; no reinstall is required.
-5. Run the installer:
+Normalized devices include identity, roles/tags, CPU, hardware health, memory,
+storage, network, services, applications, and alerts. Milestone 1 emits the
+local console (`pinoc`, `desk_display` roles), configured CM5 (`file_server`),
+and remote temperature sources. Arbitrary device definitions, richer health
+thresholds, and Cockpit URLs are deliberately scheduled for Milestone 2.
 
-   ```bash
-   sudo ./install.sh
-   ```
+## Installation and upgrade
 
-6. Reboot if I2C or group membership changed, then start or inspect the service:
+1. Clone/copy the repository and review `config.json`.
+2. Run `cp .env.example .env`, set `CM5_SSH_PASS` if needed, and protect it
+   with `chmod 600 .env`.
+3. Run `sudo ./install.sh`. It prompts for physical-display enablement/type,
+   web enablement, and web port while retaining the existing dependency, I2C,
+   SPI, group, SSH-key, WireGuard sudoers, virtualenv, and systemd workflow.
+4. Start with `sudo systemctl start pi-noc.service`, then visit port 8088.
 
-   ```bash
-   sudo systemctl start pi-noc.service
-   sudo systemctl status pi-noc.service
-   ```
+**Migration from PiNOC 1.x:** pull/copy the new files, keep the existing `.env`
+and `config.json`, add the optional frontend environment variables shown above,
+and rerun `sudo ./install.sh` so Flask/Waitress are installed and the unified
+service receives its environment file. No data migration is required in
+Milestone 1. Existing display type, controls, CM5 password, SSH keys, paths,
+sensors, and WireGuard configuration remain valid.
 
-The installer writes `/etc/sudoers.d/pi-noc-wireguard` so the service user can
-run WireGuard status checks and restart only the configured WireGuard service
-without a password.
+## Physical display controls
+
+Adafruit left/right changes pages, up/down scrolls, center refreshes, Button B
+toggles rotation, and holding Button A restarts configured WireGuard. Pimoroni
+A/B moves pages, double-click A/B scrolls, X refreshes, Y toggles rotation, and
+holding/triple-clicking A requests the same narrow WireGuard restart. Refresh
+now signals the shared background coordinator; it does not create a second
+collection path.
+
+## Security, database, alerts, and administration
+
+Milestone 1 provides read-only HTTP routes. Authentication, CSRF-protected safe
+management actions, allowlisted services, and audit logging arrive in Milestone
+5. Do not expose the listener to an untrusted network meanwhile. The existing
+sudoers file permits only status/restart operations for the configured
+WireGuard unit; the web API exposes no shell or action endpoint.
+
+SQLite metrics/history, persistent alerts/events, retention, graphs, and
+storage forecasting are Milestone 3. `/api/alerts` is a real cached read API but
+is empty until alert production is implemented; current RAID state and errors
+are fully exposed under the CM5 device applications today.
 
 ## Uninstallation
 
-Run the uninstaller from the repository root to stop and disable the service,
-remove the installed systemd unit and managed sudoers rule, reload systemd, and
-delete the project virtual environment:
-
-```bash
-sudo ./uninstall.sh
-```
-
-The uninstaller leaves the repository checkout, `config.json`, and `.env` in
-place so configuration can be reviewed or reused later.
-
-## Runtime CM5 password behavior
-
-At runtime, `pi_noc.py` reads `CM5_SSH_PASS` directly from `.env` in the
-project root before each remote CM5 status refresh. If the value is present,
-remote checks use `sshpass -e ssh`; if it is absent, remote checks fall back to
-key-only SSH with `BatchMode=yes`. Keep `.env` readable only by the account that
-runs the service.
-
-## Controls
-
-| Control | Action |
-| --- | --- |
-| Adafruit joystick left | Previous page. |
-| Adafruit joystick right | Next page. |
-| Adafruit joystick up/down | Scroll the current page when more rows are available. |
-| Adafruit joystick center | Refresh status immediately. |
-| Adafruit Button B | Toggle automatic page rotation. |
-| Hold Adafruit Button A for 1.5 seconds | Restart the configured WireGuard service. |
-| Pimoroni Button A | Previous page. |
-| Double-click Pimoroni Button A | Scroll up on pages with additional rows. |
-| Triple-click Pimoroni Button A | Restart the configured WireGuard service. |
-| Hold Pimoroni Button A for 1.5 seconds | Restart the configured WireGuard service. |
-| Pimoroni Button B | Next page. |
-| Double-click Pimoroni Button B | Scroll down on pages with additional rows. |
-| Pimoroni Button X | Refresh status immediately. |
-| Pimoroni Button Y | Toggle automatic page rotation. |
-
-## Display pages
-
-The Adafruit Bonnet uses the native 128x64 black-and-white OLED layout. The
-Pimoroni Display HAT Mini uses its full 320x240 color display with larger fonts,
-more visible rows per page, status colors, and a wider two-column layout.
-
-
-1. **Summary**: VPN, CM5, RAID, and SMB session overview.
-2. **WireGuard**: service state, latest handshake age, traffic counters, and
-   full-tunnel status.
-3. **Storage**: usage for the first two configured remote paths.
-4. **CM5 Server**: remote status, temperature, load, and uptime.
-5. **Samba**: active SMB session count and users.
-6. **Remote Temps**: hottest recent devices from the configured temperature endpoint.
-7. **Desk Pi**: local hostname/IP, temperature/load, memory, and uptime.
-8. **Sensors**: local StemmaQT/Qwiic BME280, BME680/BME688, or SHT4x readings.
-9. **Network**: Desk Pi, CM5, WireGuard, and temperature API addressing.
-
-## Local StemmaQT/Qwiic sensor screen
-
-Both supported displays expose StemmaQT/Qwiic-compatible I2C expansion. PiNOC
-can probe the shared I2C bus for a local indoor sensor and adds a Sensors page
-when readings are available. The supported sensor families match the indoor
-sensor support from `mrjrask/desk_display`: BME280, BME680/BME688, and SHT4x.
-
-Set `inside_sensor.type` to `auto` for normal installs, or pin it to a specific
-sensor family to reduce startup probing. The default address list covers common
-BME addresses (`0x76`, `0x77`) and SHT4x addresses (`0x44`, `0x45`).
-
-## Remote temperature monitor endpoint
-
-When enabled, PiNOC polls `remote_temp_monitor.endpoint` for JSON containing all
-remote temperatures. The endpoint may return a list directly or an object with a
-`temps`, `devices`, or `temperatures` list. Each device can provide
-`temperature.celsius`, `celsius`, `temp_c`, or `temperature_c`; host labels are
-read from `hostname`, `name`, `device`, or `id`.
-
-Devices are keyed by `device_id` when present, then `id`, otherwise by endpoint
-and hostname. Devices older than `remote_temp_monitor.max_device_age` are
-removed from the page.
+Run `sudo ./uninstall.sh`. It stops/disables the unit and removes the installed
+unit, managed WireGuard sudoers rule, and virtualenv. It intentionally preserves
+the checkout, `.env`, `config.json`, logs, and any future database/history.
+Delete those only after making your own backup.
 
 ## Troubleshooting
 
-- **Display stays blank**: confirm I2C is enabled for the Adafruit Bonnet or SPI is enabled for the Pimoroni Display HAT Mini, the service user is in the
-  required `i2c`, `gpio`, and `spi` groups, and the OLED address matches `display_address`.
-- **VPN warning never clears**: run `wg show wg0 dump` and verify a recent peer
-  handshake. Also verify `vpn_interface`, `vpn_service`, and the generated
-  sudoers file.
-- **Remote pages show offline**: verify the `.env` `CM5_SSH_PASS` value and
-  SSH connectivity with `ssh -p <port> <user>@<host> true` from the service
-  user, or confirm key-based SSH is still valid if `.env` omits the password.
-- **SMB shows unavailable**: install Samba tools on the remote server and allow
-  the remote user to run `smbstatus` if root privileges are required.
-- **No remote temperatures**: check that `remote_temp_monitor.endpoint` is
-  reachable from the display Pi and returns fresh JSON temperature data.
-- **No local sensor**: run `i2cdetect -y 1`, confirm the StemmaQT cable is
-  seated, and verify `inside_sensor.type` and `inside_sensor.i2c_addresses`.
+* **Web unavailable:** inspect `PINOC_WEB_ENABLED`, host/port, `ss -ltnp`, and
+  `journalctl -u pi-noc`; verify the selected port is not already used.
+* **Display blank:** check `PINOC_DISPLAY_ENABLED`, `DISPLAY`, I2C/SPI, service
+  group membership, cabling, and `display_address`.
+* **CM5 offline:** test key SSH as the service user; check the fallback password,
+  remote address/port, trusted Wi-Fi list, and WireGuard state.
+* **SMB unavailable:** install/permit `smbstatus` remotely. **RAID unknown:**
+  verify `raid_device` and remote `/proc/mdstat` readability.
+* **No temperatures/sensor:** validate endpoint JSON/freshness/timeout or use
+  `i2cdetect -y 1` and review sensor type/address configuration.
+* **Collector error:** check `logs/pinoc.log`; an individual failure is isolated
+  and the next background interval retries it.
 
-## Development checks
-
-Run these before committing changes:
+## Development
 
 ```bash
-python3 -m py_compile pi_noc.py
+python3 -m unittest discover -s tests -v
+python3 -m compileall -q pi_noc.py pinoc tests
 bash -n install.sh
 bash -n uninstall.sh
 python3 -m json.tool config.json >/dev/null
 ```
+
+## Milestone 2 remaining work
+
+Milestone 2 will add arbitrary multi-Pi definitions and local/SSH collection
+modes, full CPU/memory/storage/network/service data, roles/tags/friendly names,
+central configurable warning/critical/offline classification, Cockpit links,
+and richer fleet filtering/search. The collector interface and normalized
+model intentionally leave room for a later `agent` mode without coupling this
+release to another repository.
