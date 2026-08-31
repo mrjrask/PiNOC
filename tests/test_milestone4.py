@@ -1,4 +1,7 @@
 import json
+from datetime import datetime, timezone
+from pinoc.collectors.fleet import integration_script, parse_integration_payloads
+from pinoc.device_config import parse_device
 from pinoc.integrations import active_integrations, IntegrationStatus, sanitize
 from pinoc.integrations.adsb import parse_aircraft, parse_stats, compare
 from pinoc.integrations.magicmirror import parse_pm2
@@ -47,3 +50,36 @@ def test_api_cached_and_sanitized():
     state=PiNOCState(); state.publish([DeviceState('a','a','A',integrations={'wireguard':{'health':'healthy','private_key':'NO'}})])
     c=create_app(state).test_client(); body=c.get('/api/devices/a/integrations').get_data(as_text=True)
     assert c.get('/api/adsb').status_code==200 and 'NO' not in body
+
+def test_fleet_collects_and_parses_integration_payloads():
+    device=parse_device({'hostname':'receiver','roles':['adsb_receiver'],'integrations':{
+        'adsb':{'aircraft_url':'http://localhost/aircraft.json'}}},0)
+    script=integration_script(device)
+    assert 'curl -L --max-time 3' in script and 'aircraft.json' in script
+    now=datetime.now(timezone.utc).isoformat()
+    data={
+        'INT_ADSB_AIRCRAFT':'__HTTP_META__=200 0.012\n'
+            +json.dumps({'aircraft':[{'hex':'abc','seen':1,'lat':1,'lon':2}]}),
+        'INT_ADSB_STATS':'__HTTP_META__=200 0.004\n'
+            +json.dumps({'last1min':{'start':0,'end':10,'local':{'accepted':50}}}),
+    }
+    status=parse_integration_payloads(data,device,[],now,now,['adsb'])['adsb']
+    assert status['available'] and status['health']=='healthy'
+    assert status['data']['aircraft']==1 and status['data']['messages_per_second']==5
+    assert status['data_source']=='dump1090 HTTP JSON'
+
+def test_fleet_collects_non_service_integrations_and_repositories():
+    device=parse_device({'hostname':'server','roles':['file_server'],'integrations':{'packages':True,'git':True},
+                         'repositories':[{'name':'PiNOC','path':'/srv/pinoc'}]},0)
+    script=integration_script(device)
+    assert 'cat /proc/mdstat' in script and 'smartctl -a -j' in script
+    assert 'apt-get -s' in script and 'git -C /srv/pinoc' in script
+    now=datetime.now(timezone.utc).isoformat()
+    data={'INT_RAID':'md0 : active raid1 sda[0] sdb[1]\n  10 blocks [2/2] [UU]',
+          'INT_PACKAGES':'Inst one [1] (2 Debian-Security)\nREBOOT_REQUIRED=1',
+          'INT_GIT_0':'name=PiNOC\npath=/srv/pinoc\nbranch=main\ncommit=abcdef123\ndirty=0'}
+    statuses=parse_integration_payloads(data,device,[],now,now,['raid','packages','git'])
+    assert statuses['raid']['available'] and statuses['raid']['data']['array_count']==1
+    assert statuses['packages']['data']['updates_available']==1
+    assert statuses['packages']['data']['reboot_required']
+    assert statuses['git']['data']['repositories'][0]['branch']=='main'
