@@ -2201,6 +2201,14 @@ class SharedSnapshotCoordinator:
             self.fleet_devices = devices
         self._publish()
 
+    def refresh(self) -> None:
+        self.scheduler.refresh()
+
+    def refresh_device(self, _device_id: str) -> None:
+        # Fleet collection remains batched, but is always dispatched by the
+        # scheduler rather than an HTTP/action worker thread.
+        self.scheduler.refresh_task("fleet")
+
     def collect_local(self) -> None:
         local = collect_local_status()
         with self.lock:
@@ -2831,7 +2839,12 @@ def main() -> None:
         from pinoc.web import create_app, serve
         host = read_env_value("PINOC_WEB_HOST") or str(CONFIG.get("web_host", "0.0.0.0"))
         port = int(read_env_value("PINOC_WEB_PORT") or CONFIG.get("web_port", 8088))
-        web_app = create_app(state, {"HEALTH_STALE_SECONDS": CONFIG.get("health_cache_stale_seconds", 120)}, history)
+        auth_enabled=(read_env_value("PINOC_AUTH_ENABLED") or str(CONFIG.get("authentication",{}).get("enabled",False))).lower() in ("1","true","yes")
+        web_app = create_app(state, {"HEALTH_STALE_SECONDS": CONFIG.get("health_cache_stale_seconds", 120),
+            "AUTH_ENABLED":auth_enabled,"SECRET_KEY":read_env_value("PINOC_SECRET_KEY"),
+            "SESSION_COOKIE_SECURE":(read_env_value("PINOC_SECURE_COOKIE") or "0").lower() in ("1","true","yes"),
+            "SESSION_TIMEOUT_SECONDS":CONFIG.get("authentication",{}).get("session_timeout_seconds",3600),
+            "PINOC_CONFIG":CONFIG,"CONFIG_PATH":str(APP_DIR/"config.json"),"APP_DIR":str(APP_DIR)}, history, coordinator)
         threading.Thread(target=serve, args=(web_app, host, port), name="pinoc-web", daemon=True).start()
 
     display_enabled = (read_env_value("PINOC_DISPLAY_ENABLED") or "1").lower() not in ("0", "false", "no")

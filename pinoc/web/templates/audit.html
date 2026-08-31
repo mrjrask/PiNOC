@@ -1,0 +1,1 @@
+{% extends "base.html" %}{% block title %}Audit · PiNOC{% endblock %}{% block content %}<h1>Audit log</h1><p class="muted">Authentication, authorization, and safe action history.</p><section class="panel"><div id="audit-table">Loading…</div></section>{% endblock %}{% block scripts %}<script>PiNOC.audit();</script>{% endblock %}

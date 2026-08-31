@@ -5,7 +5,7 @@ import json, math
 def _load(v): return json.loads(v) if isinstance(v,str) else (v or {})
 def parse_aircraft(value):
     x=_load(value); aircraft=x.get("aircraft",[]) if isinstance(x,dict) else []
-    recent=[a for a in aircraft if float(a.get("seen",9999) or 9999)<=60]
+    recent=[a for a in aircraft if float(9999 if a.get("seen") is None else a.get("seen"))<=60]
     positions=[a for a in recent if (a.get("lat") is not None and a.get("lon") is not None)]
     return {"aircraft":len(recent),"aircraft_with_positions":len(positions),"aircraft_ids":sorted({str(a.get("hex")) for a in recent if a.get("hex")}),"recent_message_activity":bool(recent),"messages_total":x.get("messages"),"receiver_uptime_seconds":x.get("now")}
 def parse_stats(value):

@@ -39,9 +39,19 @@ class DeviceState:
     error: str = ""
     address: str = ""
     collection_method: str = ""
+    ssh_user: str = "pi"
+    ssh_port: int = 22
+    monitored_services: List[str] = field(default_factory=list)
+    critical_services: List[str] = field(default_factory=list)
+    manageable_services: List[str] = field(default_factory=list)
+    allowed_actions: List[str] = field(default_factory=list)
     notes: str = ""
     cockpit_url: Optional[str] = None
     maintenance: bool = False
+    maintenance_until: Optional[str] = None
+    maintenance_reason: str = ""
+    expected_offline: bool = False
+    expected_offline_reason: str = ""
     last_successful_collection: Optional[str] = None
     last_collection_attempt: Optional[str] = None
     stale: bool = False

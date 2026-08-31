@@ -456,3 +456,59 @@ Schema migration 4 adds generalized numeric `integration_metrics` and `network_i
 Optional commands run on the monitored host (locally or over SSH), not necessarily on the PiNOC console: `git`, `wg`, `smbstatus`, `smartctl`, `nvme`, and `iw`. `install.sh` intentionally does not install all of them. HTTP and subprocess work must use configured timeouts and background collectors; routes only read cache. If an integration says `unsupported`, install the relevant tool on that device or disable the integration. If it says `unavailable`, inspect its data source, configured port/path/process name, last attempt, and last error. Configuration errors identify device/integration fields without invalidating otherwise valid devices.
 
 Milestone 4 intentionally provides no shell, service/reboot controls, apt upgrades, Git deployment, display screen controls, hotspot disconnection, WireGuard/Samba/RAID mutation, SMART repair, settings editor, agent protocol, or Codex/ChatGPT gateway. Those controls remain deferred to Milestone 5; agent execution remains deferred to Milestone 6.
+
+## Milestone 5: secure management
+
+### Authentication, sessions, users, and roles
+
+Authentication is optional and explicit. Set `PINOC_AUTH_ENABLED=1`, create a random `PINOC_SECRET_KEY`, then bootstrap the first administrator locally with `python -m pinoc.admin create-user --role administrator NAME`. There are no default credentials. Passwords use Werkzeug's maintained salted password hashing; only hashes are stored. Sessions expire (one hour by default), rotate their CSRF token at login, and use HttpOnly/SameSite=Lax cookies. Set `PINOC_SECURE_COOKIE=1` only behind HTTPS. **Plain trusted-LAN HTTP is not encrypted:** anyone able to observe that network can read traffic, and with authentication disabled every reachable client is treated as a trusted-LAN administrator.
+
+Roles are enforced by the server, not just hidden controls: viewers read fleet/history/alerts; operators may acknowledge/mute alerts, schedule refresh, maintain devices, and execute configured safe actions; administrators additionally control power, settings, users, and tokens. Login failures use one generic error and a five-attempt/five-minute per-IP temporary throttle. `/login` signs in and the CSRF-protected `POST /logout` signs out. Authentication events are audited.
+
+Users can be listed/created via the administrator API or the local CLI. `reset-password`, `disable-user`, and `list-users` avoid manual SQLite edits. Administrators can issue optional tokens with only named scopes (`read:fleet`, `read:history`, `read:alerts`, `write:alerts`, `execute:safe_actions`, `admin:config`). A token is stored as SHA-256, shown once as `ID.SECRET`, passed as `Authorization: Bearer ID.SECRET`, can be revoked by ID, and updates `last_used`. Never put tokens in URLs.
+
+### CSRF and web/API security
+
+Every cookie-authenticated POST/PUT/PATCH/DELETE supplies the session token in `X-CSRF-Token` (available from `/api/session`); missing and invalid tokens are rejected. Bearer tokens are not cookie credentials and are instead protected by their unguessable secret and explicit scopes. Responses set CSP, frame denial, `nosniff`, and same-origin referrer policy. Static assets and `/health` remain public; protected API requests receive 401, insufficient roles/scopes receive 403. Errors and serialized configuration pass through centralized password/token/key/credential redaction.
+
+Example session request (placeholder values only):
+
+```sh
+curl -c cookies.txt http://pinoc.local:8088/login
+# Submit the login form, then obtain csrf_token:
+curl -b cookies.txt http://pinoc.local:8088/api/session
+curl -b cookies.txt -H 'X-CSRF-Token: EXAMPLE' -X POST \
+  http://pinoc.local:8088/api/devices/square/refresh
+```
+
+Example token request: `curl -H 'Authorization: Bearer TOKEN_ID.TOKEN_SECRET' http://pinoc.local:8088/api/devices`.
+
+### Manageable services and safe actions
+
+`monitored_services`, `critical_services`, and `manageable_services` are intentionally separate. Monitoring or criticality never grants control. A systemd unit must match the strict unit syntax and be listed in `manageable_services` before start/stop/restart is accepted. Registered actions are fixed definitions with permission, confirmation, timeout, conflict class, validation, and an internal handler: device refresh/reboot/shutdown; allowlisted service start/stop/restart; configured WireGuard, desk_display, MagicMirror, and pi-hotspot restarts; and a non-mutating package check. Package upgrade/install, Git mutation, and arbitrary commands are absent.
+
+Routes include `POST /api/devices/ID/refresh|reboot|shutdown`, `POST /api/devices/ID/services/UNIT/start|stop|restart`, `POST`/`DELETE /api/devices/ID/maintenance`, `DELETE /api/devices/ID/expected-offline`, and `GET /api/actions[/JOB_ID]`. Requests return HTTP 202 with a durable job ID; poll the result endpoint until `succeeded`, `failed`, or `timed_out`. Output is bounded and sanitized. Commands use subprocess argument arrays with `shell=False`, exact verbs/units, `sudo -n`, explicit timeout and exit-code handling. Actions are serialized per device by a bounded worker pool independent of monitoring. Jobs abandoned by PiNOC restart become failed and are not replayed.
+
+### Reboot, shutdown, maintenance, and expected offline
+
+Reboot and shutdown require administrators and stronger UI confirmation. The audit request is written before dispatch. Reboot creates a ten-minute expected-offline grace and clears it when telemetry returns; shutdown remains expected offline until manually cleared. Expected outages are recorded as informational rather than network failures. Maintenance supports 30 minutes, 1, 4, 24 hours, or manual clearing plus a reason. Collection, metrics, and events continue, while reconciliation preserves existing alert conditions without generating takeover noise. Expiry is persistent across PiNOC restart, clears automatically on the next history cycle, records an event, and reevaluates the fresh state.
+
+### Audit, settings, and recovery
+
+`/audit` and `/api/audit` provide paginated/filterable records by user, device, action, result, and date. Attempts include identity/role/IP, sanitized parameters, authorization, execution status, exit code, duration, and safe error text. Action/audit data is retained independently of metric cleanup. Schema migration 5 adds users, hashed API tokens, action jobs, audit records, and persistent device operational state without recreating earlier history.
+
+`/settings` describes administrator configuration areas; `GET/PUT /api/settings` returns redacted configuration, validates the complete candidate, creates three rotating backups, fsyncs a mode-0600 temporary file, and atomically renames it. Current runtime changes report `restart_required`; no partial reload is claimed. On recovery, use the CLI to reset an administrator password or revoke a token. The uninstaller continues preserving config, database, audit records, users, and credentials unless explicit removal is chosen.
+
+### SSH enrollment and least privilege
+
+Key-based SSH in BatchMode is preferred; password fallback remains collection-only compatibility. Install the PiNOC public key with `pinoc-device-setup.sh`. Enroll a host key deliberately (for example, compare `ssh-keyscan` output with a console-displayed fingerprint before adding it to the PiNOC account's `known_hosts`). Normal OpenSSH checking then fails closed on a changed key; never replace a changed key without investigating.
+
+The helper generates only exact per-unit `systemctl start/stop/restart` entries and optionally exact `systemctl reboot/poweroff`; it validates the fragment with `visudo`. It never emits `NOPASSWD: ALL`. A compromised managed Pi can still attack data returned to collectors and its own SSH key relationship, so isolate management networks and remove stale keys. Private keys remain filesystem paths/permissions and are never exposed by the web API.
+
+### Threat model and remaining risk
+
+Mitigations address LAN attackers (enable HTTPS/authentication), stolen tokens (minimal scopes, hashes, revocation, last-use), compromised accounts (roles and complete audit), compromised managed Pis (per-device keys/segmentation), SSH host-key changes (fail closed), CSRF (session-bound token), command injection (fixed registry, unit allowlist, argument arrays), privilege escalation (exact sudoers), and secret leakage (central redaction and no private-key APIs). Remaining risks include an administrator's intentional power/config authority, traffic disclosure over HTTP, denial of service by a reachable peer, and the privileges necessarily granted for each selected service. Back up `config.json`, `data/pinoc.db`, SSH material, and the secret key with service-account-only permissions.
+
+### Milestone 6 boundary
+
+Milestone 5 identity, roles/scopes, audit schema, job lifecycle, device identity, redaction, configuration validation, and hardened SSH transport are reusable foundations. Milestone 6 remains a separate development-job design. PiNOC does **not** expose a shell, arbitrary command string, workspace/file editing, Codex/ChatGPT execution, remote pytest/npm, Git deployment, or AI hardware-test agent in this milestone.

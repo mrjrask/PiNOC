@@ -44,6 +44,11 @@ class Milestone3Test(unittest.TestCase):
   self.history._snapshot([device],old.isoformat());self.history.maintenance(now)
   self.assertEqual(self.db.scalar('select count(*) from storage_metrics'),0);self.assertEqual(self.db.scalar('select count(*) from network_metrics'),0)
   self.assertEqual(self.db.scalar('select latest_used from storage_aggregates'),850);self.assertEqual(self.db.scalar('select avg_rx_rate from network_aggregates'),12)
+ def test_maintenance_removes_expired_integration_metrics(self):
+  now=datetime.now(timezone.utc);old=(now-timedelta(days=8)).isoformat()
+  self.db.execute("insert into integration_metrics(timestamp,device_id,integration,metric,value) values(?,?,?,?,?)",(old,'pi','adsb','aircraft',1))
+  self.history.maintenance(now)
+  self.assertEqual(self.db.scalar('select count(*) from integration_metrics'),0)
  def test_forecast_states(self):
   now=datetime.now(timezone.utc);self.assertEqual(storage_forecast([])['status'],'insufficient')
   rows=[{'timestamp':(now+timedelta(days=i)).isoformat(),'used_bytes':100+i*10,'total_bytes':1000} for i in range(3)];self.assertEqual(storage_forecast(rows)['status'],'growing')
