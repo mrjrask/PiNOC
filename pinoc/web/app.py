@@ -10,7 +10,7 @@ from flask import Flask, abort, jsonify, render_template, request, session, redi
 from pinoc.state import PiNOCState
 from pinoc.integrations import sanitize
 from pinoc.integrations.adsb import compare as compare_adsb
-from pinoc.security import SecurityManager, install_security, require, redact
+from pinoc.security import SecurityManager, install_security, redact, restore_redacted
 from pinoc.actions import ActionDispatcher, ActionError
 from pinoc.config_store import atomic_save, validate_config
 
@@ -23,6 +23,15 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     auth_enabled=bool(app.config.get("AUTH_ENABLED",False))
     security=SecurityManager(history.db if history else app.config.get("DATABASE"),auth_enabled) if history or app.config.get("DATABASE") else None
     actions=ActionDispatcher(history.db,state,coordinator,int(app.config.get("ACTION_WORKERS",2))) if history else None
+    app.config["TOKEN_SCOPE_PERMISSIONS"]={
+        "api_session":"view",
+        "api_status":"view","api_devices":"view","api_device":"view","api_integrations":"view",
+        "api_device_integrations":"view","api_device_integration":"view","api_adsb":"view","api_displays":"view",
+        "api_deployments":"view","api_software":"view","api_network_inventory":"view","api_services":"view",
+        "api_alerts":"alerts.read","api_alert":"alerts.read",
+        "api_events":"history.read","device_events":"history.read","metrics":"history.read","forecast":"history.read",
+        "action_list":"actions.execute","action_result":"actions.execute","api_audit":"config.write","database_status":"config.write",
+    }
     if security:install_security(app,security)
     app.extensions["pinoc_security"]=security;app.extensions["pinoc_actions"]=actions
 
@@ -57,8 +66,10 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
         value=request.get_json(silent=True)
         try:
+            value=restore_redacted(value,app.config.get("PINOC_CONFIG",{}))
             validate_config(value,app.config.get("APP_DIR","."));atomic_save(app.config.get("CONFIG_PATH","config.json"),value)
         except (ValueError,OSError) as exc:return jsonify({"error":str(redact(exc))}),400
+        app.config["PINOC_CONFIG"]=value
         actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"config.update",None,{},"allowed","succeeded") if actions else None
         return jsonify({"ok":True,"restart_required":True})
     @app.get("/api/users")

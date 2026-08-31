@@ -72,3 +72,51 @@ def test_maintenance_persistence_redaction_and_atomic_backup(tmp_path):
  path=tmp_path/"config.json";atomic_save(path,{"devices":[],"polling":{"fleet_seconds":10}});atomic_save(path,{"devices":[],"polling":{"fleet_seconds":20}})
  assert path.with_name("config.json.bak.1").exists()
  dispatcher.stop()
+
+def test_cookie_session_is_revoked_when_user_is_disabled(tmp_path):
+ app,db=fixture(tmp_path);c=app.test_client();assert login(c).status_code==302
+ db.execute("UPDATE users SET enabled=0 WHERE username='person'")
+ assert c.get("/api/devices").status_code==401
+ with c.session_transaction() as session:assert "username" not in session
+ app.extensions["pinoc_actions"].stop()
+
+def test_bearer_read_scopes_are_enforced_per_endpoint(tmp_path):
+ app,db=fixture(tmp_path,"administrator");security=app.extensions["pinoc_security"]
+ fleet=security.create_token("person",["read:fleet"])
+ history=security.create_token("person",["read:history"])
+ execute=security.create_token("person",["execute:safe_actions"])
+ c=app.test_client()
+ assert c.get("/api/devices",headers={"Authorization":"Bearer "+fleet}).status_code==200
+ assert c.get("/api/devices/pi/metrics",headers={"Authorization":"Bearer "+fleet}).status_code==403
+ assert c.get("/api/audit",headers={"Authorization":"Bearer "+fleet}).status_code==403
+ assert c.get("/api/actions",headers={"Authorization":"Bearer "+fleet}).status_code==403
+ assert c.get("/api/devices/pi/metrics",headers={"Authorization":"Bearer "+history}).status_code==200
+ assert c.get("/api/actions",headers={"Authorization":"Bearer "+execute}).status_code==200
+ app.extensions["pinoc_actions"].stop()
+
+def test_failed_shutdown_clears_expected_offline_state(tmp_path):
+ app,db=fixture(tmp_path,"administrator");state=app.extensions["pinoc_actions"].state
+ def failed(args,**kwargs):return subprocess.CompletedProcess(args,1,"","no")
+ dispatcher=ActionDispatcher(db,state,runner=failed)
+ row={"device_id":"pi","action":"device.shutdown","requested_by":"person"}
+ try:
+  assert dispatcher._power(row,10)["exit_code"]==1
+  assert db.rows("SELECT expected_offline FROM device_operational_state WHERE device_id='pi'")[0]["expected_offline"]==0
+  def raised(args,**kwargs):raise OSError("dispatch failed")
+  dispatcher.runner=raised
+  try:dispatcher._power(row,10)
+  except OSError:pass
+  else:assert False
+  assert db.rows("SELECT expected_offline FROM device_operational_state WHERE device_id='pi'")[0]["expected_offline"]==0
+ finally:dispatcher.stop();app.extensions["pinoc_actions"].stop()
+
+def test_settings_save_restores_redacted_secrets(tmp_path):
+ app,_=fixture(tmp_path,"administrator");path=tmp_path/"config.json"
+ app.config.update(CONFIG_PATH=str(path),APP_DIR=str(tmp_path),PINOC_CONFIG={"devices":[],"network_inventory":{"shared_secret":"real-secret"}})
+ c=app.test_client();assert login(c).status_code==302
+ shown=c.get("/api/settings").json;assert shown["network_inventory"]["shared_secret"]=="[REDACTED]"
+ shown["polling"]={"fleet_seconds":30}
+ response=c.put("/api/settings",json=shown,headers={"X-CSRF-Token":token(c)})
+ assert response.status_code==200
+ assert __import__('json').loads(path.read_text())["network_inventory"]["shared_secret"]=="real-secret"
+ app.extensions["pinoc_actions"].stop()

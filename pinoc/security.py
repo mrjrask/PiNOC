@@ -1,6 +1,6 @@
 """Authentication, authorization, API tokens, CSRF, and secret redaction."""
 from __future__ import annotations
-import hashlib, hmac, json, re, secrets, threading, time
+import copy, hashlib, hmac, json, re, secrets, threading, time
 from datetime import timedelta
 from functools import wraps
 from typing import Any, Iterable
@@ -9,7 +9,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from pinoc.database import utcnow
 
 ROLES={"viewer":0,"operator":1,"administrator":2}
-PERMISSIONS={"view":"viewer","alerts.write":"operator","actions.execute":"operator","maintenance.write":"operator","device.power":"administrator","config.write":"administrator","users.write":"administrator"}
+PERMISSIONS={"view":"viewer","history.read":"viewer","alerts.read":"viewer","alerts.write":"operator","actions.execute":"operator","maintenance.write":"operator","device.power":"administrator","config.write":"administrator","users.write":"administrator"}
 SECRET_KEYS=re.compile(r"password|passwd|secret|token|private.?key|credential|authorization|cookie",re.I)
 
 def redact(value:Any)->Any:
@@ -20,6 +20,19 @@ def redact(value:Any)->Any:
         text=re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~-]+",r"\1[REDACTED]",text)
         text=re.sub(r"(?i)((?:password|secret|token)=)[^\s&]+",r"\1[REDACTED]",text)
     return text
+
+def restore_redacted(value:Any,current:Any,secret:bool=False)->Any:
+    """Replace redaction sentinels for secret fields with their current values."""
+    if secret and value=="[REDACTED]":
+        if current is None:raise ValueError("redacted secret has no existing value")
+        return copy.deepcopy(current)
+    if isinstance(value,dict):
+        existing=current if isinstance(current,dict) else {}
+        return {key:restore_redacted(item,existing.get(key),bool(SECRET_KEYS.search(str(key)))) for key,item in value.items()}
+    if isinstance(value,list):
+        existing=current if isinstance(current,list) else []
+        return [restore_redacted(item,existing[index] if index<len(existing) else None,secret) for index,item in enumerate(value)]
+    return value
 
 def hash_token(secret:str)->str:return hashlib.sha256(secret.encode()).hexdigest()
 
@@ -58,13 +71,16 @@ class SecurityManager:
             if row and row["user_enabled"] and hmac.compare_digest(row["secret_hash"],hash_token(secret)):
                 self.db.execute("UPDATE api_tokens SET last_used=? WHERE token_id=?",(utcnow(),token_id));return {"username":row["owner"],"role":row["role"],"scopes":json.loads(row["scopes_json"]),"token":True}
             return None
-        if session.get("username"):return {"username":session["username"],"role":session.get("role","viewer"),"scopes":[],"token":False}
+        if session.get("username"):
+            rows=self.db.rows("SELECT username,role FROM users WHERE username=? AND enabled=1",(session["username"],))
+            if rows:return {"username":rows[0]["username"],"role":rows[0]["role"],"scopes":[],"token":False}
+            session.clear();return None
         if not self.enabled:return {"username":"trusted-lan","role":"administrator","scopes":[],"token":False}
         return None
     def allowed(self,identity,permission):
         if not identity:return False
         if identity.get("token"):
-            scope={"view":"read:fleet","alerts.write":"write:alerts","actions.execute":"execute:safe_actions","maintenance.write":"execute:safe_actions","device.power":"execute:safe_actions","config.write":"admin:config","users.write":"admin:config"}[permission]
+            scope={"view":"read:fleet","history.read":"read:history","alerts.read":"read:alerts","alerts.write":"write:alerts","actions.execute":"execute:safe_actions","maintenance.write":"execute:safe_actions","device.power":"execute:safe_actions","config.write":"admin:config","users.write":"admin:config"}[permission]
             if scope not in identity["scopes"]:return False
         return ROLES.get(identity.get("role"),-1)>=ROLES[PERMISSIONS[permission]]
 
@@ -82,6 +98,9 @@ def install_security(app,manager):
         if manager.enabled and not g.identity and not public:
             if request.path.startswith("/api/"):return jsonify({"error":"authentication required"}),401
             return redirect(url_for("login",next=request.full_path))
+        permission=app.config.get("TOKEN_SCOPE_PERMISSIONS",{}).get(request.endpoint)
+        if permission and g.identity and g.identity.get("token") and not manager.allowed(g.identity,permission):
+            return jsonify({"error":"permission denied"}),403
         if request.method in {"POST","PUT","PATCH","DELETE"} and g.identity and not g.identity.get("token"):
             supplied=request.headers.get("X-CSRF-Token") or request.form.get("csrf_token")
             if not supplied or not hmac.compare_digest(str(supplied),str(session.get("csrf_token",""))):return jsonify({"error":"CSRF token missing or invalid"}),400

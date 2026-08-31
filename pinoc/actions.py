@@ -114,7 +114,15 @@ class ActionDispatcher:
     def _power(self,row,timeout):
         reason="reboot" if row["action"]=="device.reboot" else "shutdown";until=(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat() if reason=="reboot" else None
         self.db.execute("INSERT INTO device_operational_state VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET expected_offline=1,expected_offline_reason=excluded.expected_offline_reason,expected_offline_until=excluded.expected_offline_until,updated_at=excluded.updated_at,updated_by=excluded.updated_by",(row["device_id"],None,None,1,reason,until,utcnow(),row["requested_by"]))
-        verb="reboot" if reason=="reboot" else "poweroff";return self._command(self.state.device(row["device_id"]),["sudo","-n","systemctl",verb],timeout)
+        verb="reboot" if reason=="reboot" else "poweroff"
+        try:
+            result=self._command(self.state.device(row["device_id"]),["sudo","-n","systemctl",verb],timeout)
+        except Exception:
+            self._clear_expected_offline(row["device_id"],row["requested_by"]);raise
+        if result.get("exit_code")!=0:self._clear_expected_offline(row["device_id"],row["requested_by"])
+        return result
+    def _clear_expected_offline(self,device_id,actor):
+        self.db.execute("UPDATE device_operational_state SET expected_offline=0,expected_offline_reason=NULL,expected_offline_until=NULL,updated_at=?,updated_by=? WHERE device_id=?",(utcnow(),actor,device_id))
     def stop(self):
         self.stop_event.set()
         for t in self.threads:t.join(timeout=1)
