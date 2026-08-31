@@ -17,6 +17,12 @@ class PiNOCState:
         self._legacy_snapshot: Any = None
         self._started_at = datetime.now(timezone.utc).isoformat()
         self._last_collection: Optional[str] = None
+        self._publish_hooks: List[Any] = []
+
+    def add_publish_hook(self, hook: Any) -> None:
+        """Register a fast, failure-isolated observer of published snapshots."""
+        with self._lock:
+            self._publish_hooks.append(hook)
 
     def publish(
         self,
@@ -43,10 +49,29 @@ class PiNOCState:
             if legacy_snapshot is not None:
                 self._legacy_snapshot = legacy_snapshot
             self._last_collection = datetime.now(timezone.utc).isoformat()
+            published = [copy.deepcopy(d.to_dict()) for d in incoming]
+        for hook in tuple(self._publish_hooks):
+            try:
+                hook(published)
+            except Exception:
+                # Persistence and other observers must never break live state.
+                continue
 
     def set_alerts(self, alerts: Iterable[Dict[str, Any]]) -> None:
         with self._lock:
             self._alerts = copy.deepcopy(list(alerts))
+            ranks = {"healthy": 0, "warning": 1, "degraded": 2, "critical": 3, "offline": 4}
+            by_device: Dict[str, List[Dict[str, Any]]] = {}
+            for alert in self._alerts:
+                by_device.setdefault(str(alert.get("device_id", "")), []).append(alert)
+            for device_id, device in self._devices.items():
+                active = by_device.get(device_id, [])
+                device.alerts = copy.deepcopy(active)
+                highest = max((str(a.get("severity", "info")) for a in active),
+                              key=lambda value: ranks.get(value, 0), default="healthy")
+                if ranks.get(highest, 0) > ranks.get(device.health, 0):
+                    device.health = highest
+                    device.health_reasons.append(f"{highest} active alert")
 
     def legacy_snapshot(self) -> Any:
         with self._lock:

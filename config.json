@@ -29,6 +29,28 @@
     "stale_seconds": 30,
     "offline_seconds": 120
   },
+  "history": {
+    "enabled": true,
+    "database_path": "data/pinoc.db",
+    "core_interval_seconds": 60,
+    "network_interval_seconds": 60,
+    "storage_interval_seconds": 300,
+    "raw_retention_days": 7,
+    "hourly_retention_days": 90,
+    "daily_retention_days": 365,
+    "maintenance_interval_seconds": 3600,
+    "thresholds": {
+      "temperature_warning": 70,
+      "temperature_critical": 80,
+      "temperature_hysteresis": 3,
+      "cpu_warning": 90,
+      "cpu_duration_seconds": 300,
+      "memory_warning": 85,
+      "disk_warning": 80,
+      "disk_critical": 95,
+      "disk_hysteresis": 2
+    }
+  },
   "remote_host": "192.168.1.200",
   "remote_user": "pi",
   "remote_ssh_port": 22,
