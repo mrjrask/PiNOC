@@ -22,10 +22,11 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "device"
 
 
-def _strings(value: Any, field_name: str, label: str) -> List[str]:
+def _strings(value: Any, field_name: str, label: str, *, lowercase: bool = True) -> List[str]:
     if not isinstance(value, list) or any(not isinstance(x, str) for x in value):
         raise DeviceConfigError(f"device {label}: {field_name} must be a list of strings")
-    return list(dict.fromkeys(x.strip().lower() for x in value if x.strip()))
+    normalized = (x.strip().lower() if lowercase else x.strip() for x in value)
+    return list(dict.fromkeys(x for x in normalized if x))
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,8 @@ def parse_device(raw: Dict[str, Any], index: int) -> DeviceConfig:
     tags = _strings(raw.get("tags", []), "tags", label)
     monitored = _strings(raw.get("monitored_services", []), "monitored_services", label)
     critical = _strings(raw.get("critical_services", []), "critical_services", label)
+    important_paths = _strings(raw.get("important_paths", []), "important_paths", label,
+                               lowercase=False)
     if len(raw.get("monitored_services", [])) != len(set(raw.get("monitored_services", []))):
         raise DeviceConfigError(f"device {label}: monitored_services contains duplicates")
     monitored = list(dict.fromkeys(monitored + critical))
@@ -106,7 +109,7 @@ def parse_device(raw: Dict[str, Any], index: int) -> DeviceConfig:
                         ssh_port, bool(raw.get("cockpit_enabled", False)), scheme,
                         str(raw.get("cockpit_host", "")), cockpit_port, tuple(monitored), tuple(critical),
                         bool(raw.get("service_discovery", False)), str(raw.get("notes", "")),
-                        tuple(str(x) for x in raw.get("important_paths", [])),
+                        tuple(important_paths),
                         bool(raw.get("maintenance", False)), thresholds)
 
 

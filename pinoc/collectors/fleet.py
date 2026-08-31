@@ -183,7 +183,10 @@ class FleetCollector:
                 "address":device.address,"roles":list(device.roles),"tags":list(device.tags),"collection_method":device.collection_method,
                 "notes":device.notes,"cockpit_url":device.cockpit_url,"maintenance":device.maintenance}
             raw.update(last_collection_attempt=attempted,error=str(exc),collector_status={"transport":{"status":"error","error":str(exc)}})
-            health,reasons,stale=evaluate(raw,device.thresholds); raw.update(health=health,health_reasons=reasons,stale=stale,online=health!="offline")
+            health,reasons,stale=evaluate(raw,device.thresholds)
+            collected = raw.get("last_successful_collection") or raw.get("last_seen")
+            raw.update(health=health,health_reasons=reasons,stale=stale,
+                       online=bool(collected) and health != "offline")
             result=DeviceState.from_dict(raw); self.snapshots[device.id]=result; return result
 
     def collect(self) -> List[DeviceState]:

@@ -24,6 +24,12 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(errors); self.assertEqual((devices[0].id,devices[0].ssh_port),("cm5-file-server",2222))
         d=parse_device({"hostname":"pi","cockpit_enabled":True},0); self.assertEqual(d.cockpit_url,"https://pi:9090")
 
+    def test_important_paths_must_be_a_list_of_strings(self):
+        for value in ("/srv/data", None, 42, ["/srv/data", 42]):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    DeviceConfigError, "important_paths must be a list of strings"):
+                parse_device({"hostname": "pi", "important_paths": value}, 0)
+
 
 class ParsingTest(unittest.TestCase):
     def test_cpu_memory_storage_throttle_and_services(self):
@@ -66,8 +72,20 @@ class HealthTest(unittest.TestCase):
         d["important_paths"]=["/media/archive/backups"]
         self.assertEqual(evaluate(d)[0],"critical")
 
+    def test_maintenance_requires_recent_successful_telemetry(self):
+        self.assertEqual(evaluate({"maintenance": True})[0], "offline")
+        d = self.base(); d["maintenance"] = True
+        self.assertEqual(evaluate(d)[0], "maintenance")
+
 
 class ConcurrencyTest(unittest.TestCase):
+    def test_failed_first_collection_keeps_maintenance_device_offline(self):
+        device = parse_device({"hostname": "pi", "maintenance": True}, 0)
+        def runner(*_args, **_kwargs):
+            raise subprocess.TimeoutExpired("ssh", 1)
+        result = FleetCollector([device], runner=runner).collect_device(device)
+        self.assertEqual((result.health, result.online), ("offline", False))
+
     def test_slow_failure_does_not_prevent_healthy_result(self):
         devices=[parse_device({"id":x,"hostname":x},i) for i,x in enumerate(("slow","good"))]
         def runner(cmd,**kwargs):
