@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 
@@ -110,6 +111,25 @@ class RemoteTempRowsTest(unittest.TestCase):
             device_ids = {device["id"] for device in state.devices()}
             self.assertIn("pinoc", device_ids)
             self.assertFalse(any(device_id.startswith("local:") for device_id in device_ids))
+        finally:
+            coordinator.stop()
+
+    def test_fleet_device_preserves_legacy_applications_and_raid_health(self):
+        state = PiNOCState()
+        coordinator = SharedSnapshotCoordinator(state)
+        coordinator.snapshot.remote.online = True
+        coordinator.snapshot.remote.raid_status = "DEGRADED"
+        coordinator.snapshot.remote.smb_sessions = 2
+        coordinator.fleet_devices = [DeviceState(
+            id="cm5-file-server", hostname="cm5", friendly_name="CM5", online=True,
+            health="healthy", last_successful_collection=datetime.now(timezone.utc).isoformat(),
+        )]
+        try:
+            coordinator._publish()
+            device = state.device("cm5-file-server")
+            self.assertEqual(device["applications"]["samba"]["sessions"], 2)
+            self.assertEqual(device["applications"]["raid"]["status"], "DEGRADED")
+            self.assertEqual(device["health"], "critical")
         finally:
             coordinator.stop()
 
