@@ -18,10 +18,10 @@ def evaluate(device: Dict[str, Any], thresholds: Dict[str, float] | None = None,
              now: datetime | None = None) -> Tuple[str, list[str], bool]:
     t = {**DEFAULTS, **(thresholds or {})}; now = now or datetime.now(timezone.utc)
     age = _age(device.get("last_successful_collection") or device.get("last_seen"), now)
-    if device.get("maintenance"):
-        return "maintenance", ["maintenance mode"], False
     if age > t["offline_seconds"]:
         return "offline", ["telemetry offline"], False
+    if device.get("maintenance"):
+        return "maintenance", ["maintenance mode"], False
     stale = age > t["stale_seconds"]
     warnings, critical = [], []
     cpu, mem, hw = device.get("cpu", {}), device.get("memory", {}), device.get("hardware", {})

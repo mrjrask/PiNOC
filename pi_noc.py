@@ -42,7 +42,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from pinoc.collectors import CollectionScheduler, CollectionTask
 from pinoc.collectors.fleet import FleetCollector
 from pinoc.device_config import load_devices
+from pinoc.health import evaluate
 from pinoc.legacy import normalize_snapshot
+from pinoc.models import DeviceState
 from pinoc.state import PiNOCState
 
 
@@ -2147,12 +2149,26 @@ class SharedSnapshotCoordinator:
             self.snapshot.collected_at = time.time()
             snapshot = copy.deepcopy(self.snapshot)
             legacy = list(normalize_snapshot(snapshot, CONFIG))
+            legacy_by_id = {device.id: device for device in legacy}
             fleet_ids = {device.id for device in self.fleet_devices}
             local_fleet_published = bool(fleet_ids & self.local_fleet_ids)
             legacy_local_id = str(CONFIG.get("local_device_id") or f"local:{socket.gethostname()}")
+            fleet_devices = []
+            thresholds_by_id = {device.id: device.thresholds for device in self.fleet_collector.devices}
+            for device in self.fleet_devices:
+                raw = device.to_dict()
+                legacy_device = legacy_by_id.get(device.id)
+                if legacy_device is not None:
+                    raw["applications"] = {
+                        **legacy_device.applications,
+                        **raw.get("applications", {}),
+                    }
+                    health, reasons, stale = evaluate(raw, thresholds_by_id.get(device.id))
+                    raw.update(health=health, health_reasons=reasons, stale=stale)
+                fleet_devices.append(DeviceState.from_dict(raw))
             devices = [device for device in legacy
                        if device.id not in fleet_ids
-                       and not (local_fleet_published and device.id == legacy_local_id)] + list(self.fleet_devices)
+                       and not (local_fleet_published and device.id == legacy_local_id)] + fleet_devices
             setattr(snapshot, "fleet_devices", [device.to_dict() for device in devices])
             self.state.publish(devices, snapshot, replace=True)
 
