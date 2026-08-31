@@ -13,7 +13,21 @@
     "remote_health_seconds": 10,
     "service_seconds": 15,
     "storage_seconds": 60,
-    "sensor_seconds": 10
+    "sensor_seconds": 10,
+    "fleet_seconds": 10
+  },
+  "devices_file": "config/devices.json",
+  "fleet_max_workers": 4,
+  "ssh_command_timeout": 8,
+  "health_thresholds": {
+    "cpu_warning": 70,
+    "memory_warning": 80,
+    "temperature_warning": 70,
+    "temperature_critical": 80,
+    "disk_warning": 80,
+    "disk_critical": 95,
+    "stale_seconds": 30,
+    "offline_seconds": 120
   },
   "remote_host": "192.168.1.200",
   "remote_user": "pi",

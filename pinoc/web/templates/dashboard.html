@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% block title %}Fleet · PiNOC{% endblock %}{% block content %}
 <h1>Fleet overview</h1><p class="muted">Live cached monitoring state</p><section id="summary" class="summary"></section>
-<section class="panel"><div class="toolbar"><h2>Devices</h2><input id="search" type="search" placeholder="Search fleet…"></div>
+<section id="highlights" class="highlights"></section><section class="panel"><div class="toolbar"><h2>Devices</h2><div><label class="muted" for="sort">Sort </label><select id="sort"><option value="name">Name</option><option value="health">Health</option><option value="temperature">Temperature</option><option value="cpu">CPU</option><option value="memory">Memory</option><option value="disk">Disk</option><option value="uptime">Uptime</option></select> <input id="search" type="search" placeholder="Search names, roles, tags, services…"></div></div><div id="filters" class="filters"></div>
 <div id="devices" class="device-grid"><p>Waiting for the first background collection…</p></div></section>
 {% endblock %}{% block scripts %}<script>PiNOC.dashboard();</script>{% endblock %}

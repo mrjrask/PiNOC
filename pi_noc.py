@@ -40,6 +40,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from pinoc.collectors import CollectionScheduler, CollectionTask
+from pinoc.collectors.fleet import FleetCollector
+from pinoc.device_config import load_devices
 from pinoc.legacy import normalize_snapshot
 from pinoc.state import PiNOCState
 
@@ -134,6 +136,7 @@ WIDTH = ADA_WIDTH
 HEIGHT = ADA_HEIGHT
 PAGE_NAMES = [
     "SUMMARY",
+    "FLEET",
     "VPN",
     "RAID",
     "STORAGE",
@@ -1705,8 +1708,22 @@ def build_network_rows(snapshot: Snapshot) -> List[ScreenRow]:
     ]
 
 
+def build_fleet_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    devices = getattr(snapshot, "fleet_devices", [])
+    rows: List[ScreenRow] = []
+    symbols = {"healthy": "OK", "warning": "!", "degraded": "~", "critical": "X",
+               "offline": "-", "maintenance": "M"}
+    for device in devices:
+        name = str(device.get("friendly_name") or device.get("hostname") or device.get("id"))
+        temp = device.get("cpu", {}).get("temperature_c")
+        right = f"{temp:.0f}C {symbols.get(device.get('health'), '?')}" if temp is not None else symbols.get(device.get("health"), "?")
+        rows.append((name[:18], right, FONT_NORMAL))
+    return rows or [("Devices", "Waiting", FONT_NORMAL)]
+
+
 PAGE_ROW_BUILDERS = [
     build_summary_rows,
+    build_fleet_rows,
     build_vpn_rows,
     build_raid_rows,
     build_storage_rows,
@@ -1733,6 +1750,11 @@ def draw_page_from_rows(
 
 def draw_summary(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
     draw_page_from_rows(draw, snapshot, page, "DESK NOC", network_available(snapshot), scroll_offset)
+
+
+def draw_fleet(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    devices = getattr(snapshot, "fleet_devices", [])
+    draw_page_from_rows(draw, snapshot, page, f"PI FLEET {sum(bool(x.get('online')) for x in devices)}/{len(devices)}", None, scroll_offset)
 
 
 def draw_vpn(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
@@ -1773,6 +1795,7 @@ def draw_network(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scrol
 
 PAGE_DRAWERS = [
     draw_summary,
+    draw_fleet,
     draw_vpn,
     draw_raid,
     draw_storage,
@@ -2097,9 +2120,19 @@ class SharedSnapshotCoordinator:
             temp_devices=[],
         )
         self.temp_devices: Dict[str, TempDevice] = {}
+        devices, errors = load_devices(CONFIG, APP_DIR)
+        for error in errors:
+            logging.getLogger("pinoc.config").error("invalid fleet configuration: %s", error)
+        logging.getLogger("pinoc.config").info("loaded %d fleet device(s)", len(devices))
+        self.fleet_collector = FleetCollector(
+            devices, int(CONFIG.get("fleet_max_workers", 4)),
+            float(CONFIG.get("ssh_command_timeout", 8)), read_env_value("CM5_SSH_PASS"))
+        self.local_fleet_ids = {device.id for device in devices if device.collection_method == "local"}
+        self.fleet_devices: List[Any] = []
         polling = CONFIG.get("polling", {})
         temp_config = CONFIG.get("remote_temp_monitor", {})
         self.scheduler = CollectionScheduler([
+            CollectionTask("fleet", float(polling.get("fleet_seconds", 10)), self.collect_fleet),
             CollectionTask("local", float(polling.get("local_seconds", 10)), self.collect_local),
             CollectionTask("network", float(polling.get("network_seconds", 10)), self.collect_vpn),
             CollectionTask("remote_health", float(polling.get("remote_health_seconds", 10)), self.collect_remote_health),
@@ -2113,7 +2146,21 @@ class SharedSnapshotCoordinator:
         with self.lock:
             self.snapshot.collected_at = time.time()
             snapshot = copy.deepcopy(self.snapshot)
-            self.state.publish(normalize_snapshot(snapshot, CONFIG), snapshot, replace=True)
+            legacy = list(normalize_snapshot(snapshot, CONFIG))
+            fleet_ids = {device.id for device in self.fleet_devices}
+            local_fleet_published = bool(fleet_ids & self.local_fleet_ids)
+            legacy_local_id = str(CONFIG.get("local_device_id") or f"local:{socket.gethostname()}")
+            devices = [device for device in legacy
+                       if device.id not in fleet_ids
+                       and not (local_fleet_published and device.id == legacy_local_id)] + list(self.fleet_devices)
+            setattr(snapshot, "fleet_devices", [device.to_dict() for device in devices])
+            self.state.publish(devices, snapshot, replace=True)
+
+    def collect_fleet(self) -> None:
+        devices = self.fleet_collector.collect()
+        with self.lock:
+            self.fleet_devices = devices
+        self._publish()
 
     def collect_local(self) -> None:
         local = collect_local_status()
@@ -2736,7 +2783,7 @@ def main() -> None:
         from pinoc.web import create_app, serve
         host = read_env_value("PINOC_WEB_HOST") or str(CONFIG.get("web_host", "0.0.0.0"))
         port = int(read_env_value("PINOC_WEB_PORT") or CONFIG.get("web_port", 8088))
-        web_app = create_app(state)
+        web_app = create_app(state, {"HEALTH_STALE_SECONDS": CONFIG.get("health_cache_stale_seconds", 120)})
         threading.Thread(target=serve, args=(web_app, host, port), name="pinoc-web", daemon=True).start()
 
     display_enabled = (read_env_value("PINOC_DISPLAY_ENABLED") or "1").lower() not in ("0", "false", "no")

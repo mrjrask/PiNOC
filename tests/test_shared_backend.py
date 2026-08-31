@@ -64,6 +64,11 @@ class APIBackendTest(unittest.TestCase):
     def test_unknown_device_is_404(self):
         self.assertEqual(self.client.get("/api/devices/missing").status_code, 404)
 
+    def test_status_summary_preserves_updates_available(self):
+        self.state.publish([DeviceState(id="updates", hostname="updates", friendly_name="Updates",
+                                        applications={"updates_available": 3})])
+        self.assertEqual(self.state.summary()["updates_available"], 3)
+
     def test_health_is_starting_before_first_collection(self):
         from pinoc.web import create_app
         response = create_app(PiNOCState(), {"TESTING": True}).test_client().get("/health")

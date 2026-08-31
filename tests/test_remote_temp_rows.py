@@ -36,6 +36,7 @@ from pi_noc import (
     build_remote_temp_rows,
 )
 from pinoc.state import PiNOCState
+from pinoc.models import DeviceState
 
 
 def make_snapshot(temp_devices):
@@ -94,6 +95,21 @@ class RemoteTempRowsTest(unittest.TestCase):
             with patch.dict(CONFIG["remote_temp_monitor"], {"enabled": False, "max_device_age": 1}):
                 coordinator.collect_temperatures()
             self.assertIsNone(state.device("stale"))
+        finally:
+            coordinator.stop()
+
+    def test_fleet_local_device_replaces_legacy_local_device_with_a_different_id(self):
+        state = PiNOCState()
+        coordinator = SharedSnapshotCoordinator(state)
+        coordinator.local_fleet_ids = {"pinoc"}
+        coordinator.fleet_devices = [DeviceState(
+            id="pinoc", hostname="pinoc", friendly_name="PiNOC", collection_method="local"
+        )]
+        try:
+            coordinator._publish()
+            device_ids = {device["id"] for device in state.devices()}
+            self.assertIn("pinoc", device_ids)
+            self.assertFalse(any(device_id.startswith("local:") for device_id in device_ids))
         finally:
             coordinator.stop()
 
