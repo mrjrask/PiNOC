@@ -10,6 +10,7 @@ Group=pi
 SupplementaryGroups=i2c gpio
 WorkingDirectory=/home/pi/pi-noc
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/pi/pi-noc/.env
 ExecStart=/home/pi/pi-noc/.venv/bin/python /home/pi/pi-noc/pi_noc.py
 Restart=always
 RestartSec=5

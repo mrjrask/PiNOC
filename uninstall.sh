@@ -59,6 +59,7 @@ main() {
   remove_sudoers
   remove_venv
   log "Uninstall complete"
+  log "Configuration (.env/config.json), logs, and future history remain in ${REPO_DIR}."
 }
 
 main "$@"

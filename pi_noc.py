@@ -30,14 +30,46 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import logging
+import types
+import copy
+from logging.handlers import RotatingFileHandler
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import board
-from digitalio import DigitalInOut, Direction, Pull
-from PIL import Image, ImageDraw, ImageFont
+from pinoc.collectors import CollectionScheduler, CollectionTask
+from pinoc.legacy import normalize_snapshot
+from pinoc.state import PiNOCState
+
+
+def _early_display_enabled() -> bool:
+    value = os.environ.get("PINOC_DISPLAY_ENABLED", "")
+    if not value:
+        try:
+            for line in (Path(__file__).resolve().parent / ".env").read_text().splitlines():
+                if line.startswith("PINOC_DISPLAY_ENABLED="):
+                    value = line.split("=", 1)[1]
+                    break
+        except OSError:
+            pass
+    return (value or "1").lower() not in ("0", "false", "no")
+
+
+if _early_display_enabled():
+    Image = importlib.import_module("PIL.Image")
+    ImageDraw = importlib.import_module("PIL.ImageDraw")
+    ImageFont = importlib.import_module("PIL.ImageFont")
+else:
+    null_font = type("NullFont", (), {})
+    Image = types.SimpleNamespace(Image=Any)
+    ImageDraw = types.SimpleNamespace(ImageDraw=Any)
+    ImageFont = types.SimpleNamespace(
+        ImageFont=null_font,
+        truetype=lambda *_args, **_kwargs: null_font(),
+        load_default=lambda: null_font(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +86,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "vpn_stale_seconds": 150,
     "refresh_seconds": 10,
     "auto_rotate_seconds": 8,
+    "web_enabled": True,
+    "web_host": "0.0.0.0",
+    "web_port": 8088,
+    "polling": {
+        "local_seconds": 10,
+        "network_seconds": 10,
+        "remote_health_seconds": 10,
+        "service_seconds": 15,
+        "storage_seconds": 60,
+        "sensor_seconds": 10,
+    },
     "remote_host": "192.168.1.200",
     "remote_user": "pi",
     "remote_ssh_port": 22,
@@ -434,10 +477,14 @@ def collect_vpn_status() -> VPNStatus:
     return status
 
 
-def build_remote_script() -> str:
+def build_remote_script(
+    include_disks: bool = True,
+    include_raid: bool = True,
+    include_smb: bool = True,
+) -> str:
     disk_commands: List[str] = []
 
-    for index, item in enumerate(CONFIG["remote_paths"]):
+    for index, item in enumerate(CONFIG["remote_paths"] if include_disks else []):
         name = shlex.quote(str(item["name"]))
         path = shlex.quote(str(item["path"]))
 
@@ -445,7 +492,7 @@ def build_remote_script() -> str:
             f"disk_status D{index} {name} {path}"
         )
 
-    return """#!/bin/sh
+    script = """#!/bin/sh
 set -u
 
 printf 'REMOTE_OK=1\\n'
@@ -469,14 +516,19 @@ disk_status() {
     fi
 }
 
-""" + "\n".join(disk_commands) + """
+""" + "\n".join(disk_commands)
 
+    if include_raid:
+        script += """
 if [ -r /proc/mdstat ]; then
     printf 'MDSTAT_B64=%s\\n' "$(base64 -w0 /proc/mdstat 2>/dev/null || base64 /proc/mdstat 2>/dev/null | tr -d '\\n')"
 else
     printf 'MDSTAT_B64=\\n'
 fi
+"""
 
+    if include_smb:
+        script += """
 SMB_BIN=$(command -v smbstatus 2>/dev/null || true)
 
 if [ -n "$SMB_BIN" ]; then
@@ -490,6 +542,7 @@ else
     printf 'SMB_ERROR=smbstatus not installed\\n'
 fi
 """
+    return script
 
 
 def normalize_raid_device(raid_device: str) -> str:
@@ -580,6 +633,9 @@ def parse_raid(
 
 def collect_remote_status(
     vpn_connected: bool,
+    include_disks: bool = True,
+    include_raid: bool = True,
+    include_smb: bool = True,
 ) -> RemoteStatus:
     result_status = RemoteStatus(
         disks=[
@@ -641,7 +697,7 @@ def collect_remote_status(
     result = run_command(
         ssh_command,
         timeout=8,
-        input_text=build_remote_script(),
+        input_text=build_remote_script(include_disks, include_raid, include_smb),
         env_extra=env_extra,
     )
 
@@ -684,7 +740,7 @@ def collect_remote_status(
     except ValueError:
         pass
 
-    mdstat_b64 = values.get("MDSTAT_B64", "")
+    mdstat_b64 = values.get("MDSTAT_B64", "") if include_raid else ""
 
     if mdstat_b64:
         try:
@@ -710,9 +766,7 @@ def collect_remote_status(
 
     parsed_disks: List[DiskStatus] = []
 
-    for index, item in enumerate(
-        CONFIG["remote_paths"]
-    ):
+    for index, item in enumerate(CONFIG["remote_paths"] if include_disks else []):
         disk = DiskStatus(
             name=str(item["name"]),
             path=str(item["path"]),
@@ -745,7 +799,7 @@ def collect_remote_status(
 
     result_status.disks = parsed_disks
 
-    if "SMB_SESSIONS" in values:
+    if include_smb and "SMB_SESSIONS" in values:
         try:
             result_status.smb_sessions = int(
                 values["SMB_SESSIONS"]
@@ -763,7 +817,7 @@ def collect_remote_status(
             ).split(",")
             if user_name
         ]
-    else:
+    elif include_smb:
         result_status.smb_error = values.get(
             "SMB_ERROR",
             "smbstatus unavailable",
@@ -945,7 +999,8 @@ def parse_temp_monitor_response(
 
 def create_i2c_bus() -> Any:
     busio_module = importlib.import_module("busio")
-    return busio_module.I2C(board.SCL, board.SDA)
+    board_module = importlib.import_module("board")
+    return busio_module.I2C(board_module.SCL, board_module.SDA)
 
 
 def configured_i2c_addresses() -> List[int]:
@@ -1873,11 +1928,12 @@ class DisplayDevice:
 
 class AdafruitOLEDDisplay(DisplayDevice):
     def __init__(self) -> None:
+        board_module = importlib.import_module("board")
         busio_module = importlib.import_module("busio")
         ssd1306_module = importlib.import_module("adafruit_ssd1306")
         i2c = busio_module.I2C(
-            board.SCL,
-            board.SDA,
+            board_module.SCL,
+            board_module.SDA,
         )
         address = int(
             str(CONFIG["display_address"]),
@@ -1905,6 +1961,8 @@ class PimoroniDisplayHATMiniDisplay(DisplayDevice):
     LCD_HEIGHT = PIM_HEIGHT
 
     def __init__(self) -> None:
+        board_module = importlib.import_module("board")
+        digitalio_module = importlib.import_module("digitalio")
         displayhatmini_module = importlib.import_module("displayhatmini")
         self.buffer = Image.new(
             "RGB",
@@ -1939,26 +1997,10 @@ def create_display() -> DisplayDevice:
 
 
 class Buttons:
-    ADAFRUIT_PIN_MAP = {
-        "A": board.D5,
-        "B": board.D6,
-        "LEFT": board.D27,
-        "RIGHT": board.D23,
-        "UP": board.D17,
-        "DOWN": board.D22,
-        "CENTER": board.D4,
-    }
-    PIMORONI_PIN_MAP = {
-        "A": board.D5,
-        "B": board.D6,
-        "CENTER": board.D16,
-        "RIGHT": board.D24,
-    }
-
     def __init__(self) -> None:
         self.devices: Dict[
             str,
-            DigitalInOut,
+            Any,
         ] = {}
         self.previous: Dict[str, bool] = {}
         self.press_started: Dict[
@@ -1970,16 +2012,25 @@ class Buttons:
             bool,
         ] = {}
 
+        adafruit_pin_map = {
+            "A": board_module.D5, "B": board_module.D6, "LEFT": board_module.D27,
+            "RIGHT": board_module.D23, "UP": board_module.D17, "DOWN": board_module.D22,
+            "CENTER": board_module.D4,
+        }
+        pimoroni_pin_map = {
+            "A": board_module.D5, "B": board_module.D6, "CENTER": board_module.D16,
+            "RIGHT": board_module.D24,
+        }
         pin_map = (
-            self.PIMORONI_PIN_MAP
+            pimoroni_pin_map
             if DISPLAY_TYPE == DISPLAY_PIM_DHM
-            else self.ADAFRUIT_PIN_MAP
+            else adafruit_pin_map
         )
 
         for name, pin in pin_map.items():
-            device = DigitalInOut(pin)
-            device.direction = Direction.INPUT
-            device.pull = Pull.UP
+            device = digitalio_module.DigitalInOut(pin)
+            device.direction = digitalio_module.Direction.INPUT
+            device.pull = digitalio_module.Pull.UP
 
             self.devices[name] = device
             self.previous[name] = False
@@ -2032,14 +2083,127 @@ class Buttons:
 # Application
 # ---------------------------------------------------------------------------
 
-class DeskNOC:
-    def __init__(self) -> None:
-        self.stop_event = threading.Event()
-
-        self.executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="status",
+class SharedSnapshotCoordinator:
+    """Collect legacy domains independently and publish one shared snapshot."""
+    def __init__(self, state: PiNOCState) -> None:
+        self.state = state
+        self.lock = threading.RLock()
+        self.snapshot = Snapshot(
+            collected_at=0.0,
+            vpn=VPNStatus(error="Starting"),
+            remote=RemoteStatus(error="Starting"),
+            local=LocalStatus(),
+            sensor=SensorStatus(error="Starting"),
+            temp_devices=[],
         )
+        self.temp_devices: Dict[str, TempDevice] = {}
+        polling = CONFIG.get("polling", {})
+        temp_config = CONFIG.get("remote_temp_monitor", {})
+        self.scheduler = CollectionScheduler([
+            CollectionTask("local", float(polling.get("local_seconds", 10)), self.collect_local),
+            CollectionTask("network", float(polling.get("network_seconds", 10)), self.collect_vpn),
+            CollectionTask("remote_health", float(polling.get("remote_health_seconds", 10)), self.collect_remote_health),
+            CollectionTask("services", float(polling.get("service_seconds", 15)), self.collect_remote_services),
+            CollectionTask("storage", float(polling.get("storage_seconds", 60)), self.collect_remote_storage),
+            CollectionTask("sensor", float(polling.get("sensor_seconds", 10)), self.collect_sensor),
+            CollectionTask("temperatures", float(temp_config.get("poll_seconds", 10)), self.collect_temperatures),
+        ])
+
+    def _publish(self) -> None:
+        with self.lock:
+            self.snapshot.collected_at = time.time()
+            snapshot = copy.deepcopy(self.snapshot)
+            self.state.publish(normalize_snapshot(snapshot, CONFIG), snapshot, replace=True)
+
+    def collect_local(self) -> None:
+        local = collect_local_status()
+        with self.lock:
+            self.snapshot.local = local
+        self._publish()
+
+    def collect_vpn(self) -> None:
+        vpn = collect_vpn_status()
+        with self.lock:
+            self.snapshot.vpn = vpn
+        self._publish()
+
+    def _remote_available(self) -> bool:
+        with self.lock:
+            return self.snapshot.vpn.connected or not vpn_required(self.snapshot.local)
+
+    def collect_remote_health(self) -> None:
+        remote = collect_remote_status(self._remote_available(), False, False, False)
+        with self.lock:
+            current = self.snapshot.remote
+            current.online = remote.online
+            current.error = remote.error
+            current.temperature_c = remote.temperature_c
+            current.load_1m = remote.load_1m
+            current.uptime_seconds = remote.uptime_seconds
+        self._publish()
+
+    def collect_remote_services(self) -> None:
+        remote = collect_remote_status(self._remote_available(), False, False, True)
+        with self.lock:
+            current = self.snapshot.remote
+            current.smb_sessions = remote.smb_sessions
+            current.smb_users = remote.smb_users
+            current.smb_error = remote.smb_error or remote.error
+        self._publish()
+
+    def collect_remote_storage(self) -> None:
+        remote = collect_remote_status(self._remote_available(), True, True, False)
+        with self.lock:
+            current = self.snapshot.remote
+            current.disks = remote.disks
+            current.raid_status = remote.raid_status
+            current.raid_detail = remote.raid_detail
+        self._publish()
+
+    def collect_sensor(self) -> None:
+        sensor = collect_inside_sensor_status()
+        with self.lock:
+            self.snapshot.sensor = sensor
+        self._publish()
+
+    def collect_temperatures(self) -> None:
+        temp_config = CONFIG.get("remote_temp_monitor", {})
+        endpoint = str(temp_config.get("endpoint", ""))
+        if temp_config.get("enabled", True) and endpoint:
+            try:
+                with urllib.request.urlopen(endpoint, timeout=float(temp_config.get("timeout_seconds", 3))) as response:
+                    for device in parse_temp_monitor_response(response.read(65536), endpoint):
+                        self.temp_devices[device.device_id] = device
+            except (OSError, urllib.error.URLError, ValueError) as exc:
+                logging.getLogger("pinoc.collectors").warning("temperature collection failed: %s", exc)
+        max_age = float(temp_config.get("max_device_age", 60))
+        now = time.time()
+        self.temp_devices = {
+            device_id: device for device_id, device in self.temp_devices.items()
+            if now - device.last_seen <= max_age
+        }
+        with self.lock:
+            self.snapshot.temp_devices = list(self.temp_devices.values())
+        self._publish()
+
+    def start(self) -> None:
+        self.scheduler.start()
+
+    def refresh(self) -> None:
+        self.scheduler.refresh()
+
+    def stop(self) -> None:
+        self.scheduler.stop()
+
+class DeskNOC:
+    def __init__(self, shared_state: Optional[PiNOCState] = None, coordinator: Optional[Any] = None) -> None:
+        self.stop_event = threading.Event()
+        self.shared_state = shared_state
+        self.coordinator = coordinator
+
+        self.executor: Optional[ThreadPoolExecutor] = None
+        if shared_state is None:
+            self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="status")
 
         self.refresh_future: Optional[
             Future[Snapshot]
@@ -2051,7 +2215,7 @@ class DeskNOC:
             remote=RemoteStatus(
                 error="Starting"
             ),
-            local=collect_local_status(),
+            local=LocalStatus(),
             sensor=SensorStatus(error="Starting"),
             temp_devices=[],
         )
@@ -2170,6 +2334,10 @@ class DeskNOC:
         self,
         force: bool = False,
     ) -> None:
+        if self.coordinator is not None:
+            if force:
+                self.coordinator.refresh()
+            return
         if (
             self.refresh_future is not None
             and not self.refresh_future.done()
@@ -2189,6 +2357,8 @@ class DeskNOC:
             return
 
         self.last_refresh_started = now
+        if self.executor is None:
+            return
         self.refresh_future = (
             self.executor.submit(
                 collect_snapshot
@@ -2196,6 +2366,15 @@ class DeskNOC:
         )
 
     def accept_refresh(self) -> None:
+        if self.shared_state is not None:
+            cached = self.shared_state.legacy_snapshot()
+            if cached is not None:
+                self.snapshot = cached
+                self.scroll_offsets = [
+                    min(offset, max_scroll_offset(self.snapshot, page))
+                    for page, offset in enumerate(self.scroll_offsets)
+                ]
+            return
         if (
             self.refresh_future is None
             or not self.refresh_future.done()
@@ -2486,7 +2665,8 @@ class DeskNOC:
                 )
 
                 self.accept_refresh()
-                self.poll_temp_monitor()
+                if self.shared_state is None:
+                    self.poll_temp_monitor()
                 self.start_refresh()
                 self.handle_buttons()
 
@@ -2525,10 +2705,8 @@ class DeskNOC:
     def shutdown(self) -> None:
         self.stop_event.set()
 
-        self.executor.shutdown(
-            wait=False,
-            cancel_futures=True,
-        )
+        if self.executor is not None:
+            self.executor.shutdown(wait=False)
 
         try:
             self.display.fill(0)
@@ -2541,13 +2719,35 @@ class DeskNOC:
 
 
 def main() -> None:
-    app = DeskNOC()
+    log_dir = APP_DIR / "logs"
+    try:
+        log_dir.mkdir(exist_ok=True)
+        handler: logging.Handler = RotatingFileHandler(log_dir / "pinoc.log", maxBytes=1_000_000, backupCount=3)
+    except OSError:
+        handler = logging.StreamHandler()
+    logging.basicConfig(level=logging.INFO, handlers=[handler], format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    state = PiNOCState()
+    coordinator = SharedSnapshotCoordinator(state)
+    coordinator.start()
+
+    web_enabled = (read_env_value("PINOC_WEB_ENABLED") or str(CONFIG.get("web_enabled", True))).lower() not in ("0", "false", "no")
+    if web_enabled:
+        from pinoc.web import create_app, serve
+        host = read_env_value("PINOC_WEB_HOST") or str(CONFIG.get("web_host", "0.0.0.0"))
+        port = int(read_env_value("PINOC_WEB_PORT") or CONFIG.get("web_port", 8088))
+        web_app = create_app(state)
+        threading.Thread(target=serve, args=(web_app, host, port), name="pinoc-web", daemon=True).start()
+
+    display_enabled = (read_env_value("PINOC_DISPLAY_ENABLED") or "1").lower() not in ("0", "false", "no")
+    app = DeskNOC(state, coordinator) if display_enabled else None
+    stop_event = app.stop_event if app else threading.Event()
 
     def request_stop(
         _signum: int,
         _frame: Any,
     ) -> None:
-        app.stop_event.set()
+        stop_event.set()
 
     signal.signal(
         signal.SIGTERM,
@@ -2558,7 +2758,14 @@ def main() -> None:
         request_stop,
     )
 
-    app.run()
+    try:
+        if app:
+            app.run()
+        else:
+            while not stop_event.wait(1):
+                pass
+    finally:
+        coordinator.stop()
 
 
 if __name__ == "__main__":

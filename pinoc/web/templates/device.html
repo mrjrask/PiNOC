@@ -1,0 +1,2 @@
+{% extends "base.html" %}{% block title %}Device · PiNOC{% endblock %}{% block content %}<div id="device" data-id="{{ device_id }}"><p>Loading cached device state…</p></div>{% endblock %}
+{% block scripts %}<script>PiNOC.device(document.getElementById('device').dataset.id);</script>{% endblock %}

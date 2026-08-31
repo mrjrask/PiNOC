@@ -50,15 +50,46 @@ prompt_default() {
 }
 
 load_env_file() {
-  [[ -f "$ENV_FILE" ]] || fail "Missing ${ENV_FILE}; copy .env.example to .env and set CM5_SSH_PASS"
+  [[ -f "$ENV_FILE" ]] || fail "Missing ${ENV_FILE}; copy .env.example to .env"
   local line
   CM5_SSH_PASS=""
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%$'\r'}"
-    [[ "$line" == CM5_SSH_PASS=* ]] || continue
-    CM5_SSH_PASS="${line#CM5_SSH_PASS=}"
+    case "$line" in
+      CM5_SSH_PASS=*) CM5_SSH_PASS="${line#CM5_SSH_PASS=}" ;;
+      DISPLAY=*) DISPLAY="${line#DISPLAY=}" ;;
+      PINOC_DISPLAY_ENABLED=*) PINOC_DISPLAY_ENABLED="${line#PINOC_DISPLAY_ENABLED=}" ;;
+      PINOC_WEB_ENABLED=*) PINOC_WEB_ENABLED="${line#PINOC_WEB_ENABLED=}" ;;
+      PINOC_WEB_HOST=*) PINOC_WEB_HOST="${line#PINOC_WEB_HOST=}" ;;
+      PINOC_WEB_PORT=*) PINOC_WEB_PORT="${line#PINOC_WEB_PORT=}" ;;
+    esac
   done < "$ENV_FILE"
-  [[ -n "$CM5_SSH_PASS" ]] || fail "Set CM5_SSH_PASS in ${ENV_FILE} before running the installer"
+}
+
+configure_frontends() {
+  local display_enabled display_type web_enabled web_host web_port
+  prompt_default display_enabled "Enable physical display (1/0)" "${PINOC_DISPLAY_ENABLED:-1}"
+  prompt_default display_type "Display type (ADA_BONNET/PIM_DHM)" "${DISPLAY:-ADA_BONNET}"
+  [[ "$display_type" == "ADA_BONNET" || "$display_type" == "PIM_DHM" ]] || fail "Unsupported display type: ${display_type}"
+  prompt_default web_enabled "Enable web console (1/0)" "${PINOC_WEB_ENABLED:-1}"
+  web_host="${PINOC_WEB_HOST:-0.0.0.0}"
+  prompt_default web_port "Web console port" "${PINOC_WEB_PORT:-8088}"
+  [[ "$web_port" =~ ^[0-9]+$ ]] && ((web_port >= 1 && web_port <= 65535)) || fail "Invalid web port: ${web_port}"
+  python3 - "$ENV_FILE" "$display_enabled" "$display_type" "$web_enabled" "$web_host" "$web_port" <<'PY'
+import sys
+path, display_enabled, display_type, web_enabled, web_host, web_port = sys.argv[1:]
+values = {"PINOC_DISPLAY_ENABLED": display_enabled, "DISPLAY": display_type,
+          "PINOC_WEB_ENABLED": web_enabled, "PINOC_WEB_HOST": web_host, "PINOC_WEB_PORT": web_port}
+lines = open(path, encoding="utf-8").read().splitlines()
+seen = set()
+for index, line in enumerate(lines):
+    key = line.split("=", 1)[0]
+    if key in values:
+        lines[index] = f"{key}={values[key]}"
+        seen.add(key)
+lines.extend(f"{key}={value}" for key, value in values.items() if key not in seen)
+open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
 }
 
 install_system_dependencies() {
@@ -141,6 +172,7 @@ install_service() {
     -e "s#^User=.*#User=${INSTALL_USER}#" \
     -e "s#^Group=.*#Group=${INSTALL_USER}#" \
     -e "s#^WorkingDirectory=.*#WorkingDirectory=${REPO_DIR}#" \
+    -e "s#^EnvironmentFile=.*#EnvironmentFile=-${ENV_FILE}#" \
     -e "s#^ExecStart=.*#ExecStart=${VENV_DIR}/bin/python ${REPO_DIR}/pi_noc.py#" \
     -e "s#^After=.*#After=network-online.target ${vpn_service}#" \
     "$SERVICE_SOURCE" > "$tmp_service"
@@ -187,18 +219,20 @@ configure_ssh_to_cm5() {
   fi
 
   target="${ssh_user}@${ssh_host}"
-  SSHPASS="$CM5_SSH_PASS" sudo --preserve-env=SSHPASS -H -u "${INSTALL_USER}" \
-    sshpass -e ssh-copy-id \
-      -p "$ssh_port" \
-      -o StrictHostKeyChecking=accept-new \
-      "$target"
-
-  run_as_user ssh \
+  if run_as_user ssh \
     -p "$ssh_port" \
     -o BatchMode=yes \
     -o ConnectTimeout=5 \
     -o StrictHostKeyChecking=accept-new \
-    "$target" true
+    "$target" true; then
+    log "Existing SSH key authentication works for ${target}"
+    return
+  fi
+  [[ -n "$CM5_SSH_PASS" ]] || fail "SSH key authentication failed; set CM5_SSH_PASS temporarily to provision the key"
+  SSHPASS="$CM5_SSH_PASS" sudo --preserve-env=SSHPASS -H -u "${INSTALL_USER}" \
+    sshpass -e ssh-copy-id -p "$ssh_port" -o StrictHostKeyChecking=accept-new "$target"
+  run_as_user ssh -p "$ssh_port" -o BatchMode=yes -o ConnectTimeout=5 \
+    -o StrictHostKeyChecking=accept-new "$target" true
 }
 
 main() {
@@ -208,6 +242,7 @@ main() {
   [[ -f "$CONFIG_FILE" ]] || fail "Missing ${CONFIG_FILE}"
   [[ -f "$SERVICE_SOURCE" ]] || fail "Missing ${SERVICE_SOURCE}"
   load_env_file
+  configure_frontends
 
   install_system_dependencies
   enable_i2c
@@ -219,6 +254,7 @@ main() {
   install_service
 
   log "Installation complete"
+  log "Web console: http://$(hostname -I 2>/dev/null | awk '{print $1}'):${web_port}/ (when enabled)"
   log "Reboot if I2C or new group membership was not already active, then start with: sudo systemctl start ${SERVICE_NAME}"
 }
 

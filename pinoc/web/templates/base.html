@@ -1,0 +1,4 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}PiNOC{% endblock %}</title><link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"></head>
+<body><header><a href="/" class="brand">PiNOC <b>2.0</b></a><span>Raspberry Pi Network Operations</span></header>
+<main>{% block content %}{% endblock %}</main><script src="{{ url_for('static', filename='app.js') }}"></script>{% block scripts %}{% endblock %}</body></html>
