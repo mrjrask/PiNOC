@@ -51,8 +51,10 @@ class HistoryManager:
         self._refresh_cache()
     def _device(self,d,stamp):
         did=d["id"]; old=self.previous.get(did); ip=d.get("network",{}).get("ip") or d.get("ip") or ""
+        persisted=self.db.scalar("SELECT 1 FROM devices WHERE device_id=?",(did,)) is not None
         self.db.execute("""INSERT INTO devices(device_id,hostname,friendly_name,first_seen,last_seen,first_ip,last_ip,model,roles_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET hostname=excluded.hostname,friendly_name=excluded.friendly_name,last_seen=excluded.last_seen,last_ip=CASE WHEN excluded.last_ip<>'' THEN excluded.last_ip ELSE devices.last_ip END,model=excluded.model,roles_json=excluded.roles_json,updated_at=excluded.updated_at""",(did,d.get("hostname"),d.get("friendly_name"),d.get("first_seen") or stamp,d.get("last_seen"),ip,ip,d.get("model"),json.dumps(d.get("roles",[])),stamp,stamp))
-        if old is None:self._write_event(did,"device_first_seen","info","Device first discovered",{},stamp)
+        if old is None:
+            if not persisted:self._write_event(did,"device_first_seen","info","Device first discovered",{},stamp)
         else:
             if old.get("online") and not d.get("online"):self._write_event(did,"device_offline","critical","Device went offline",{},stamp)
             if not old.get("online") and d.get("online"):self._write_event(did,"device_online","info","Device returned online",{},stamp)

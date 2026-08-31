@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from pinoc.database import Database, SCHEMA_VERSION
 from pinoc.history import HistoryManager, storage_forecast
+from pinoc.state import PiNOCState
+from pinoc.web.app import create_app
 
 class Milestone3Test(unittest.TestCase):
  def setUp(self):
@@ -27,6 +29,16 @@ class Milestone3Test(unittest.TestCase):
   self.history._snapshot([device],(now+timedelta(minutes=1)).isoformat())
   alert=self.db.rows('select state,muted_until from alerts where alert_id=?',(aid,))[0]
   self.assertEqual(alert['state'],'active');self.assertIsNone(alert['muted_until'])
+ def test_restart_does_not_repeat_first_seen_event(self):
+  now=datetime.now(timezone.utc);device=self.device(now.isoformat());self.history._snapshot([device],now.isoformat())
+  restarted=HistoryManager(self.db,{'thresholds':{'cpu_duration_seconds':0}});restarted._snapshot([device],(now+timedelta(minutes=1)).isoformat())
+  self.assertEqual(self.db.scalar("select count(*) from events where event_type='device_first_seen'"),1)
+ def test_raw_metric_limit_keeps_newest_samples_in_order(self):
+  now=datetime.now(timezone.utc);start=now-timedelta(days=4)
+  with self.db.connect() as con:
+   con.executemany('insert into device_metrics(timestamp,device_id,cpu_percent) values(?,?,?)',(((start+timedelta(minutes=i)).isoformat(),'pi',i) for i in range(5001)))
+  response=create_app(PiNOCState(),history=self.history).test_client().get('/api/devices/pi/metrics?range=7d')
+  core=response.get_json()['core'];self.assertEqual(len(core),5000);self.assertEqual(core[0]['cpu_percent'],1);self.assertEqual(core[-1]['cpu_percent'],5000)
  def test_maintenance_preserves_storage_and_network_aggregates(self):
   now=datetime.now(timezone.utc);old=now-timedelta(days=8);device=self.device(old.isoformat());device['network'].update(rx_rate=12,tx_rate=8,signal_dbm=-45,signal_quality_percent=90)
   self.history._snapshot([device],old.isoformat());self.history.maintenance(now)
