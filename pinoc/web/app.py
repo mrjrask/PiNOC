@@ -21,7 +21,9 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     app.secret_key=app.config.get("SECRET_KEY") or os.getenv("PINOC_SECRET_KEY") or secrets.token_hex(32)
     app.config.update(SESSION_COOKIE_SECURE=bool(app.config.get("SESSION_COOKIE_SECURE",False)),SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE="Lax")
     auth_enabled=bool(app.config.get("AUTH_ENABLED",False))
-    security=SecurityManager(history.db if history else app.config.get("DATABASE"),auth_enabled) if history or app.config.get("DATABASE") else None
+    security_db=history.db if history else app.config.get("DATABASE")
+    if auth_enabled and security_db and not security_db.available:security_db.initialize()
+    security=SecurityManager(security_db,auth_enabled) if security_db else None
     actions=ActionDispatcher(history.db,state,coordinator,int(app.config.get("ACTION_WORKERS",2))) if history else None
     app.config["TOKEN_SCOPE_PERMISSIONS"]={
         "api_session":"view",

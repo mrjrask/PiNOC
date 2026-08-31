@@ -19,8 +19,8 @@ def test_activation_override_and_status():
     assert IntegrationStatus('x',health='bogus').to_dict()['health']=='unavailable'
 
 def test_adsb_and_comparison():
-    a=parse_aircraft({'aircraft':[{'hex':'abc','seen':1,'lat':1,'lon':2},{'hex':'old','seen':90}]})
-    assert a['aircraft']==1 and a['aircraft_with_positions']==1
+    a=parse_aircraft({'aircraft':[{'hex':'abc','seen':1,'lat':1,'lon':2},{'hex':'fresh','seen':0},{'hex':'old','seen':90}]})
+    assert a['aircraft']==2 and a['aircraft_with_positions']==1 and 'fresh' in a['aircraft_ids']
     assert parse_stats({'last1min':{'start':0,'end':60,'local':{'accepted':600}}})['messages_per_second']==10
     assert compare([{'device_id':'a','data':a},{'device_id':'b','data':{'aircraft_ids':['abc','def']}}])['aircraft_seen_by_all']==['abc']
 
@@ -40,7 +40,8 @@ def test_disk_packages_git_inventory():
     assert parse_nvme({'critical_warning':1})['health']=='critical'
     assert parse_smart({'smart_status':{'passed':True}})['health']=='healthy'
     assert parse_apt('Inst one\nInst sec [1] (2 Debian-Security)',True)['security_updates']==1
-    assert normalize('app','/x','branch=main\ncommit=abcdefghi\ndirty=1\nahead_behind=2 3')['behind']==3
+    git=normalize('app','/x','branch=main\ncommit=abcdefghi\ndirty=1\nahead_behind=2 3\nremote=https://user:token@example.com/org/repo.git')
+    assert git['behind']==3 and git['remote_url']=='https://example.com/org/repo.git'
     assert enrich([{'mac':'aa'}],[{'id':'pi','mac':'AA'}])[0]['managed']
 
 def test_api_cached_and_sanitized():

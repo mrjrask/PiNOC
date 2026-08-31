@@ -1,4 +1,5 @@
 import subprocess,time
+from datetime import datetime,timezone
 from pathlib import Path
 from pinoc.actions import ActionDispatcher,ActionError
 from pinoc.config_store import atomic_save
@@ -119,4 +120,21 @@ def test_settings_save_restores_redacted_secrets(tmp_path):
  response=c.put("/api/settings",json=shown,headers={"X-CSRF-Token":token(c)})
  assert response.status_code==200
  assert __import__('json').loads(path.read_text())["network_inventory"]["shared_secret"]=="real-secret"
+ app.extensions["pinoc_actions"].stop()
+
+def test_indefinite_maintenance_without_reason_suppresses_alerts(tmp_path):
+ app,db=fixture(tmp_path);history=HistoryManager(db,{"thresholds":{"cpu_duration_seconds":0}})
+ dispatcher=app.extensions["pinoc_actions"];dispatcher.set_maintenance("pi","person","",None)
+ device={"id":"pi","hostname":"pi","friendly_name":"Pi","online":True,"last_seen":datetime.now(timezone.utc).isoformat(),"cpu":{"utilization_percent":100,"temperature_c":90},"memory":{"percent":100},"storage":[],"services":[],"integrations":{}}
+ history._snapshot([device],device["last_seen"])
+ assert device["maintenance"] is True
+ assert db.scalar("SELECT COUNT(*) FROM alerts WHERE resolved_at IS NULL")==0
+ dispatcher.stop()
+
+def test_auth_initializes_database_when_history_is_disabled(tmp_path):
+ db=Database(str(tmp_path/"disabled-history.sqlite"));history=HistoryManager(db,{"enabled":False})
+ bootstrap=Database(str(db.path));assert bootstrap.initialize();SecurityManager(bootstrap,True).create_user("person","correct horse battery","operator")
+ state=PiNOCState();app=create_app(state,{"TESTING":True,"AUTH_ENABLED":True,"SECRET_KEY":"test"},history)
+ assert db.available is True
+ c=app.test_client();assert login(c).status_code==302
  app.extensions["pinoc_actions"].stop()
