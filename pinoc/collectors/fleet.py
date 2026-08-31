@@ -61,7 +61,7 @@ def parse_cpu(data: Dict[str, str], previous: Optional[tuple[int, int]] = None) 
     except ValueError: freq = None
     metric = {"utilization_percent": utilization, "load_1m": float(loads[0]) if loads else None,
               "load_5m": float(loads[1]) if len(loads)>1 else None, "load_15m": float(loads[2]) if len(loads)>2 else None,
-              "frequency_mhz": freq, "temperature_c": min(temps) if temps else None,
+              "frequency_mhz": freq, "temperature_c": max(temps) if temps else None,
               "soc_temperature_c": max(temps) if temps else None}
     return metric, (idle, total)
 
@@ -109,17 +109,24 @@ def parse_throttled(text: str) -> Dict[str, bool]:
 
 
 def parse_services(text: str, critical: Iterable[str], system_uptime: float = 0) -> List[Dict[str, Any]]:
+    def numeric_value(values: Dict[str, str], name: str) -> Optional[int]:
+        try:
+            return int(values.get(name, ""))
+        except (TypeError, ValueError):
+            return None
+
     result=[]; crit=set(critical)
     for block in text.split("\n\n"):
         values=dict(row.split("=",1) for row in block.splitlines() if "=" in row)
         if not values.get("Id"): continue
         active=values.get("ActiveState","unknown")
         state={"active":"running","inactive":"stopped","failed":"failed","activating":"activating","deactivating":"deactivating"}.get(active,"unknown")
-        try: active_mono=int(values.get("ActiveEnterTimestampMonotonic") or 0)/1_000_000
-        except ValueError: active_mono=0
+        active_mono_raw=numeric_value(values,"ActiveEnterTimestampMonotonic")
+        active_mono=active_mono_raw/1_000_000 if active_mono_raw else 0
+        main_pid=numeric_value(values,"MainPID")
         result.append({"name":values["Id"],"state":state,"load_state":values.get("LoadState"),"active_state":active,
-                       "sub_state":values.get("SubState"),"main_pid":int(values.get("MainPID") or 0) or None,
-                       "restart_count":int(values.get("NRestarts") or 0),"memory_bytes":int(values.get("MemoryCurrent") or 0) or None,
+                       "sub_state":values.get("SubState"),"main_pid":main_pid or None,
+                       "restart_count":numeric_value(values,"NRestarts"),"memory_bytes":numeric_value(values,"MemoryCurrent"),
                        "uptime_seconds":max(0,int(system_uptime-active_mono)) if active_mono else None,
                        "active_since_monotonic":active_mono or None,"critical":values["Id"] in crit})
     return result

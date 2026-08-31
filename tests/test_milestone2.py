@@ -37,6 +37,18 @@ class ParsingTest(unittest.TestCase):
         services=parse_services("Id=x.service\nLoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\nNRestarts=2",["x.service"])
         self.assertEqual((services[0]["state"],services[0]["critical"]),("failed",True))
 
+    def test_cpu_uses_hottest_sensor_for_health_temperature(self):
+        cpu,_=parse_cpu({"TEMP":"/sys/class/hwmon/hwmon0/temp1_input=42000\n"
+                                "/sys/class/thermal/thermal_zone0/temp=81000"})
+        self.assertEqual(cpu["temperature_c"],81)
+
+    def test_services_treat_unset_numeric_properties_as_unavailable(self):
+        services=parse_services("Id=x.service\nActiveState=inactive\nMainPID=[not set]\n"
+                                "NRestarts=[not set]\nMemoryCurrent=[not set]",[])
+        self.assertIsNone(services[0]["main_pid"])
+        self.assertIsNone(services[0]["restart_count"])
+        self.assertIsNone(services[0]["memory_bytes"])
+
 
 class HealthTest(unittest.TestCase):
     def base(self):
