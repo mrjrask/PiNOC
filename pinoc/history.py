@@ -123,7 +123,13 @@ class HistoryManager:
         seen=set()
         for key,(sev,msg,resource) in active.items():
             typ=key.split(":",1)[0]; fp=f"{did}:{typ}:{resource}";seen.add(fp)
-            if fp in existing:self.db.execute("UPDATE alerts SET last_seen_at=?,severity=?,message=? WHERE alert_id=?",(stamp,sev,msg,existing[fp]["alert_id"]))
+            if fp in existing:
+                row=existing[fp]
+                muted_until=row.get("muted_until")
+                mute_expired=row.get("state")=="muted" and (not muted_until or datetime.fromisoformat(muted_until)<=datetime.fromisoformat(stamp))
+                state="acknowledged" if row.get("acknowledged_at") else "active"
+                if mute_expired:self.db.execute("UPDATE alerts SET last_seen_at=?,severity=?,message=?,muted_until=NULL,state=? WHERE alert_id=?",(stamp,sev,msg,state,row["alert_id"]))
+                else:self.db.execute("UPDATE alerts SET last_seen_at=?,severity=?,message=? WHERE alert_id=?",(stamp,sev,msg,row["alert_id"]))
             else:self.db.execute("INSERT INTO alerts(device_id,alert_type,severity,message,fingerprint,opened_at,last_seen_at,state,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)",(did,typ,sev,msg,fp,stamp,stamp,"active",json.dumps({"resource":resource})))
         for fp,row in existing.items():
             if fp not in seen:
@@ -136,6 +142,7 @@ class HistoryManager:
     def maintenance(self,now=None):
         now=now or datetime.now(UTC); raw=int(self.config.get("raw_retention_days",7)); hourly=int(self.config.get("hourly_retention_days",90)); daily=int(self.config.get("daily_retention_days",365))
         with self.db.connect() as con:
+            con.execute("UPDATE alerts SET muted_until=NULL,state=CASE WHEN acknowledged_at IS NULL THEN 'active' ELSE 'acknowledged' END WHERE resolved_at IS NULL AND state='muted' AND muted_until<=?",(now.isoformat(),))
             for resolution,fmt,cutoff in (("hourly","%Y-%m-%dT%H:00:00+00:00",now-timedelta(days=raw)),("daily","%Y-%m-%dT00:00:00+00:00",now-timedelta(days=hourly))):
                 source="device_metrics" if resolution=="hourly" else "metric_aggregates"; timecol="timestamp" if resolution=="hourly" else "bucket"; condition="timestamp<?" if resolution=="hourly" else "resolution='hourly' AND bucket<?"
                 rows=con.execute(f"SELECT * FROM {source} WHERE {condition}",(cutoff.isoformat(),)).fetchall()
@@ -146,8 +153,17 @@ class HistoryManager:
                     def vals(k):return [x[k] for x in values if x.get(k) is not None]
                     cpu=vals("cpu_percent" if resolution=="hourly" else "avg_cpu"); temp=vals("cpu_temp_c" if resolution=="hourly" else "avg_temp"); mem=vals("memory_percent" if resolution=="hourly" else "avg_memory")
                     con.execute("INSERT OR REPLACE INTO metric_aggregates VALUES(?,?,?,?,?,?,?,?,?,?)",(bucket,resolution,did,sum(cpu)/len(cpu) if cpu else None,max(cpu) if cpu else None,sum(temp)/len(temp) if temp else None,min(temp) if temp else None,max(temp) if temp else None,sum(mem)/len(mem) if mem else None,sum(x.get("sample_count",1) for x in values)))
-            con.execute("DELETE FROM device_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM network_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM storage_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM metric_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),));con.execute("DELETE FROM metric_aggregates WHERE resolution='daily' AND bucket<?",((now-timedelta(days=daily)).isoformat(),))
+            cutoff=(now-timedelta(days=raw)).isoformat()
+            storage=con.execute("SELECT *,strftime('%Y-%m-%dT%H:00:00+00:00',timestamp) AS bucket FROM storage_metrics WHERE timestamp<?",(cutoff,)).fetchall()
+            for row in storage:
+                x=dict(row)
+                con.execute("""INSERT INTO storage_aggregates(bucket,resolution,device_id,mount_point,min_used,max_used,latest_used,total_bytes,sample_count) VALUES(?,'hourly',?,?,?,?,?,?,1)
+                    ON CONFLICT(bucket,resolution,device_id,mount_point) DO UPDATE SET min_used=min(min_used,excluded.min_used),max_used=max(max_used,excluded.max_used),latest_used=excluded.latest_used,total_bytes=excluded.total_bytes,sample_count=sample_count+1""",(x["bucket"],x["device_id"],x["mount_point"],x["used_bytes"],x["used_bytes"],x["used_bytes"],x["total_bytes"]))
+            network=con.execute("SELECT strftime('%Y-%m-%dT%H:00:00+00:00',timestamp) AS bucket,device_id,interface,AVG(rx_rate_bps),AVG(tx_rate_bps),AVG(wifi_signal_dbm),AVG(wifi_quality_percent),COUNT(*) FROM network_metrics WHERE timestamp<? GROUP BY bucket,device_id,interface",(cutoff,)).fetchall()
+            con.executemany("INSERT OR REPLACE INTO network_aggregates VALUES(?,'hourly',?,?,?,?,?,?,?)",network)
+            con.execute("DELETE FROM device_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM network_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM storage_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM metric_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),));con.execute("DELETE FROM metric_aggregates WHERE resolution='daily' AND bucket<?",((now-timedelta(days=daily)).isoformat(),));con.execute("DELETE FROM storage_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),));con.execute("DELETE FROM network_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),))
         self.db.last_aggregation=self.db.last_retention_cleanup=utcnow()
+        self._refresh_cache()
 
     def acknowledge(self,alert_id,actor="local"):
         stamp=utcnow();self.db.execute("UPDATE alerts SET acknowledged_at=?,acknowledged_by=?,state=CASE WHEN resolved_at IS NULL THEN 'acknowledged' ELSE state END WHERE alert_id=?",(stamp,actor,alert_id))

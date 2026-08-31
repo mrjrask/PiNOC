@@ -20,6 +20,18 @@ class Milestone3Test(unittest.TestCase):
  def test_transitions_ack_and_mute(self):
   now=datetime.now(timezone.utc);a=self.device(now.isoformat());self.history._snapshot([a],now.isoformat());aid=self.db.scalar('select min(alert_id) from alerts');self.history.acknowledge(aid);self.assertEqual(self.db.scalar('select state from alerts where alert_id=?',(aid,)),'acknowledged');self.history.mute(aid,(now+timedelta(hours=1)).isoformat());self.assertEqual(self.db.scalar('select state from alerts where alert_id=?',(aid,)),'muted');self.history.unmute(aid)
   b=self.device((now+timedelta(minutes=2)).isoformat(),ip='10.0.0.2');b['uptime_seconds']=2;b['boot_time']='2026-01-02T00:00:00+00:00';self.history._snapshot([b],b['last_seen']);types={x['event_type'] for x in self.db.rows('select event_type from events')};self.assertIn('ip_changed',types);self.assertIn('device_rebooted',types)
+ def test_expired_mute_reactivates_persistent_alert(self):
+  now=datetime.now(timezone.utc);device=self.device(now.isoformat());self.history._snapshot([device],now.isoformat())
+  aid=self.db.scalar("select min(alert_id) from alerts where alert_type='high_temperature'")
+  self.history.mute(aid,(now-timedelta(minutes=1)).isoformat())
+  self.history._snapshot([device],(now+timedelta(minutes=1)).isoformat())
+  alert=self.db.rows('select state,muted_until from alerts where alert_id=?',(aid,))[0]
+  self.assertEqual(alert['state'],'active');self.assertIsNone(alert['muted_until'])
+ def test_maintenance_preserves_storage_and_network_aggregates(self):
+  now=datetime.now(timezone.utc);old=now-timedelta(days=8);device=self.device(old.isoformat());device['network'].update(rx_rate=12,tx_rate=8,signal_dbm=-45,signal_quality_percent=90)
+  self.history._snapshot([device],old.isoformat());self.history.maintenance(now)
+  self.assertEqual(self.db.scalar('select count(*) from storage_metrics'),0);self.assertEqual(self.db.scalar('select count(*) from network_metrics'),0)
+  self.assertEqual(self.db.scalar('select latest_used from storage_aggregates'),850);self.assertEqual(self.db.scalar('select avg_rx_rate from network_aggregates'),12)
  def test_forecast_states(self):
   now=datetime.now(timezone.utc);self.assertEqual(storage_forecast([])['status'],'insufficient')
   rows=[{'timestamp':(now+timedelta(days=i)).isoformat(),'used_bytes':100+i*10,'total_bytes':1000} for i in range(3)];self.assertEqual(storage_forecast(rows)['status'],'growing')

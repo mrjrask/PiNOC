@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, Optional
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -25,6 +25,7 @@ CREATE TABLE storage_aggregates(bucket TEXT NOT NULL,resolution TEXT NOT NULL,de
 CREATE TABLE maintenance_state(key TEXT PRIMARY KEY,value TEXT);
 CREATE INDEX device_metrics_device_time ON device_metrics(device_id,timestamp); CREATE INDEX storage_device_mount_time ON storage_metrics(device_id,mount_point,timestamp); CREATE INDEX network_device_time ON network_metrics(device_id,timestamp); CREATE INDEX service_device_name_time ON service_status(device_id,service_name,timestamp); CREATE INDEX alerts_state ON alerts(state); CREATE INDEX alerts_device ON alerts(device_id); CREATE INDEX events_device_time ON events(device_id,timestamp); CREATE INDEX events_time ON events(timestamp);""",
 """CREATE INDEX IF NOT EXISTS alerts_type ON alerts(alert_type); CREATE INDEX IF NOT EXISTS events_type ON events(event_type);""",
+"""CREATE TABLE network_aggregates(bucket TEXT NOT NULL,resolution TEXT NOT NULL,device_id TEXT NOT NULL,interface TEXT NOT NULL,avg_rx_rate REAL,avg_tx_rate REAL,avg_wifi_signal REAL,avg_wifi_quality REAL,sample_count INTEGER NOT NULL,PRIMARY KEY(bucket,resolution,device_id,interface));""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()
