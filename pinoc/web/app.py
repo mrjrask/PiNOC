@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from flask import Flask, abort, jsonify, render_template
+from flask import Flask, abort, jsonify, render_template, request
 
 from pinoc.state import PiNOCState
 
@@ -33,8 +33,10 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None) -> Fl
             status = "ok" if age <= float(app.config.get("HEALTH_STALE_SECONDS", 120)) else "degraded"
         response_code = 200 if status == "ok" else 503
         return jsonify({"status": status, "devices": summary["devices"], "online": summary["online"],
-                        "warnings": summary["warnings"], "critical": summary["critical"],
-                        "database": summary["database"]}), response_code
+                        "healthy": summary["healthy"], "warning": summary["warning"],
+                        "warnings": summary["warnings"], "degraded": summary["degraded"],
+                        "critical": summary["critical"], "offline": summary["offline"],
+                        "collectors": "ok" if summary["last_collection"] else "starting"}), response_code
 
     @app.get("/api/status")
     def api_status():
@@ -42,7 +44,12 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None) -> Fl
 
     @app.get("/api/devices")
     def api_devices():
-        return jsonify({"devices": state.devices()})
+        devices = state.devices()
+        health, role, tag = request.args.get("health"), request.args.get("role"), request.args.get("tag")
+        if health: devices = [d for d in devices if d.get("health") == health]
+        if role: devices = [d for d in devices if role.lower() in d.get("roles", [])]
+        if tag: devices = [d for d in devices if tag.lower() in d.get("tags", [])]
+        return jsonify({"devices": devices})
 
     @app.get("/api/devices/<device_id>")
     def api_device(device_id: str):

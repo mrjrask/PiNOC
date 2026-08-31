@@ -67,18 +67,17 @@ class PiNOCState:
 
     def summary(self) -> Dict[str, Any]:
         devices = self.devices()
-        counts = {name: 0 for name in ("healthy", "warning", "degraded", "critical", "offline")}
+        counts = {name: 0 for name in ("healthy", "warning", "degraded", "critical", "offline", "maintenance")}
         for device in devices:
             counts[device.get("health", "offline")] = counts.get(device.get("health", "offline"), 0) + 1
         failed_services = sum(
             1 for device in devices for service in device.get("services", [])
-            if service.get("state") in ("failed", "inactive")
+            if service.get("state") in ("failed", "inactive", "stopped")
         )
         return {
             "devices": len(devices), "online": sum(bool(d.get("online")) for d in devices),
             **counts, "warnings": counts["warning"] + counts["degraded"],
             "failed_services": failed_services,
-            "updates_available": sum(int(d.get("applications", {}).get("updates_available", 0) or 0) for d in devices),
             "database": "not_configured", "started_at": self._started_at,
             "last_collection": self._last_collection,
         }

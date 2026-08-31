@@ -236,6 +236,7 @@ configure_ssh_to_cm5() {
 }
 
 main() {
+  (cd "$REPO_DIR" && python3 -m pinoc.validate_config) || fail "PiNOC configuration validation failed"
   need_root
   INSTALL_USER="${SUDO_USER:-pi}"
   id "$INSTALL_USER" >/dev/null 2>&1 || fail "Install user ${INSTALL_USER} does not exist"

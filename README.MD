@@ -2,18 +2,18 @@
 
 PiNOC is a centralized Raspberry Pi network operations console with one shared,
 cached monitoring backend and two frontends: a responsive web console and the
-existing Adafruit 128x64 OLED Bonnet or Pimoroni Display HAT Mini. Milestone 1
-preserves the established WireGuard, CM5/file-server, RAID, SMB, storage, local
-Pi, remote-temperature, and StemmaQT sensor monitoring and makes that same data
-available on the web.
+existing Adafruit 128x64 OLED Bonnet or Pimoroni Display HAT Mini. Milestone 2
+adds true multi-device local/SSH fleet monitoring while preserving the established
+WireGuard, CM5/file-server, RAID, SMB, storage, local Pi, remote-temperature,
+and StemmaQT sensor pages.
 
 ## Architecture
 
 ```text
                           bounded background work
 ┌──────────────────────────────────────────────────────────┐
-│ Collectors: local, WireGuard, SSH/CM5, RAID, SMB, disks, │
-│ remote temperatures, and local environmental sensor      │
+│ Collectors: bounded local/SSH fleet, WireGuard, legacy   │
+│ CM5/RAID/SMB, temperatures, and environmental sensor     │
 └───────────────────────────┬──────────────────────────────┘
                             ▼
                  ┌──────────────────────┐
@@ -99,10 +99,110 @@ runtime, SSH uses key-only `BatchMode=yes`; the password behavior remains as a
 backward-compatible fallback. Keep `.env` mode-restricted.
 
 Normalized devices include identity, roles/tags, CPU, hardware health, memory,
-storage, network, services, applications, and alerts. Milestone 1 emits the
-local console (`pinoc`, `desk_display` roles), configured CM5 (`file_server`),
-and remote temperature sources. Arbitrary device definitions, richer health
-thresholds, and Cockpit URLs are deliberately scheduled for Milestone 2.
+storage, network, services, applications, Cockpit links, collector-domain
+status, collection timestamps, and centralized health reasons.
+
+## Adding devices
+
+Copy `config/devices.example.json` to `config/devices.json` and edit its standard
+JSON `devices` array. JSON comments are not supported; put explanations in the
+device `notes` field or documentation. Validate before restarting:
+
+```bash
+cp config/devices.example.json config/devices.json
+python3 -m pinoc.validate_config
+sudo systemctl restart pi-noc
+```
+
+Each device should have an explicit, persistent `id`; it is the API and URL
+identity and must not be an IP address. When omitted, PiNOC derives a lowercase
+slug from `hostname` (for example `ADS-B North` becomes `ads-b-north`), so DHCP
+address changes do not alter identity. `friendly_name` is the prominent label,
+with hostname beneath it. `roles` can contain `file_server`, `vpn_server`,
+`adsb_receiver`, `desk_display`, `magicmirror`, `pinoc`, `hotspot`, or `general`.
+Unknown role strings and arbitrary tags are retained for labeling and filters.
+
+Both `local` and `ssh` collection methods produce the same cached schema. There
+should normally be one `local` entry. SSH supports DNS names, mDNS names, or IPs,
+custom `ssh_user` and `ssh_port`, an 8-second default command timeout, and a
+bounded four-worker pool. PiNOC prefers SSH keys and uses `BatchMode=yes`.
+`CM5_SSH_PASS` remains a deprecated provisioning/runtime fallback via `sshpass`;
+never place a password in device JSON. Provision keys with `ssh-copy-id -p 22
+pi@host` and test the connection as the service user.
+
+Example device:
+
+```json
+{
+  "id": "piawaren",
+  "hostname": "piawaren",
+  "friendly_name": "ADS-B North",
+  "address": "piawaren.local",
+  "collection_method": "ssh",
+  "ssh_user": "pi",
+  "ssh_port": 22,
+  "roles": ["adsb_receiver"],
+  "tags": ["adsb", "upstairs"],
+  "cockpit_enabled": true,
+  "cockpit_scheme": "https",
+  "cockpit_port": 9090,
+  "monitored_services": ["piaware.service", "dump1090-fa.service", "cockpit.socket"],
+  "critical_services": ["piaware.service", "dump1090-fa.service"],
+  "notes": "North receiver"
+}
+```
+
+Critical services are automatically included in monitored services. Service
+rows expose systemd load/active/sub states, normalized state, PID, restart count,
+and memory where systemd provides them. `service_discovery` reserves opt-in
+PiNOC-relevant discovery behavior; manually listed services remain authoritative.
+Cockpit is never proxied: **Open Cockpit** links directly to
+`<scheme>://<cockpit_host-or-address>:<port>`.
+
+## Health, freshness, and collection errors
+
+Health is evaluated in one backend layer, never templates. Defaults are warning
+above 70% CPU, 80% RAM, 70°C, or 80% disk; critical above 80°C or 95% disk, for
+current undervoltage/throttling, read-only important storage, degraded legacy
+RAID, or failed critical services. One warning is `warning`; multiple warnings
+or telemetry older than 30 seconds is `degraded`; telemetry older than 120
+seconds is `offline`. `maintenance` suppresses normal evaluation. Per-device
+numeric `thresholds` are accepted as the forward-compatible override mechanism.
+Failed attempts do not erase the last successful snapshot: `last_seen`,
+`last_successful_collection`, `last_collection_attempt`, a safe error message,
+and `collector_status` remain distinct. Missing `vcgencmd` or `iw` is treated as
+an unavailable optional capability, not device failure.
+
+## Fleet console and physical Fleet page
+
+The dashboard automatically shows every cached device, eight summary cards,
+numeric fleet highlights, case-insensitive search across names/IP/roles/tags/
+services, and generated health/role filters. The API also accepts `health`,
+`role`, and `tag` query parameters. Device pages contain overview, hardware,
+CPU/temperature, memory, filtered filesystems, network, services, collector
+status, roles/tags, notes, and an optional Cockpit action. The physical **Fleet**
+page uses the same cache, shows online/total, friendly names, temperatures and
+health symbols, and uses the existing scrolling controls on both display types.
+
+## Legacy CM5 compatibility
+
+If `config/devices.json` is absent, existing `remote_host`, `remote_user`,
+`remote_ssh_port`, `remote_paths`, `raid_device`, `remote_device_id`, and
+`CM5_SSH_PASS` settings are translated into a fleet device. If new-style devices
+exist, a non-duplicated legacy CM5 is still added. The dedicated CM5 Server,
+Storage, Samba, RAID, and WireGuard collectors/pages remain intact, so migration
+can be gradual. Set the same explicit ID as `remote_device_id` to let the richer
+new collector representation take precedence in generalized fleet views.
+
+## Troubleshooting fleet devices
+
+* Run `python3 -m pinoc.validate_config`; errors identify the device and field.
+* For unreachable devices, test `ssh -o BatchMode=yes -p PORT USER@ADDRESS true`,
+  then check DNS/mDNS, host keys, firewall, keys, and `logs/pinoc.log`.
+* A slow host times out independently and cannot serialize the rest of the fleet.
+* Empty temperature/Wi-Fi fields commonly mean `vcgencmd`/thermal sysfs/`iw` is
+  unavailable; this is supported. Use DEBUG logging when diagnosing collectors.
+* The web and API intentionally serve cached snapshots only; they never SSH.
 
 ## Installation and upgrade
 
@@ -177,11 +277,11 @@ bash -n uninstall.sh
 python3 -m json.tool config.json >/dev/null
 ```
 
-## Milestone 2 remaining work
+## Deferred to Milestone 3 and later
 
-Milestone 2 will add arbitrary multi-Pi definitions and local/SSH collection
-modes, full CPU/memory/storage/network/service data, roles/tags/friendly names,
-central configurable warning/critical/offline classification, Cockpit links,
-and richer fleet filtering/search. The collector interface and normalized
-model intentionally leave room for a later `agent` mode without coupling this
-release to another repository.
+Historical/time-series SQLite storage and graphs, alert acknowledgement/history,
+forecasting, package/Git monitoring, application analytics and controls, remote
+service/reboot actions, a configuration editor, the remote agent transport, and
+Prometheus export are intentionally not implemented. Milestone 2 is read-only
+current-state monitoring and leaves transport/application hooks for those later
+milestones without fake data.
