@@ -277,11 +277,125 @@ bash -n uninstall.sh
 python3 -m json.tool config.json >/dev/null
 ```
 
-## Deferred to Milestone 3 and later
+## Milestone 2 baseline
 
-Historical/time-series SQLite storage and graphs, alert acknowledgement/history,
-forecasting, package/Git monitoring, application analytics and controls, remote
-service/reboot actions, a configuration editor, the remote agent transport, and
-Prometheus export are intentionally not implemented. Milestone 2 is read-only
-current-state monitoring and leaves transport/application hooks for those later
-milestones without fake data.
+Milestone 2 provided read-only current-state monitoring. The following section documents the durable Milestone 3 additions while later transport, application, and management work remains deferred.
+
+## Milestone 3: durable history and operational awareness
+
+PiNOC now attaches a bounded, serialized history queue after publication to the
+live state cache. Collectors, current-state API routes, and both displays remain
+independent of SQLite. If initialization, migration, locking, or a later write
+fails, PiNOC logs the failure and continues in live/no-history mode; `/health`
+and `/settings/status` expose the degraded database state.
+
+### SQLite, migrations, and sampling
+
+The default database is `data/pinoc.db`; set `PINOC_DATABASE_PATH` to an absolute
+file path when another durable volume is preferred. The standard-library SQLite
+driver uses WAL and a busy timeout. Ordered transactions recorded by
+`schema_version` create `devices`, `device_metrics`, `storage_metrics`,
+`network_metrics`, transition-only `service_status`, `alerts`, `events`, and
+hourly/daily aggregate tables. Configuration is authoritative; persisted device
+rows are observations tied to stable device IDs, not a second configuration.
+Mount point is the stable storage-series key and systemd unit name is the stable
+service key.
+
+Live polls are not database sampling intervals. Defaults store core and network
+samples every 60 seconds and storage every 300 seconds. Raw samples remain seven
+days, idempotent hourly buckets remain 90 days, and daily buckets remain 365
+days. Maintenance aggregates before deleting raw rows and never routinely runs
+`VACUUM`. Run `python3 -m pinoc.database vacuum --database PATH` during a planned
+maintenance window if compaction is required. Timestamps and numeric units are
+UTC ISO-8601, Celsius, integer bytes, bytes/second, and percentages. Missing
+samples remain gaps and are never interpolated.
+
+### Graphs, APIs, and forecasts
+
+Device pages asynchronously load CPU, temperature, memory, network, Wi-Fi, and
+storage history with `1h`, `6h`, `24h`, `7d`, and `30d` controls, browser-local
+timestamps, range summary statistics, empty-data handling, and bounded point
+counts. Thirty-day requests automatically select hourly aggregates. Available
+read APIs are:
+
+* `GET /api/devices/<id>/metrics?range=24h`
+* `GET /api/devices/<id>/storage/forecast`
+* `GET /api/events` and `GET /api/devices/<id>/events`
+* `GET /api/alerts` and `GET /api/alerts/<alert_id>`
+* `POST /api/alerts/<id>/acknowledge`, `/mute`, and `/unmute`
+* `GET /api/database/status`
+
+Alerts/events accept bounded pagination (`page`, `limit`, default 50, maximum
+200) and device/type/severity/state filters as applicable. History metric ranges
+are deliberately allowlisted; the JSON response documents units and is suitable
+for external export.
+
+Storage forecasting uses the observed change between sufficiently separated
+samples over up to 14 days. Fewer than three samples or less than half a day is
+`insufficient`; near-zero growth is `stable`; negative growth is `decreasing`;
+positive growth reports an approximate days-remaining value and a qualitative
+confidence based only on sample count/span. It does not invent exact full dates.
+
+### Alerts and health
+
+The centralized alert engine evaluates connectivity, sustained CPU, temperature,
+memory, disk capacity/read-only state, active Pi power/throttling bits, monitored
+services, and RAID degradation. A stable `device:type:resource` fingerprint
+updates one unresolved occurrence instead of inserting every poll. Recovery
+marks that occurrence resolved and adds a recovery event; a later recurrence
+creates a new occurrence, preserving history.
+
+States are `active`, `acknowledged`, `muted`, and `resolved`. Acknowledgement
+records time/actor without resolving the condition. Mute suppresses presentation
+noise temporarily without collection loss. Automatically evaluated problems are
+resolved only when telemetry clears them. Active severity (`info`, `warning`,
+`degraded`, `critical`) is folded into cached health so health cannot be less
+severe than its active alerts. Thresholds are configured under
+`history.thresholds`; current defaults and per-device live health overrides
+remain backward compatible. Temperature/disk configuration includes hysteresis
+fields and CPU uses a configurable sustained duration. Maintenance-mode devices
+remain a future scheduling hook rather than a new settings editor.
+
+The `/alerts` page provides lifecycle filters and acknowledgement/mute actions.
+The dashboard emphasizes active alerts, device payloads include active alert
+indicators, and the physical `ALERTS` page uses the same persistent alert cache,
+ordered critical, degraded, then warning. Display navigation dismisses a view
+without acknowledging its durable alert.
+
+### Events
+
+Events are append-only notable transitions, not routine polls. PiNOC records
+startup, first discovery, offline/returned-online, non-empty IP changes, uptime/
+boot-time reboot evidence, monitored service changes and recoveries, alert
+recoveries, and newly observed vcgencmd historical undervoltage, throttling,
+frequency-cap, and soft-temperature-limit bits. `/events` provides the fleet
+feed and every device page includes its recent timeline. Initial observations
+seed prior state and do not fabricate IP changes or reboots.
+
+### Backup, upgrade, and recovery
+
+Use SQLite's online backup API while PiNOC is running:
+
+```bash
+python3 -m pinoc.database backup /safe/path/pinoc-backup.db --database data/pinoc.db
+```
+
+Upgrading from Milestone 2 preserves `config.json`, `.env`, live behavior, and
+stable device identities. The installer creates the data parent with restricted
+ownership and never removes an existing database. The uninstaller continues to
+preserve checkout configuration, logs, alerts, events, and history by default.
+The database initializes automatically and history begins at the first new
+sample; Milestone 2 had no historical rows to migrate.
+
+Never delete a database in response to a migration/corruption error. Stop PiNOC,
+back up the file and its `-wal`/`-shm` companions, run SQLite integrity/recovery
+tools on a copy, then move the damaged files aside only after preserving them.
+Restarting creates a new history database while live monitoring remains usable.
+
+## Milestone 3 non-goals / Milestone 4+
+
+Intentionally deferred are role-specific ADS-B/application analytics,
+desk-display/MagicMirror/ICS/hotspot management, package and Git dashboards,
+remote service/reboot/shutdown actions, the configuration editor and user
+management, a remote agent, Prometheus/Grafana, and active LAN scanning. No fake
+UI or control endpoints for these later features are included.

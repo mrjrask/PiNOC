@@ -1,0 +1,29 @@
+import unittest
+from datetime import datetime, timedelta, timezone
+from tempfile import TemporaryDirectory
+from pinoc.database import Database, SCHEMA_VERSION
+from pinoc.history import HistoryManager, storage_forecast
+
+class Milestone3Test(unittest.TestCase):
+ def setUp(self):
+  self.tmp=TemporaryDirectory(); self.db=Database(self.tmp.name+'/pinoc.db'); self.assertTrue(self.db.initialize(),self.db.error)
+  self.history=HistoryManager(self.db,{'core_interval_seconds':60,'network_interval_seconds':60,'storage_interval_seconds':60,'thresholds':{'cpu_duration_seconds':0}})
+ def tearDown(self): self.tmp.cleanup()
+ def device(self,stamp,temp=75,online=True,ip='10.0.0.1'):
+  return {'id':'pi','hostname':'pi','friendly_name':'Pi','online':online,'last_seen':stamp,'boot_time':'2026-01-01T00:00:00+00:00','uptime_seconds':100,'cpu':{'utilization_percent':95,'temperature_c':temp},'memory':{'percent':90},'hardware':{},'network':{'interface':'eth0','ip':ip,'rx_bytes':1,'tx_bytes':2},'storage':[{'mount_point':'/','total':1000,'used':850,'available':150,'percent':85}],'services':[]}
+ def test_schema_reopen_sampling_and_alert_lifecycle(self):
+  self.assertEqual(self.db.scalar('select version from schema_version'),SCHEMA_VERSION); self.assertTrue(Database(str(self.db.path)).initialize())
+  now=datetime.now(timezone.utc); d=self.device(now.isoformat()); self.history._snapshot([d],now.isoformat()); self.history._snapshot([d],(now+timedelta(seconds=1)).isoformat())
+  self.assertEqual(self.db.scalar('select count(*) from device_metrics'),1); self.assertEqual(self.db.scalar("select count(*) from alerts where resolved_at is null and alert_type='high_temperature'"),1)
+  d=self.device((now+timedelta(seconds=61)).isoformat(),temp=20); d['cpu']['utilization_percent']=1;d['memory']['percent']=1;d['storage'][0]['percent']=1
+  self.history._snapshot([d],d['last_seen']);self.assertEqual(self.db.scalar("select count(*) from alerts where alert_type='high_temperature' and resolved_at is not null"),1)
+ def test_transitions_ack_and_mute(self):
+  now=datetime.now(timezone.utc);a=self.device(now.isoformat());self.history._snapshot([a],now.isoformat());aid=self.db.scalar('select min(alert_id) from alerts');self.history.acknowledge(aid);self.assertEqual(self.db.scalar('select state from alerts where alert_id=?',(aid,)),'acknowledged');self.history.mute(aid,(now+timedelta(hours=1)).isoformat());self.assertEqual(self.db.scalar('select state from alerts where alert_id=?',(aid,)),'muted');self.history.unmute(aid)
+  b=self.device((now+timedelta(minutes=2)).isoformat(),ip='10.0.0.2');b['uptime_seconds']=2;b['boot_time']='2026-01-02T00:00:00+00:00';self.history._snapshot([b],b['last_seen']);types={x['event_type'] for x in self.db.rows('select event_type from events')};self.assertIn('ip_changed',types);self.assertIn('device_rebooted',types)
+ def test_forecast_states(self):
+  now=datetime.now(timezone.utc);self.assertEqual(storage_forecast([])['status'],'insufficient')
+  rows=[{'timestamp':(now+timedelta(days=i)).isoformat(),'used_bytes':100+i*10,'total_bytes':1000} for i in range(3)];self.assertEqual(storage_forecast(rows)['status'],'growing')
+  for x in rows:x['used_bytes']=100
+  self.assertEqual(storage_forecast(rows)['status'],'stable')
+  for i,x in enumerate(rows):x['used_bytes']=100-i*10
+  self.assertEqual(storage_forecast(rows)['status'],'decreasing')

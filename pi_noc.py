@@ -137,6 +137,7 @@ HEIGHT = ADA_HEIGHT
 PAGE_NAMES = [
     "SUMMARY",
     "FLEET",
+    "ALERTS",
     "VPN",
     "RAID",
     "STORAGE",
@@ -1721,9 +1722,20 @@ def build_fleet_rows(snapshot: Snapshot) -> List[ScreenRow]:
     return rows or [("Devices", "Waiting", FONT_NORMAL)]
 
 
+def build_alert_rows(snapshot: Snapshot) -> List[ScreenRow]:
+    alerts = [a for d in getattr(snapshot, "fleet_devices", []) for a in d.get("alerts", [])]
+    rank = {"critical": 0, "degraded": 1, "warning": 2, "info": 3}
+    alerts.sort(key=lambda alert: rank.get(alert.get("severity"), 4))
+    rows = [("Critical", str(sum(a.get("severity") == "critical" for a in alerts)), FONT_BOLD),
+            ("Warnings", str(sum(a.get("severity") in ("warning", "degraded") for a in alerts)), FONT_NORMAL)]
+    rows.extend((str(a.get("device_id"))[:12], str(a.get("message"))[:22], FONT_NORMAL) for a in alerts)
+    return rows
+
+
 PAGE_ROW_BUILDERS = [
     build_summary_rows,
     build_fleet_rows,
+    build_alert_rows,
     build_vpn_rows,
     build_raid_rows,
     build_storage_rows,
@@ -1755,6 +1767,10 @@ def draw_summary(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scrol
 def draw_fleet(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
     devices = getattr(snapshot, "fleet_devices", [])
     draw_page_from_rows(draw, snapshot, page, f"PI FLEET {sum(bool(x.get('online')) for x in devices)}/{len(devices)}", None, scroll_offset)
+
+
+def draw_alerts(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
+    draw_page_from_rows(draw, snapshot, page, "ACTIVE ALERTS", None, scroll_offset)
 
 
 def draw_vpn(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scroll_offset: int = 0) -> None:
@@ -1796,6 +1812,7 @@ def draw_network(draw: ImageDraw.ImageDraw, snapshot: Snapshot, page: int, scrol
 PAGE_DRAWERS = [
     draw_summary,
     draw_fleet,
+    draw_alerts,
     draw_vpn,
     draw_raid,
     draw_storage,
@@ -2153,7 +2170,13 @@ class SharedSnapshotCoordinator:
             devices = [device for device in legacy
                        if device.id not in fleet_ids
                        and not (local_fleet_published and device.id == legacy_local_id)] + list(self.fleet_devices)
-            setattr(snapshot, "fleet_devices", [device.to_dict() for device in devices])
+            device_rows = [device.to_dict() for device in devices]
+            alerts_by_device: Dict[str, List[Dict[str, Any]]] = {}
+            for alert in self.state.alerts():
+                alerts_by_device.setdefault(str(alert.get("device_id")), []).append(alert)
+            for row in device_rows:
+                row["alerts"] = alerts_by_device.get(str(row.get("id")), [])
+            setattr(snapshot, "fleet_devices", device_rows)
             self.state.publish(devices, snapshot, replace=True)
 
     def collect_fleet(self) -> None:
@@ -2775,6 +2798,15 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, handlers=[handler], format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
     state = PiNOCState()
+    from pinoc.database import Database
+    from pinoc.history import HistoryManager
+    history_config = CONFIG.get("history", {})
+    database_path = read_env_value("PINOC_DATABASE_PATH") or str(
+        history_config.get("database_path", APP_DIR / "data" / "pinoc.db")
+    )
+    history = HistoryManager(Database(database_path), history_config, state)
+    state.add_publish_hook(history.submit)
+    history.start()
     coordinator = SharedSnapshotCoordinator(state)
     coordinator.start()
 
@@ -2783,7 +2815,7 @@ def main() -> None:
         from pinoc.web import create_app, serve
         host = read_env_value("PINOC_WEB_HOST") or str(CONFIG.get("web_host", "0.0.0.0"))
         port = int(read_env_value("PINOC_WEB_PORT") or CONFIG.get("web_port", 8088))
-        web_app = create_app(state, {"HEALTH_STALE_SECONDS": CONFIG.get("health_cache_stale_seconds", 120)})
+        web_app = create_app(state, {"HEALTH_STALE_SECONDS": CONFIG.get("health_cache_stale_seconds", 120)}, history)
         threading.Thread(target=serve, args=(web_app, host, port), name="pinoc-web", daemon=True).start()
 
     display_enabled = (read_env_value("PINOC_DISPLAY_ENABLED") or "1").lower() not in ("0", "false", "no")
@@ -2813,6 +2845,7 @@ def main() -> None:
                 pass
     finally:
         coordinator.stop()
+        history.stop()
 
 
 if __name__ == "__main__":

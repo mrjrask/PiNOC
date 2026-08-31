@@ -10,6 +10,7 @@ SERVICE_SOURCE="${REPO_DIR}/${SERVICE_NAME}"
 SERVICE_DEST="/etc/systemd/system/${SERVICE_NAME}"
 SUDOERS_DEST="/etc/sudoers.d/pi-noc-wireguard"
 ENV_FILE="${REPO_DIR}/.env"
+DATA_DIR="${REPO_DIR}/data"
 APT_PACKAGES=(
   python3
   python3-venv
@@ -62,6 +63,7 @@ load_env_file() {
       PINOC_WEB_ENABLED=*) PINOC_WEB_ENABLED="${line#PINOC_WEB_ENABLED=}" ;;
       PINOC_WEB_HOST=*) PINOC_WEB_HOST="${line#PINOC_WEB_HOST=}" ;;
       PINOC_WEB_PORT=*) PINOC_WEB_PORT="${line#PINOC_WEB_PORT=}" ;;
+      PINOC_DATABASE_PATH=*) PINOC_DATABASE_PATH="${line#PINOC_DATABASE_PATH=}" ;;
     esac
   done < "$ENV_FILE"
 }
@@ -250,6 +252,8 @@ main() {
   enable_spi
   setup_user_groups
   setup_venv
+  log "Creating persistent history directory (existing databases are preserved)"
+  install -d -m 0750 -o "$INSTALL_USER" -g "$INSTALL_USER" "$(dirname "${PINOC_DATABASE_PATH:-$DATA_DIR/pinoc.db}")"
   configure_wireguard_controls
   configure_ssh_to_cm5
   install_service
