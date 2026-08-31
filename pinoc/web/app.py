@@ -127,15 +127,27 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         name=request.args.get("range","24h")
         if name not in RANGES: return jsonify({"error":"range must be 1h, 6h, 24h, 7d, or 30d"}),400
         now=datetime.now(timezone.utc); start=(now-__import__('datetime').timedelta(seconds=RANGES[name])).isoformat(); resolution="raw" if RANGES[name]<=7*86400 else "mixed"
-        def newest(table,columns="*",since=start,limit=True):
-            suffix=" LIMIT 5000" if limit else ""
-            return history.db.rows(f"SELECT * FROM (SELECT {columns} FROM {table} WHERE device_id=? AND timestamp>=? ORDER BY timestamp DESC{suffix}) ORDER BY timestamp",(device_id,since))
+        def newest(table,columns="*",since=start):
+            return history.db.rows(f"SELECT * FROM (SELECT {columns} FROM {table} WHERE device_id=? AND timestamp>=? ORDER BY timestamp DESC LIMIT 5000) ORDER BY timestamp",(device_id,since))
+        def sampled_segment(table,columns,since):
+            return history.db.rows(f"""WITH ranked AS (
+                SELECT {columns}, ROW_NUMBER() OVER (ORDER BY timestamp) AS sample_row,
+                       COUNT(*) OVER () AS sample_total
+                FROM {table} WHERE device_id=? AND timestamp>=?
+            ), bucketed AS (
+                SELECT *, NTILE(4999) OVER (ORDER BY sample_row) AS sample_bucket FROM ranked
+            ), sampled AS (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY sample_bucket ORDER BY sample_row) AS bucket_row
+                FROM bucketed
+            )
+            SELECT {columns} FROM sampled
+            WHERE bucket_row=1 OR sample_row=sample_total ORDER BY timestamp""",(device_id,since))
         if resolution=="raw":core=newest("device_metrics")
         else:
             raw_start=(now-__import__('datetime').timedelta(days=int(history.config.get("raw_retention_days",7)))).isoformat()
-            core=history.db.rows("SELECT bucket AS timestamp,avg_cpu AS cpu_percent,avg_temp AS cpu_temp_c,avg_memory AS memory_percent,max_cpu,max_temp,sample_count FROM metric_aggregates WHERE device_id=? AND resolution='hourly' AND bucket>=? AND bucket<? ORDER BY bucket",(device_id,start,raw_start))+newest("device_metrics","timestamp,cpu_percent,cpu_temp_c,memory_percent,cpu_percent AS max_cpu,cpu_temp_c AS max_temp,1 AS sample_count",raw_start,False)
-            storage=history.db.rows("SELECT bucket AS timestamp,mount_point,latest_used AS used_bytes,total_bytes,CASE WHEN total_bytes>0 THEN latest_used*100.0/total_bytes END AS percent_used,sample_count FROM storage_aggregates WHERE device_id=? AND resolution='hourly' AND bucket>=? AND bucket<? ORDER BY bucket",(device_id,start,raw_start))+newest("storage_metrics","timestamp,mount_point,used_bytes,total_bytes,percent_used,1 AS sample_count",raw_start,False)
-            network=history.db.rows("SELECT bucket AS timestamp,interface,avg_rx_rate AS rx_rate_bps,avg_tx_rate AS tx_rate_bps,avg_wifi_signal AS wifi_signal_dbm,avg_wifi_quality AS wifi_quality_percent,sample_count FROM network_aggregates WHERE device_id=? AND resolution='hourly' AND bucket>=? AND bucket<? ORDER BY bucket",(device_id,start,raw_start))+newest("network_metrics","timestamp,interface,rx_rate_bps,tx_rate_bps,wifi_signal_dbm,wifi_quality_percent,1 AS sample_count",raw_start,False)
+            core=history.db.rows("SELECT bucket AS timestamp,avg_cpu AS cpu_percent,avg_temp AS cpu_temp_c,avg_memory AS memory_percent,max_cpu,max_temp,sample_count FROM metric_aggregates WHERE device_id=? AND resolution='hourly' AND bucket>=? AND bucket<? ORDER BY bucket",(device_id,start,raw_start))+sampled_segment("device_metrics","timestamp,cpu_percent,cpu_temp_c,memory_percent,cpu_percent AS max_cpu,cpu_temp_c AS max_temp,1 AS sample_count",raw_start)
+            storage=history.db.rows("SELECT bucket AS timestamp,mount_point,latest_used AS used_bytes,total_bytes,CASE WHEN total_bytes>0 THEN latest_used*100.0/total_bytes END AS percent_used,sample_count FROM storage_aggregates WHERE device_id=? AND resolution='hourly' AND bucket>=? AND bucket<? ORDER BY bucket",(device_id,start,raw_start))+sampled_segment("storage_metrics","timestamp,mount_point,used_bytes,total_bytes,percent_used,1 AS sample_count",raw_start)
+            network=history.db.rows("SELECT bucket AS timestamp,interface,avg_rx_rate AS rx_rate_bps,avg_tx_rate AS tx_rate_bps,avg_wifi_signal AS wifi_signal_dbm,avg_wifi_quality AS wifi_quality_percent,sample_count FROM network_aggregates WHERE device_id=? AND resolution='hourly' AND bucket>=? AND bucket<? ORDER BY bucket",(device_id,start,raw_start))+sampled_segment("network_metrics","timestamp,interface,rx_rate_bps,tx_rate_bps,wifi_signal_dbm,wifi_quality_percent,1 AS sample_count",raw_start)
         if resolution=="raw":storage=newest("storage_metrics");network=newest("network_metrics")
         def avg(k):v=[x[k] for x in core if x.get(k)!=None];return sum(v)/len(v) if v else None
         stats={"cpu_average":avg("cpu_percent"),"cpu_maximum":max((x["cpu_percent"] for x in core if x.get("cpu_percent")!=None),default=None),"temperature_average":avg("cpu_temp_c"),"temperature_maximum":max((x["cpu_temp_c"] for x in core if x.get("cpu_temp_c")!=None),default=None),"memory_average":avg("memory_percent")}

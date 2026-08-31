@@ -44,7 +44,7 @@ class Milestone3Test(unittest.TestCase):
   with self.db.connect() as con:
    con.executemany('insert into device_metrics(timestamp,device_id,cpu_percent) values(?,?,?)',(((start+timedelta(minutes=i)).isoformat(),'pi',i) for i in range(6001)))
   response=create_app(PiNOCState(),history=self.history).test_client().get('/api/devices/pi/metrics?range=30d')
-  core=response.get_json()['core'];self.assertEqual(len(core),6001);self.assertEqual(core[0]['cpu_percent'],0);self.assertEqual(core[-1]['cpu_percent'],6000)
+  core=response.get_json()['core'];self.assertLessEqual(len(core),5000);self.assertEqual(core[0]['cpu_percent'],0);self.assertEqual(core[-1]['cpu_percent'],6000)
  def test_disabled_history_does_not_degrade_health(self):
   state=PiNOCState();state.publish([])
   disabled=HistoryManager(Database(self.tmp.name+'/disabled.db'),{'enabled':False})
