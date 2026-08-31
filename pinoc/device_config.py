@@ -51,6 +51,8 @@ class DeviceConfig:
     important_paths: Tuple[str, ...] = ()
     maintenance: bool = False
     thresholds: Dict[str, float] = field(default_factory=dict)
+    integrations: Dict[str, Any] = field(default_factory=dict)
+    repositories: Tuple[Dict[str, Any], ...] = ()
 
     @property
     def cockpit_url(self) -> Optional[str]:
@@ -104,13 +106,25 @@ def parse_device(raw: Dict[str, Any], index: int) -> DeviceConfig:
         thresholds = {str(k): float(v) for k, v in thresholds.items()}
     except (TypeError, ValueError):
         raise DeviceConfigError(f"device {label}: threshold values must be numeric") from None
+    integrations = raw.get("integrations", {})
+    if not isinstance(integrations, dict):
+        raise DeviceConfigError(f"device {label}: integrations must be an object")
+    repositories = raw.get("repositories", [])
+    if not isinstance(repositories, list) or any(not isinstance(x, dict) for x in repositories):
+        raise DeviceConfigError(f"device {label}: repositories must be a list of objects")
+    for name, value in integrations.items():
+        if name not in {"adsb","desk_display","magicmirror","ics_modifier","pi_hotspot","wireguard","samba","raid","disk_health","packages","git"}:
+            raise DeviceConfigError(f"device {label}: unknown integration {name}")
+        if not isinstance(value, (bool, dict)):
+            raise DeviceConfigError(f"device {label}: integration {name} must be a boolean or object")
     return DeviceConfig(device_id, hostname or address, str(raw.get("friendly_name") or hostname or address),
                         address, method, tuple(roles), tuple(tags), str(raw.get("ssh_user", "pi")),
                         ssh_port, bool(raw.get("cockpit_enabled", False)), scheme,
                         str(raw.get("cockpit_host", "")), cockpit_port, tuple(monitored), tuple(critical),
                         bool(raw.get("service_discovery", False)), str(raw.get("notes", "")),
                         tuple(important_paths),
-                        bool(raw.get("maintenance", False)), thresholds)
+                        bool(raw.get("maintenance", False)), thresholds, integrations,
+                        tuple(repositories))
 
 
 def legacy_device(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:

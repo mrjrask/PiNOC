@@ -14,6 +14,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from pinoc.device_config import DeviceConfig
 from pinoc.health import evaluate
 from pinoc.models import DeviceState
+from pinoc.integrations import IntegrationStatus, active_integrations
+from pinoc.integrations.base import service as find_service
 
 LOG = logging.getLogger("pinoc.collectors.fleet")
 DISCOVERY = ("cockpit", "ssh", "desk-display", "piaware", "dump1090", "readsb", "magicmirror",
@@ -175,6 +177,21 @@ class FleetCollector:
                  "important_paths":list(device.important_paths),
                  "services":services,"critical_services":list(device.critical_services),
                  "collector_status":{"system":{"status":"ok"},"storage":{"status":"ok"},"network":{"status":"ok"},"services":{"status":"ok"}}}
+            integrations={}
+            for name in active_integrations(device.roles,device.integrations):
+                cfg=device.integrations.get(name,{})
+                cfg=cfg if isinstance(cfg,dict) else {}
+                candidates={"adsb":["piaware.service","dump1090-fa.service","readsb.service"],"desk_display":["desk-display.service"],"magicmirror":["magicmirror.service"],"ics_modifier":["ics_modifier.service"],"pi_hotspot":["pi-hotspot.service"],"wireguard":["wg-quick@wg0.service"],"samba":["smbd.service","smb.service"]}.get(name,[])
+                found=[find_service(services,x) for x in candidates]; found=[x for x in found if x]
+                available=bool(found) if candidates else False
+                failed=any(x.get("state") not in ("running","activating") for x in found)
+                integrations[name]=IntegrationStatus(name=name,available=available,
+                    health="degraded" if failed else "healthy" if available else "unsupported",
+                    last_success=now if available else None,last_attempt=attempted,
+                    data_source="systemd" if candidates else None,
+                    error=None if available else "optional data source not discovered",
+                    data={"services":found},critical=bool(cfg.get("critical",False))).to_dict()
+            raw["integrations"]=integrations
             health,reasons,stale=evaluate(raw,device.thresholds); raw.update(health=health,health_reasons=reasons,stale=stale)
             result=DeviceState.from_dict(raw); self.snapshots[device.id]=result; return result
         except (subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
