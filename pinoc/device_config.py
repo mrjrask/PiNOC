@@ -46,6 +46,8 @@ class DeviceConfig:
     cockpit_port: int = 9090
     monitored_services: Tuple[str, ...] = ()
     critical_services: Tuple[str, ...] = ()
+    manageable_services: Tuple[str, ...] = ()
+    allowed_actions: Tuple[str, ...] = ()
     service_discovery: bool = False
     notes: str = ""
     important_paths: Tuple[str, ...] = ()
@@ -83,6 +85,8 @@ def parse_device(raw: Dict[str, Any], index: int) -> DeviceConfig:
     tags = _strings(raw.get("tags", []), "tags", label)
     monitored = _strings(raw.get("monitored_services", []), "monitored_services", label)
     critical = _strings(raw.get("critical_services", []), "critical_services", label)
+    manageable = _strings(raw.get("manageable_services", []), "manageable_services", label)
+    allowed_actions = _strings(raw.get("allowed_actions", []), "allowed_actions", label, lowercase=False)
     important_paths = _strings(raw.get("important_paths", []), "important_paths", label,
                                lowercase=False)
     if len(raw.get("monitored_services", [])) != len(set(raw.get("monitored_services", []))):
@@ -120,7 +124,7 @@ def parse_device(raw: Dict[str, Any], index: int) -> DeviceConfig:
     return DeviceConfig(device_id, hostname or address, str(raw.get("friendly_name") or hostname or address),
                         address, method, tuple(roles), tuple(tags), str(raw.get("ssh_user", "pi")),
                         ssh_port, bool(raw.get("cockpit_enabled", False)), scheme,
-                        str(raw.get("cockpit_host", "")), cockpit_port, tuple(monitored), tuple(critical),
+                        str(raw.get("cockpit_host", "")), cockpit_port, tuple(monitored), tuple(critical), tuple(manageable), tuple(allowed_actions),
                         bool(raw.get("service_discovery", False)), str(raw.get("notes", "")),
                         tuple(important_paths),
                         bool(raw.get("maintenance", False)), thresholds, integrations,

@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, Optional
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -29,6 +29,13 @@ CREATE INDEX device_metrics_device_time ON device_metrics(device_id,timestamp); 
 """CREATE TABLE integration_metrics(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,device_id TEXT NOT NULL,integration TEXT NOT NULL,metric TEXT NOT NULL,value REAL,unit TEXT,UNIQUE(timestamp,device_id,integration,metric));
 CREATE INDEX integration_metrics_device_time ON integration_metrics(device_id,integration,timestamp);
 CREATE TABLE network_inventory(identity TEXT PRIMARY KEY,ip TEXT,mac TEXT,hostname TEXT,vendor TEXT,first_seen TEXT,last_seen TEXT,managed_device_id TEXT,data_json TEXT NOT NULL DEFAULT '{}');""",
+"""CREATE TABLE users(username TEXT PRIMARY KEY,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,last_login TEXT);
+CREATE TABLE api_tokens(token_id TEXT PRIMARY KEY,secret_hash TEXT NOT NULL,owner TEXT NOT NULL,scopes_json TEXT NOT NULL,created_at TEXT NOT NULL,last_used TEXT,enabled INTEGER NOT NULL DEFAULT 1,FOREIGN KEY(owner) REFERENCES users(username));
+CREATE TABLE action_jobs(job_id TEXT PRIMARY KEY,device_id TEXT NOT NULL,action TEXT NOT NULL,target TEXT,parameters_json TEXT NOT NULL DEFAULT '{}',requested_by TEXT NOT NULL,requested_role TEXT NOT NULL,source_ip TEXT,requested_at TEXT NOT NULL,started_at TEXT,completed_at TEXT,status TEXT NOT NULL,exit_code INTEGER,summary TEXT,error TEXT,duration_ms INTEGER);
+CREATE INDEX action_jobs_time ON action_jobs(requested_at); CREATE INDEX action_jobs_device_status ON action_jobs(device_id,status);
+CREATE TABLE audit_records(audit_id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,user TEXT NOT NULL,role TEXT NOT NULL,source_ip TEXT,device_id TEXT,action TEXT NOT NULL,target TEXT,parameters_json TEXT NOT NULL DEFAULT '{}',authorization_result TEXT NOT NULL,execution_result TEXT,exit_code INTEGER,duration_ms INTEGER,error TEXT);
+CREATE INDEX audit_time ON audit_records(timestamp); CREATE INDEX audit_device ON audit_records(device_id); CREATE INDEX audit_action ON audit_records(action);
+CREATE TABLE device_operational_state(device_id TEXT PRIMARY KEY,maintenance_until TEXT,maintenance_reason TEXT,expected_offline INTEGER NOT NULL DEFAULT 0,expected_offline_reason TEXT,expected_offline_until TEXT,updated_at TEXT NOT NULL,updated_by TEXT NOT NULL);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

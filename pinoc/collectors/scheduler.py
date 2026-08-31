@@ -38,6 +38,12 @@ class CollectionScheduler:
                 self.next_run[task.name] = 0.0
         self.wake_event.set()
 
+    def refresh_task(self, name: str) -> None:
+        """Schedule one collector domain without executing it in the caller."""
+        with self.lock:
+            if name in self.next_run:self.next_run[name]=0.0
+        self.wake_event.set()
+
     def _safe_run(self, task: CollectionTask) -> None:
         try:
             task.collect()

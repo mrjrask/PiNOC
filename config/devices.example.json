@@ -16,6 +16,9 @@
       ],
       "monitored_services": [
         "pi-noc.service"
+      ],
+      "manageable_services": [
+        "desk-display.service"
       ]
     },
     {
@@ -43,6 +46,10 @@
         "cockpit.socket"
       ],
       "critical_services": [
+        "piaware.service",
+        "dump1090-fa.service"
+      ],
+      "manageable_services": [
         "piaware.service",
         "dump1090-fa.service"
       ],

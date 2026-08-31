@@ -71,17 +71,19 @@ load_env_file() {
 configure_frontends() {
   local display_enabled display_type web_enabled web_host web_port
   prompt_default display_enabled "Enable physical display (1/0)" "${PINOC_DISPLAY_ENABLED:-1}"
+  prompt_default auth_enabled "Enable PiNOC web authentication (1/0)" "${PINOC_AUTH_ENABLED:-1}"
   prompt_default display_type "Display type (ADA_BONNET/PIM_DHM)" "${DISPLAY:-ADA_BONNET}"
   [[ "$display_type" == "ADA_BONNET" || "$display_type" == "PIM_DHM" ]] || fail "Unsupported display type: ${display_type}"
   prompt_default web_enabled "Enable web console (1/0)" "${PINOC_WEB_ENABLED:-1}"
   web_host="${PINOC_WEB_HOST:-0.0.0.0}"
   prompt_default web_port "Web console port" "${PINOC_WEB_PORT:-8088}"
   [[ "$web_port" =~ ^[0-9]+$ ]] && ((web_port >= 1 && web_port <= 65535)) || fail "Invalid web port: ${web_port}"
-  python3 - "$ENV_FILE" "$display_enabled" "$display_type" "$web_enabled" "$web_host" "$web_port" <<'PY'
+  python3 - "$ENV_FILE" "$display_enabled" "$display_type" "$web_enabled" "$web_host" "$web_port" "$auth_enabled" <<'PY'
 import sys
-path, display_enabled, display_type, web_enabled, web_host, web_port = sys.argv[1:]
+path, display_enabled, display_type, web_enabled, web_host, web_port, auth_enabled = sys.argv[1:]
 values = {"PINOC_DISPLAY_ENABLED": display_enabled, "DISPLAY": display_type,
-          "PINOC_WEB_ENABLED": web_enabled, "PINOC_WEB_HOST": web_host, "PINOC_WEB_PORT": web_port}
+          "PINOC_WEB_ENABLED": web_enabled, "PINOC_WEB_HOST": web_host, "PINOC_WEB_PORT": web_port,
+          "PINOC_AUTH_ENABLED": auth_enabled}
 lines = open(path, encoding="utf-8").read().splitlines()
 seen = set()
 for index, line in enumerate(lines):
@@ -261,6 +263,11 @@ main() {
   log "Installation complete"
   log "Web console: http://$(hostname -I 2>/dev/null | awk '{print $1}'):${web_port}/ (when enabled)"
   log "Reboot if I2C or new group membership was not already active, then start with: sudo systemctl start ${SERVICE_NAME}"
+  if [[ ${auth_enabled:-1} == 1 ]]; then
+    log "Create the initial administrator before exposing the web port: sudo -u ${INSTALL_USER} ${VENV_DIR}/bin/python -m pinoc.admin create-user --role administrator USERNAME"
+  else
+    log "WARNING: authentication is disabled; every client able to reach PiNOC has trusted-LAN administrator access. HTTP is not encrypted."
+  fi
 }
 
 main "$@"

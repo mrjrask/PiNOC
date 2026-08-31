@@ -167,6 +167,9 @@ class FleetCollector:
             if network.get("rx_bytes") is not None: self.previous_net[device.id]=(stamp,network["rx_bytes"],network["tx_bytes"])
             raw={"id":device.id,"hostname":device.hostname,"friendly_name":device.friendly_name,"address":device.address,
                  "roles":list(device.roles),"tags":list(device.tags),"collection_method":device.collection_method,"notes":device.notes,
+                 "ssh_user":device.ssh_user,"ssh_port":device.ssh_port,"monitored_services":list(device.monitored_services),
+                 "manageable_services":list(device.manageable_services),
+                 "allowed_actions":list(device.allowed_actions),
                  "cockpit_url":device.cockpit_url,"maintenance":device.maintenance,"online":True,"last_seen":now,"ip":network.get("ip", ""),
                  "last_successful_collection":now,"last_collection_attempt":attempted,"uptime_seconds":int(uptime),
                  "boot_time":datetime.fromtimestamp(time.time()-uptime,timezone.utc).isoformat(),
@@ -198,6 +201,9 @@ class FleetCollector:
             LOG.warning("[%s] collection failed: %s",device.id,exc)
             raw=old.to_dict() if old else {"id":device.id,"hostname":device.hostname,"friendly_name":device.friendly_name,
                 "address":device.address,"roles":list(device.roles),"tags":list(device.tags),"collection_method":device.collection_method,
+                "ssh_user":device.ssh_user,"ssh_port":device.ssh_port,"monitored_services":list(device.monitored_services),
+                "critical_services":list(device.critical_services),"manageable_services":list(device.manageable_services),
+                "allowed_actions":list(device.allowed_actions),
                 "notes":device.notes,"cockpit_url":device.cockpit_url,"maintenance":device.maintenance}
             raw.update(last_collection_attempt=attempted,error=str(exc),collector_status={"transport":{"status":"error","error":str(exc)}})
             health,reasons,stale=evaluate(raw,device.thresholds)

@@ -51,13 +51,25 @@ class HistoryManager:
         self._refresh_cache()
     def _device(self,d,stamp):
         did=d["id"]; old=self.previous.get(did); ip=d.get("network",{}).get("ip") or d.get("ip") or ""
+        operational=self.db.rows("SELECT * FROM device_operational_state WHERE device_id=?",(did,))
+        operational=operational[0] if operational else {}
+        now=datetime.fromisoformat(stamp);maintenance_until=operational.get("maintenance_until");expected_until=operational.get("expected_offline_until")
+        if maintenance_until and datetime.fromisoformat(maintenance_until)<=now:
+            self.db.execute("UPDATE device_operational_state SET maintenance_until=NULL,maintenance_reason=NULL,expected_offline=0,expected_offline_reason=NULL,expected_offline_until=NULL,updated_at=?,updated_by='system' WHERE device_id=?",(stamp,did));operational={}
+            self._write_event(did,"maintenance_ended","info","Maintenance window expired",{},stamp)
+        if expected_until and datetime.fromisoformat(expected_until)<=now and not maintenance_until:
+            self.db.execute("UPDATE device_operational_state SET expected_offline=0,expected_offline_reason=NULL,expected_offline_until=NULL,updated_at=?,updated_by='system' WHERE device_id=?",(stamp,did));operational["expected_offline"]=0
+        d["maintenance"]=bool(maintenance_until or operational.get("maintenance_reason"));d["maintenance_until"]=maintenance_until;d["maintenance_reason"]=operational.get("maintenance_reason") or ""
+        d["expected_offline"]=bool(operational.get("expected_offline"));d["expected_offline_reason"]=operational.get("expected_offline_reason") or ""
         persisted=self.db.scalar("SELECT 1 FROM devices WHERE device_id=?",(did,)) is not None
         self.db.execute("""INSERT INTO devices(device_id,hostname,friendly_name,first_seen,last_seen,first_ip,last_ip,model,roles_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET hostname=excluded.hostname,friendly_name=excluded.friendly_name,last_seen=excluded.last_seen,last_ip=CASE WHEN excluded.last_ip<>'' THEN excluded.last_ip ELSE devices.last_ip END,model=excluded.model,roles_json=excluded.roles_json,updated_at=excluded.updated_at""",(did,d.get("hostname"),d.get("friendly_name"),d.get("first_seen") or stamp,d.get("last_seen"),ip,ip,d.get("model"),json.dumps(d.get("roles",[])),stamp,stamp))
         if old is None:
             if not persisted:self._write_event(did,"device_first_seen","info","Device first discovered",{},stamp)
         else:
-            if old.get("online") and not d.get("online"):self._write_event(did,"device_offline","critical","Device went offline",{},stamp)
-            if not old.get("online") and d.get("online"):self._write_event(did,"device_online","info","Device returned online",{},stamp)
+            if old.get("online") and not d.get("online"):self._write_event(did,"device_offline","info" if d.get("expected_offline") else "critical","Device went offline as expected" if d.get("expected_offline") else "Device went offline",{},stamp)
+            if not old.get("online") and d.get("online"):
+                self._write_event(did,"device_online","info","Device returned online",{},stamp)
+                if d.get("expected_offline_reason")=="reboot":self.db.execute("UPDATE device_operational_state SET expected_offline=0,expected_offline_reason=NULL,expected_offline_until=NULL,updated_at=?,updated_by='system' WHERE device_id=?",(stamp,did));self._write_event(did,"reboot_completed","info","Device returned after requested reboot",{},stamp)
             oldip=old.get("network",{}).get("ip") or old.get("ip")
             if oldip and ip and oldip!=ip:self._write_event(did,"ip_changed","info",f"IP changed {oldip} → {ip}",{"old":oldip,"new":ip},stamp)
             if (old.get("boot_time") and d.get("boot_time") and old["boot_time"]!=d["boot_time"] and d.get("uptime_seconds",0)<old.get("uptime_seconds",0)):
@@ -101,8 +113,11 @@ class HistoryManager:
             if new.get("hardware",{}).get(key) and not old.get("hardware",{}).get(key):self._write_event(did,key,"info",msg,{},stamp)
     def _alerts(self,d,stamp):
         did=d["id"]; active={}; c,m,h=d.get("cpu",{}),d.get("memory",{}),d.get("hardware",{}); t={"temperature_warning":70,"temperature_critical":80,"temperature_hysteresis":3,"cpu_warning":90,"cpu_duration_seconds":300,"memory_warning":85,"disk_warning":80,"disk_critical":95,"disk_hysteresis":2,**self.config.get("thresholds",{})}
+        # Preserve conditions/history during maintenance without opening,
+        # resolving, or notifying on transient maintenance observations.
+        if d.get("maintenance"):return
         open_types={x["alert_type"] for x in self.db.rows("SELECT alert_type FROM alerts WHERE device_id=? AND resolved_at IS NULL",(did,))}
-        if not d.get("online"):active["device_offline"]=("critical","Device is offline","")
+        if not d.get("online") and not d.get("expected_offline"):active["device_offline"]=("critical","Device is offline","")
         temp=c.get("temperature_c")
         if temp is not None:
             typ="critical_temperature" if temp>=(t["temperature_critical"]-t["temperature_hysteresis"] if "critical_temperature" in open_types else t["temperature_critical"]) else "high_temperature" if temp>=(t["temperature_warning"]-t["temperature_hysteresis"] if "high_temperature" in open_types else t["temperature_warning"]) else None
