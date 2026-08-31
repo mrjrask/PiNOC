@@ -34,6 +34,7 @@ class DeviceState:
     network: Dict[str, Any] = field(default_factory=dict)
     services: List[Dict[str, Any]] = field(default_factory=list)
     applications: Dict[str, Any] = field(default_factory=dict)
+    integrations: Dict[str, Any] = field(default_factory=dict)
     alerts: List[Dict[str, Any]] = field(default_factory=list)
     error: str = ""
     address: str = ""

@@ -399,3 +399,60 @@ desk-display/MagicMirror/ICS/hotspot management, package and Git dashboards,
 remote service/reboot/shutdown actions, the configuration editor and user
 management, a remote agent, Prometheus/Grafana, and active LAN scanning. No fake
 UI or control endpoints for these later features are included.
+
+## Milestone 4: role-specific application intelligence
+
+### Integration architecture
+
+`pinoc.integrations` contains read-only, transport-neutral normalizers. Role activation is centralized in `base.py`; collectors attach normalized `IntegrationStatus` objects to `DeviceState.integrations`, so the cache—not Flask or Jinja—is the source for web, API, history, health, and display consumers. Results distinguish unavailable devices, unavailable/unsupported integrations, degraded applications, and healthy applications. Every status includes attempt/success timestamps, source, duration/error fields, a sanitized data object, and an intentionally empty `available_actions` list reserved for the bounded Milestone 5 action interface. This inventory also provides the capability/application context needed by a future Milestone 6 agent without implementing an agent or remote jobs.
+
+Roles activate integrations as follows: `adsb_receiver` → ADS-B; `desk_display` → desk_display/Git; `magicmirror` → MagicMirror, ICS Modifier, pi-hotspot, and Git; `hotspot` → pi-hotspot; `vpn_server` → WireGuard; `file_server` → Samba, RAID, and disk health. Per-device `integrations` values can enable, disable, or configure an integration. A service condition is owned by generic service monitoring; an integration emits only a distinct data-path/application condition, preventing duplicate alerts.
+
+```json
+{
+  "id": "receiver-north",
+  "hostname": "piawaren",
+  "collection_method": "ssh",
+  "roles": ["adsb_receiver"],
+  "monitored_services": ["piaware.service", "dump1090-fa.service"],
+  "critical_services": ["piaware.service", "dump1090-fa.service"],
+  "integrations": {
+    "adsb": {"enabled": true, "critical": true, "interval_seconds": 15,
+      "no_messages_seconds": 300},
+    "packages": false
+  },
+  "repositories": [{"name": "receiver-config", "path": "/home/pi/receiver-config"}]
+}
+```
+
+### ADS-B and displays
+
+ADS-B parsers consume local dump1090-fa/SkyAware `aircraft.json` and `stats.json` shapes, including recent aircraft, positions, rates, range, IDs, and supported signal fields. `/adsb` and `/api/adsb` compare any number of receivers and calculate common/unique identifiers only when identifiers exist. `desk_display` accepts heterogeneous local status payloads and normalizes profile, screen, refresh, HTTP, and Git context. `/displays` exposes the cached fleet view; version groups describe differences without calling a majority “correct.” Sustained no-message/staleness conditions are intended to be configured rather than inferred from a momentary zero.
+
+### MagicMirror, ICS Modifier, and pi-hotspot
+
+MagicMirror supports PM2 JSON, configurable process names, restart/memory/uptime fields, lightweight HTTP results, and module inventory. ICS Modifier and pi-hotspot normalize their `/health` or `/status` responses, latency, refresh/failure details, hotspot state, uplink, and non-aggressively supplied client lists. Missing optional fields remain absent. Companion integrations remain separate and are linked by shared device context rather than copied.
+
+### WireGuard, Samba, RAID, and disk health
+
+WireGuard parses `wg show all dump`, shortens public keys in normal presentation, maps configured peer names, records allowed IPs/endpoint/handshake/RX/TX/keepalive, and distinguishes optional from required peers. Private keys and secret-named fields are stripped before API serialization. Existing Direct LAN VPN suppression remains unchanged.
+
+Samba consumes `smbstatus --json`, summarizes sessions/users/clients/open files/shares, caps detail lists, and treats zero sessions as healthy. RAID parses `/proc/mdstat` array membership, level, failed/spare counts and bounded rebuild progress. SMART JSON and NVMe smart-log JSON normalize overall health, temperature, life, spare, media errors, and documented sector counters. Missing `wg`, `smbstatus`, `smartctl`, or `nvme` is “unsupported,” not a collector crash.
+
+### Package updates and Git deployments
+
+APT parsing uses existing metadata (`apt-get --simulate upgrade` output) and never installs packages or implicitly runs `apt update`; the default package interval is six hours. Available/security update and reboot-required values are informational. Git monitoring is restricted to configured repository paths and is read-only by default: branch, commit, dirty state, remote, ahead/behind, and commit date. Remote fetch is opt-in, long-interval, timed, and its failure does not mark the application down. `/software`, `/api/software`, and `/api/deployments` expose objective OS/kernel/application drift without declaring a version correct.
+
+### LAN Inventory
+
+The LAN-Inventory adapter imports JSON without coupling to its database. It conservatively matches MAC first and unambiguous hostname/device ID next; ambiguous observations remain unmanaged. `/network-inventory` separates managed enrichment from other observed devices. New observations are informational events, never critical managed hosts.
+
+### Integration history, alerts, and diagnostics
+
+Schema migration 4 adds generalized numeric `integration_metrics` and `network_inventory` tables to the existing SQLite database. Selected operational metrics (ADS-B counts/rates/range, Samba counts, WireGuard summaries, hotspot clients, and HTTP latency) use existing retention infrastructure. Alert reconciliation and event storage remain central. Integration diagnostics expose last attempt/success, duration, source, and a safe last error; stack traces and credentials are excluded.
+
+### Optional dependencies and troubleshooting integrations
+
+Optional commands run on the monitored host (locally or over SSH), not necessarily on the PiNOC console: `git`, `wg`, `smbstatus`, `smartctl`, `nvme`, and `iw`. `install.sh` intentionally does not install all of them. HTTP and subprocess work must use configured timeouts and background collectors; routes only read cache. If an integration says `unsupported`, install the relevant tool on that device or disable the integration. If it says `unavailable`, inspect its data source, configured port/path/process name, last attempt, and last error. Configuration errors identify device/integration fields without invalidating otherwise valid devices.
+
+Milestone 4 intentionally provides no shell, service/reboot controls, apt upgrades, Git deployment, display screen controls, hotspot disconnection, WireGuard/Samba/RAID mutation, SMART repair, settings editor, agent protocol, or Codex/ChatGPT gateway. Those controls remain deferred to Milestone 5; agent execution remains deferred to Milestone 6.

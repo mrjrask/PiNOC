@@ -6,9 +6,17 @@
       "friendly_name": "PiNOC Console",
       "address": "pinoc.local",
       "collection_method": "local",
-      "roles": ["pinoc", "desk_display"],
-      "tags": ["display", "production"],
-      "monitored_services": ["pi-noc.service"]
+      "roles": [
+        "pinoc",
+        "desk_display"
+      ],
+      "tags": [
+        "display",
+        "production"
+      ],
+      "monitored_services": [
+        "pi-noc.service"
+      ]
     },
     {
       "id": "piawaren",
@@ -18,15 +26,45 @@
       "collection_method": "ssh",
       "ssh_user": "pi",
       "ssh_port": 22,
-      "roles": ["adsb_receiver"],
-      "tags": ["adsb", "upstairs"],
+      "roles": [
+        "adsb_receiver"
+      ],
+      "tags": [
+        "adsb",
+        "upstairs"
+      ],
       "cockpit_enabled": true,
       "cockpit_scheme": "https",
       "cockpit_port": 9090,
       "service_discovery": true,
-      "monitored_services": ["piaware.service", "dump1090-fa.service", "cockpit.socket"],
-      "critical_services": ["piaware.service", "dump1090-fa.service"],
-      "notes": "North-side receiver"
+      "monitored_services": [
+        "piaware.service",
+        "dump1090-fa.service",
+        "cockpit.socket"
+      ],
+      "critical_services": [
+        "piaware.service",
+        "dump1090-fa.service"
+      ],
+      "notes": "North-side receiver",
+      "integrations": {
+        "adsb": {
+          "enabled": true,
+          "critical": true,
+          "interval_seconds": 15,
+          "no_messages_seconds": 300
+        },
+        "packages": {
+          "enabled": true,
+          "interval_seconds": 21600
+        }
+      },
+      "repositories": [
+        {
+          "name": "receiver-config",
+          "path": "/home/pi/receiver-config"
+        }
+      ]
     }
   ]
 }

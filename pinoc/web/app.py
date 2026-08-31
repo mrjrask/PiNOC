@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional
 from flask import Flask, abort, jsonify, render_template, request
 
 from pinoc.state import PiNOCState
+from pinoc.integrations import sanitize
+from pinoc.integrations.adsb import compare as compare_adsb
 
 
 def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None) -> Flask:
@@ -32,6 +34,13 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
 
     @app.get("/settings/status")
     def status_page(): return render_template("status.html")
+
+    @app.get("/integrations")
+    @app.get("/adsb")
+    @app.get("/displays")
+    @app.get("/software")
+    @app.get("/network-inventory")
+    def integration_page(): return render_template("integrations.html", endpoint=request.path)
 
     @app.get("/health")
     def health():
@@ -66,6 +75,37 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def api_device(device_id: str):
         device = state.device(device_id)
         return jsonify(device) if device else (jsonify({"error": "device not found"}), 404)
+
+    def _integration_rows(name=None):
+        rows=[]
+        for device in state.devices():
+            for key,value in device.get("integrations",{}).items():
+                if name is None or key==name: rows.append(sanitize({"device_id":device["id"],"friendly_name":device["friendly_name"],**value}))
+        return rows
+
+    @app.get("/api/integrations")
+    def api_integrations(): return jsonify({"integrations":_integration_rows()})
+    @app.get("/api/devices/<device_id>/integrations")
+    def api_device_integrations(device_id):
+        device=state.device(device_id)
+        return jsonify({"integrations":sanitize(device.get("integrations",{}))}) if device else (jsonify({"error":"device not found"}),404)
+    @app.get("/api/devices/<device_id>/integrations/<name>")
+    def api_device_integration(device_id,name):
+        device=state.device(device_id); value=(device or {}).get("integrations",{}).get(name)
+        return jsonify(sanitize(value)) if value is not None else (jsonify({"error":"integration not found"}),404)
+    @app.get("/api/adsb")
+    def api_adsb(): return jsonify(compare_adsb(_integration_rows("adsb")))
+    @app.get("/api/displays")
+    def api_displays(): return jsonify({"displays":_integration_rows("desk_display")})
+    @app.get("/api/deployments")
+    def api_deployments(): return jsonify({"deployments":_integration_rows("git")})
+    @app.get("/api/software")
+    def api_software():
+        return jsonify({"devices":[{"device_id":d["id"],"os":d.get("os"),"os_version":d.get("os_version"),"kernel":d.get("kernel"),"packages":sanitize(d.get("integrations",{}).get("packages")),"git":sanitize(d.get("integrations",{}).get("git"))} for d in state.devices()]})
+    @app.get("/api/network-inventory")
+    def api_network_inventory():
+        rows=history.db.rows("SELECT * FROM network_inventory ORDER BY last_seen DESC") if history and history.db.available else []
+        return jsonify({"devices":sanitize(rows)})
 
     @app.get("/api/devices/<device_id>/services")
     def api_services(device_id: str):

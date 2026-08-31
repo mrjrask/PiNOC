@@ -15,7 +15,7 @@ class HistoryManager:
         self.stop_event=threading.Event(); self.thread=threading.Thread(target=self._run,name="pinoc-history",daemon=True)
         self.previous={}; self.last_sample={}; self.cpu_since={}; self.dropped=0
         self.state=state
-        self.intervals={"core":float(self.config.get("core_interval_seconds",60)),"network":float(self.config.get("network_interval_seconds",60)),"storage":float(self.config.get("storage_interval_seconds",300))}
+        self.intervals={"core":float(self.config.get("core_interval_seconds",60)),"network":float(self.config.get("network_interval_seconds",60)),"storage":float(self.config.get("storage_interval_seconds",300)),"integration":float(self.config.get("integration_interval_seconds",60))}
 
     def start(self):
         if self.enabled and self.db.initialize(): self.thread.start(); self.event(None,"pinoc_started","info","PiNOC started")
@@ -79,6 +79,14 @@ class HistoryManager:
             self.db.execute("INSERT OR IGNORE INTO network_metrics(timestamp,device_id,interface,ip_address,rx_rate_bps,tx_rate_bps,rx_total_bytes,tx_total_bytes,wifi_signal_dbm,wifi_quality_percent) VALUES(?,?,?,?,?,?,?,?,?,?)",(stamp,did,interface,n.get("ip"),n.get("rx_rate"),n.get("tx_rate"),n.get("rx_bytes"),n.get("tx_bytes"),n.get("signal_dbm"),n.get("signal_quality_percent")))
         if d.get("online") and self._due(did,"storage",stamp):
             for x in d.get("storage",[]):self.db.execute("INSERT OR IGNORE INTO storage_metrics(timestamp,device_id,device,mount_point,filesystem,total_bytes,used_bytes,available_bytes,percent_used,read_only) VALUES(?,?,?,?,?,?,?,?,?,?)",(stamp,did,x.get("device"),x.get("mount_point") or x.get("path") or "unknown",x.get("filesystem"),x.get("total") or x.get("size"),x.get("used"),x.get("available"),x.get("percent"),int(bool(x.get("read_only")))))
+        if d.get("online") and self._due(did,"integration",stamp):
+            allow={"adsb":{"aircraft","aircraft_with_positions","messages_per_second","positions_per_second","maximum_range_nm","strong_signal_percent"},"samba":{"active_sessions","unique_users","open_files"},"pi_hotspot":{"client_count","response_latency_ms"},"magicmirror":{"response_latency_ms","restart_count"},"desk_display":{"response_latency_ms"},"wireguard":{"latest_handshake_seconds","rx_bytes","tx_bytes"}}
+            for name,status in d.get("integrations",{}).items():
+                data=status.get("data",{}) if isinstance(status,dict) else {}
+                for metric in allow.get(name,set()):
+                    value=data.get(metric)
+                    if isinstance(value,(int,float)) and not isinstance(value,bool):
+                        self.db.execute("INSERT OR IGNORE INTO integration_metrics(timestamp,device_id,integration,metric,value,unit) VALUES(?,?,?,?,?,?)",(stamp,did,name,metric,float(value),None))
 
     def _service_transitions(self,did,old,new,stamp):
         before={x.get("name"):x for x in old.get("services",[])}
@@ -119,6 +127,14 @@ class HistoryManager:
                 typ="critical_service_failed" if s.get("critical") else "service_failed";active[f"{typ}:{s.get('name')}"]=("critical" if s.get("critical") else "warning",f"{s.get('name')} is {s.get('state')}",s.get("name"))
         raid=d.get("applications",{}).get("raid",{}).get("status")
         if raid in ("DEGRADED","INACTIVE","MISSING"):active["raid_degraded"]=("critical",f"RAID is {raid.lower()}","raid")
+        for name,status in d.get("integrations",{}).items():
+            if not isinstance(status,dict) or not status.get("enabled",True):continue
+            # Service failures remain owned by the generic service fingerprint.
+            # Plugins only report distinct application/data-path conditions.
+            for condition in status.get("conditions",[]):
+                if condition.get("service"):continue
+                key=str(condition.get("type") or f"{name}_unhealthy")
+                active[f"{key}:{name}"]=(condition.get("severity","warning"),condition.get("message",f"{name} is unhealthy"),name)
         self._reconcile(did,active,stamp)
     def _reconcile(self,did,active,stamp):
         existing={x["fingerprint"]:x for x in self.db.rows("SELECT * FROM alerts WHERE device_id=? AND resolved_at IS NULL",(did,))}

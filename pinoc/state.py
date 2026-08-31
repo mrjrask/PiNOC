@@ -73,6 +73,14 @@ class PiNOCState:
                     device.health = highest
                     device.health_reasons.append(f"{highest} active alert")
 
+    def set_integrations(self, device_id: str, integrations: Dict[str, Any]) -> None:
+        """Atomically attach cached plugin results without replacing core state."""
+        with self._lock:
+            device = self._devices.get(device_id)
+            if device:
+                device.integrations = copy.deepcopy(integrations)
+                device.applications.update(copy.deepcopy(integrations))
+
     def legacy_snapshot(self) -> Any:
         with self._lock:
             return copy.deepcopy(self._legacy_snapshot)
