@@ -66,7 +66,12 @@ Existing `config.json` keys remain supported. Important defaults are:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `refresh_seconds` | `10` | Complete background snapshot interval. |
+| `polling.local_seconds` | `10` | Local health collection interval. |
+| `polling.network_seconds` | `10` | WireGuard/network collection interval. |
+| `polling.remote_health_seconds` | `10` | CM5 health collection interval. |
+| `polling.service_seconds` | `15` | Remote SMB/service collection interval. |
+| `polling.storage_seconds` | `60` | Remote disk and RAID collection interval. |
+| `polling.sensor_seconds` | `10` | Local environmental sensor interval. |
 | `web_enabled` | `true` | Config fallback for the integrated web console. |
 | `web_host` / `web_port` | `0.0.0.0` / `8088` | Web listener. |
 | `remote_device_id` | `cm5-file-server` | Optional stable remote identity. |
@@ -86,7 +91,7 @@ PINOC_DISPLAY_ENABLED=1            # 0 supports a headless web deployment
 PINOC_WEB_ENABLED=1
 PINOC_WEB_HOST=0.0.0.0
 PINOC_WEB_PORT=8088
-CM5_SSH_PASS=change-me             # password fallback; keys are preferred
+CM5_SSH_PASS=                      # optional provisioning fallback; keys preferred
 ```
 
 The installer still provisions an Ed25519 key. If `CM5_SSH_PASS` is absent at
@@ -102,11 +107,13 @@ thresholds, and Cockpit URLs are deliberately scheduled for Milestone 2.
 ## Installation and upgrade
 
 1. Clone/copy the repository and review `config.json`.
-2. Run `cp .env.example .env`, set `CM5_SSH_PASS` if needed, and protect it
+2. Run `cp .env.example .env`, set `CM5_SSH_PASS` only if needed to provision an SSH key, and protect it
    with `chmod 600 .env`.
 3. Run `sudo ./install.sh`. It prompts for physical-display enablement/type,
    web enablement, and web port while retaining the existing dependency, I2C,
    SPI, group, SSH-key, WireGuard sudoers, virtualenv, and systemd workflow.
+   The unified environment always installs the lightweight Flask/Waitress web
+   dependencies; the enable switch controls whether the listener runs.
 4. Start with `sudo systemctl start pi-noc.service`, then visit port 8088.
 
 **Migration from PiNOC 1.x:** pull/copy the new files, keep the existing `.env`

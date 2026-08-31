@@ -1,13 +1,11 @@
-import time
+import importlib.util
 import unittest
 
 from pinoc.collectors.base import Collector
 from pinoc.models import DeviceState
 from pinoc.state import PiNOCState
-try:
-    from pinoc.web import create_app
-except ModuleNotFoundError:
-    create_app = None
+
+FLASK_AVAILABLE = importlib.util.find_spec("flask") is not None
 
 
 class BrokenCollector(Collector):
@@ -24,10 +22,26 @@ class SharedStateTest(unittest.TestCase):
     def test_collector_failure_is_isolated(self):
         self.assertEqual(BrokenCollector().safe_collect(), [])
 
+    def test_authoritative_publish_removes_missing_devices(self):
+        state = PiNOCState()
+        state.publish([DeviceState(id="sensor", hostname="sensor", friendly_name="Sensor",
+                                   online=True, health="healthy")], replace=True)
+        state.publish([], replace=True)
+        self.assertEqual(state.devices(), [])
 
-@unittest.skipIf(create_app is None, "Flask dependency is not installed")
+    def test_offline_update_preserves_last_successful_seen_time(self):
+        state = PiNOCState()
+        state.publish([DeviceState(id="cm5", hostname="cm5", friendly_name="CM5",
+                                   online=True, health="healthy", last_seen="seen")])
+        state.publish([DeviceState(id="cm5", hostname="cm5", friendly_name="CM5",
+                                   online=False, health="offline")])
+        self.assertEqual(state.device("cm5")["last_seen"], "seen")
+
+
+@unittest.skipUnless(FLASK_AVAILABLE, "Flask dependency is not installed")
 class APIBackendTest(unittest.TestCase):
     def setUp(self):
+        from pinoc.web import create_app
         self.state = PiNOCState()
         self.device = DeviceState(id="stable-id", hostname="pi", friendly_name="Pi",
                                   online=True, health="healthy", last_seen="2026-08-31T00:00:00Z",
@@ -49,6 +63,18 @@ class APIBackendTest(unittest.TestCase):
 
     def test_unknown_device_is_404(self):
         self.assertEqual(self.client.get("/api/devices/missing").status_code, 404)
+
+    def test_health_is_starting_before_first_collection(self):
+        from pinoc.web import create_app
+        response = create_app(PiNOCState(), {"TESTING": True}).test_client().get("/health")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["status"], "starting")
+
+    def test_health_is_degraded_when_cache_is_stale(self):
+        self.state._last_collection = "2000-01-01T00:00:00+00:00"
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["status"], "degraded")
 
 if __name__ == "__main__":
     unittest.main()

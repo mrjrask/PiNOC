@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, List
 
 from pinoc.models import DeviceState
 from pinoc.state import PiNOCState
@@ -21,7 +21,7 @@ class Collector(ABC):
     def collect(self) -> Iterable[DeviceState]:
         raise NotImplementedError
 
-    def safe_collect(self) -> list[DeviceState]:
+    def safe_collect(self) -> List[DeviceState]:
         try:
             return list(self.collect())
         except Exception as exc:
@@ -50,7 +50,7 @@ class BackgroundCollector:
             started = time.monotonic()
             try:
                 snapshot = self.collect()
-                self.state.publish(self.normalize(snapshot), snapshot)
+                self.state.publish(self.normalize(snapshot), snapshot, replace=True)
             except Exception as exc:
                 LOG.exception("collection cycle failed: %s", exc)
             delay = max(0.0, self.interval - (time.monotonic() - started))

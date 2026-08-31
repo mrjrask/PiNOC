@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from .models import DeviceState
 
@@ -13,17 +13,30 @@ class PiNOCState:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._devices: Dict[str, DeviceState] = {}
-        self._alerts: list[Dict[str, Any]] = []
+        self._alerts: List[Dict[str, Any]] = []
         self._legacy_snapshot: Any = None
         self._started_at = datetime.now(timezone.utc).isoformat()
         self._last_collection: Optional[str] = None
 
-    def publish(self, devices: Iterable[DeviceState], legacy_snapshot: Any = None) -> None:
+    def publish(
+        self,
+        devices: Iterable[DeviceState],
+        legacy_snapshot: Any = None,
+        replace: bool = False,
+    ) -> None:
+        incoming = list(devices)
         with self._lock:
-            for device in devices:
+            incoming_ids: Set[str] = {device.id for device in incoming}
+            if replace:
+                for device_id in list(self._devices):
+                    if device_id not in incoming_ids:
+                        del self._devices[device_id]
+            for device in incoming:
                 existing = self._devices.get(device.id)
                 if existing and not device.first_seen:
                     device.first_seen = existing.first_seen
+                if existing and not device.last_seen:
+                    device.last_seen = existing.last_seen
                 if not device.first_seen:
                     device.first_seen = device.last_seen
                 self._devices[device.id] = copy.deepcopy(device)
@@ -39,7 +52,7 @@ class PiNOCState:
         with self._lock:
             return copy.deepcopy(self._legacy_snapshot)
 
-    def devices(self) -> list[Dict[str, Any]]:
+    def devices(self) -> List[Dict[str, Any]]:
         with self._lock:
             return [copy.deepcopy(d.to_dict()) for d in self._devices.values()]
 
@@ -48,7 +61,7 @@ class PiNOCState:
             device = self._devices.get(device_id)
             return copy.deepcopy(device.to_dict()) if device else None
 
-    def alerts(self) -> list[Dict[str, Any]]:
+    def alerts(self) -> List[Dict[str, Any]]:
         with self._lock:
             return copy.deepcopy(self._alerts)
 

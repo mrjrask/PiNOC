@@ -7,6 +7,14 @@
   "web_enabled": true,
   "web_host": "0.0.0.0",
   "web_port": 8088,
+  "polling": {
+    "local_seconds": 10,
+    "network_seconds": 10,
+    "remote_health_seconds": 10,
+    "service_seconds": 15,
+    "storage_seconds": 60,
+    "sensor_seconds": 10
+  },
   "remote_host": "192.168.1.200",
   "remote_user": "pi",
   "remote_ssh_port": 22,

@@ -30,10 +30,12 @@ from pi_noc import (
     LocalStatus,
     RemoteStatus,
     Snapshot,
+    SharedSnapshotCoordinator,
     TempDevice,
     VPNStatus,
     build_remote_temp_rows,
 )
+from pinoc.state import PiNOCState
 
 
 def make_snapshot(temp_devices):
@@ -80,6 +82,20 @@ class RemoteTempRowsTest(unittest.TestCase):
                 ("Looking for", endpoint, FONT_SMALL),
             ],
         )
+
+    def test_shared_collector_expires_stale_temperature_devices(self):
+        state = PiNOCState()
+        coordinator = SharedSnapshotCoordinator(state)
+        coordinator.temp_devices["stale"] = TempDevice(
+            device_id="stale", hostname="Stale", celsius=20, fahrenheit=68,
+            last_seen=0, ip="sensor",
+        )
+        try:
+            with patch.dict(CONFIG["remote_temp_monitor"], {"enabled": False, "max_device_age": 1}):
+                coordinator.collect_temperatures()
+            self.assertIsNone(state.device("stale"))
+        finally:
+            coordinator.stop()
 
 
 if __name__ == "__main__":

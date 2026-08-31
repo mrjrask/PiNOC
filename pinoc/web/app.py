@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 from flask import Flask, abort, jsonify, render_template
 
 from pinoc.state import PiNOCState
 
 
-def create_app(state: PiNOCState, config: dict[str, Any] | None = None) -> Flask:
+def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(config or {})
 
@@ -26,9 +27,14 @@ def create_app(state: PiNOCState, config: dict[str, Any] | None = None) -> Flask
     @app.get("/health")
     def health():
         summary = state.summary()
-        return jsonify({"status": "ok", "devices": summary["devices"], "online": summary["online"],
+        status = "starting"
+        if summary["last_collection"]:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(summary["last_collection"])).total_seconds()
+            status = "ok" if age <= float(app.config.get("HEALTH_STALE_SECONDS", 120)) else "degraded"
+        response_code = 200 if status == "ok" else 503
+        return jsonify({"status": status, "devices": summary["devices"], "online": summary["online"],
                         "warnings": summary["warnings"], "critical": summary["critical"],
-                        "database": summary["database"]})
+                        "database": summary["database"]}), response_code
 
     @app.get("/api/status")
     def api_status():
