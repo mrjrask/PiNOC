@@ -15,6 +15,9 @@
 # apt: openssh-client
 # apt: sshpass
 # apt: rsync
+# apt: libopenjp2-7 (OpenJPEG runtime library required by Pillow at import time;
+# the package name differs per release, so install.sh installs whichever of
+# libopenjp2-7 / libopenjp2-7-1 / libopenjp2-7-2 / libopenjp2-2.3 exists)
 
 # Python packages installed into the virtual environment by install.sh.
 Adafruit-Blinka
