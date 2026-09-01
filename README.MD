@@ -214,7 +214,9 @@ new collector representation take precedence in generalized fleet views.
    SPI, group, SSH-key, WireGuard sudoers, virtualenv, and systemd workflow.
    The unified environment always installs the lightweight Flask/Waitress web
    dependencies; the enable switch controls whether the listener runs.
-4. Start with `sudo systemctl start pi-noc.service`, then visit port 8088.
+4. The installer enables and starts `pi-noc.service`. Visit the selected web
+   port when the web console is enabled; reboot if newly enabled I2C or hardware
+   group membership is not active yet.
 
 **Migration from PiNOC 1.x:** pull/copy the new files, keep the existing `.env`
 and `config.json`, add the optional frontend environment variables shown above,
