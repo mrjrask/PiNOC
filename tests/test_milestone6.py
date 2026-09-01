@@ -84,6 +84,32 @@ def test_git_diff_requires_a_safe_explicit_path(tmp_path):
  with pytest.raises(ValueError):executor.argv({**base,"request":{"relative_path":".env"}},root)
  assert executor.argv({**base,"request":{"relative_path":"safe.txt"}},root)[-2:]==["--","safe.txt"]
 
+def test_restricted_job_history_applies_filters_before_limit(tmp_path):
+ _,gateway=setup(tmp_path)
+ stamp="2026-01-01T00:00:00+00:00"
+ for index in range(4):
+  gateway.db.execute("INSERT INTO development_jobs(job_id,device_id,job_type,requested_by,requested_at,status,timeout_seconds) VALUES(?,?,?,?,?,'queued',10)",(f"other-{index}","other","git_status","user",f"{stamp}-{index}"))
+ gateway.db.execute("INSERT INTO development_jobs(job_id,device_id,job_type,requested_by,requested_at,status,timeout_seconds) VALUES(?,?,?,?,?,'queued',10)",("allowed","pi","git_status","user","2025-01-01T00:00:00+00:00"))
+ rows=gateway.jobs(identity(devices=["pi"]),2)
+ assert [row["job_id"] for row in rows]==["allowed"]
+
+def test_incompatible_heartbeat_does_not_claim_queued_job(tmp_path):
+ db,gateway=setup(tmp_path);credentials=enroll(gateway);root=tmp_path/"repo";root.mkdir();workspace(gateway,root)
+ queued=gateway.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"git_status"})
+ history=HistoryManager(db,{});app=create_app(PiNOCState(),{"TESTING":True,"AUTH_ENABLED":True},history);body=json.dumps({"protocol_version":PROTOCOL_VERSION+1}).encode();stamp=str(int(time.time()));nonce="mismatch"
+ headers={"Content-Type":"application/json","X-PiNOC-Agent":credentials["agent_id"],"X-PiNOC-Timestamp":stamp,"X-PiNOC-Nonce":nonce,"X-PiNOC-Signature":gateway.sign(credentials["agent_id"],credentials["credential"],stamp,nonce,body)}
+ response=app.test_client().post("/api/v1/agent/heartbeat",data=body,headers=headers)
+ assert response.status_code==409 and response.get_json()["error_type"]=="protocol_incompatible"
+ assert gateway.job(queued["job_id"])["status"]=="queued"
+ app.extensions["pinoc_actions"].stop()
+
+def test_wire_job_uses_selected_profile_artifact_patterns(tmp_path):
+ _,gateway=setup(tmp_path);enroll(gateway);root=tmp_path/"repo";root.mkdir();workspace(gateway,root)
+ profiles={"screenshots":{"argv":["python3","-V"],"artifact_patterns":["screens/*.png"]}}
+ gateway.db.execute("UPDATE workspaces SET test_profiles_json=?,artifact_patterns_json=? WHERE workspace_id='project'",(json.dumps(profiles),json.dumps(["all/**/*"])))
+ gateway.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"test","profile":"screenshots"})
+ assert gateway.claim("pi")["workspace"]["artifact_patterns"]==["screens/*.png"]
+
 def test_state_changing_profile_requires_hardware_scope_and_approval(tmp_path):
  db,gw=setup(tmp_path);enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root)
  profiles={"flash":{"argv":["python3","-c","print('flash')"],"state_changing":True}}

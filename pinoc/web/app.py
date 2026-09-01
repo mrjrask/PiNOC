@@ -12,7 +12,7 @@ from pinoc.integrations import sanitize
 from pinoc.integrations.adsb import compare as compare_adsb
 from pinoc.security import SecurityManager, install_security, redact, restore_redacted
 from pinoc.actions import ActionDispatcher, ActionError
-from pinoc.development import DevelopmentGateway, DevError
+from pinoc.development import DevelopmentGateway, DevError, PROTOCOL_VERSION
 from pinoc.config_store import atomic_save, validate_config
 
 
@@ -165,7 +165,9 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     @app.post("/api/v1/agent/heartbeat")
     def agent_heartbeat():
         try:
-            agent=authenticate_agent();body=request.get_json(silent=True) or {};development.heartbeat(agent["agent_id"],body)
+            agent=authenticate_agent();body=request.get_json(silent=True) or {}
+            if body.get("protocol_version")!=PROTOCOL_VERSION:raise DevError("agent protocol incompatible","protocol_incompatible",409)
+            development.heartbeat(agent["agent_id"],body)
             job=None if body.get("current_job_id") else development.claim(agent["device_id"])
             return jsonify({"job":job,"cancel":development.cancellations(agent["device_id"])})
         except DevError as exc:return dev_error(exc)
