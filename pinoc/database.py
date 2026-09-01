@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, Optional
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -36,6 +36,20 @@ CREATE INDEX action_jobs_time ON action_jobs(requested_at); CREATE INDEX action_
 CREATE TABLE audit_records(audit_id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,user TEXT NOT NULL,role TEXT NOT NULL,source_ip TEXT,device_id TEXT,action TEXT NOT NULL,target TEXT,parameters_json TEXT NOT NULL DEFAULT '{}',authorization_result TEXT NOT NULL,execution_result TEXT,exit_code INTEGER,duration_ms INTEGER,error TEXT);
 CREATE INDEX audit_time ON audit_records(timestamp); CREATE INDEX audit_device ON audit_records(device_id); CREATE INDEX audit_action ON audit_records(action);
 CREATE TABLE device_operational_state(device_id TEXT PRIMARY KEY,maintenance_until TEXT,maintenance_reason TEXT,expected_offline INTEGER NOT NULL DEFAULT 0,expected_offline_reason TEXT,expected_offline_until TEXT,updated_at TEXT NOT NULL,updated_by TEXT NOT NULL);""",
+"""ALTER TABLE api_tokens ADD COLUMN device_restrictions_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE api_tokens ADD COLUMN workspace_restrictions_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE api_tokens ADD COLUMN job_type_restrictions_json TEXT NOT NULL DEFAULT '[]';
+CREATE TABLE agent_enrollment_codes(code_id TEXT PRIMARY KEY,secret_hash TEXT NOT NULL,device_id TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL,used_at TEXT,created_by TEXT NOT NULL);
+CREATE TABLE agents(agent_id TEXT PRIMARY KEY,device_id TEXT NOT NULL UNIQUE,credential_hash TEXT NOT NULL,hostname TEXT,model TEXT,architecture TEXT,agent_version TEXT NOT NULL,protocol_version INTEGER NOT NULL,status TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,credential_revoked INTEGER NOT NULL DEFAULT 0,capabilities_json TEXT NOT NULL DEFAULT '{}',hardware_json TEXT NOT NULL DEFAULT '{}',candidates_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,last_seen TEXT,credential_rotated_at TEXT);
+CREATE INDEX agents_status ON agents(status,last_seen);
+CREATE TABLE workspaces(workspace_id TEXT PRIMARY KEY,device_id TEXT NOT NULL,path TEXT NOT NULL,repository TEXT,mode TEXT NOT NULL DEFAULT 'read_only',execution_user TEXT,allowed_job_types_json TEXT NOT NULL DEFAULT '[]',allowed_commands_json TEXT NOT NULL DEFAULT '[]',allowed_env_json TEXT NOT NULL DEFAULT '[]',test_profiles_json TEXT NOT NULL DEFAULT '{}',services_json TEXT NOT NULL DEFAULT '[]',artifact_patterns_json TEXT NOT NULL DEFAULT '[]',sensitive_patterns_json TEXT NOT NULL DEFAULT '[]',hardware_profile_json TEXT NOT NULL DEFAULT '{}',approved INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(device_id,path));
+CREATE INDEX workspaces_device ON workspaces(device_id,approved);
+CREATE TABLE development_jobs(job_id TEXT PRIMARY KEY,parent_job_id TEXT,device_id TEXT NOT NULL,workspace_id TEXT,job_type TEXT NOT NULL,profile TEXT,argv_json TEXT NOT NULL DEFAULT '[]',environment_json TEXT NOT NULL DEFAULT '{}',permissions_json TEXT NOT NULL DEFAULT '[]',requested_by TEXT NOT NULL,api_token_id TEXT,source_ip TEXT,requested_at TEXT NOT NULL,approved_at TEXT,dispatched_at TEXT,started_at TEXT,completed_at TEXT,status TEXT NOT NULL,queue_reason TEXT,timeout_seconds INTEGER NOT NULL,exit_code INTEGER,error_type TEXT,summary TEXT,stdout TEXT NOT NULL DEFAULT '',stderr TEXT NOT NULL DEFAULT '',stdout_truncated INTEGER NOT NULL DEFAULT 0,stderr_truncated INTEGER NOT NULL DEFAULT 0,duration_ms INTEGER,request_json TEXT NOT NULL DEFAULT '{}',result_json TEXT NOT NULL DEFAULT '{}',cancel_requested INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX dev_jobs_time ON development_jobs(requested_at); CREATE INDEX dev_jobs_agent_status ON development_jobs(device_id,status); CREATE INDEX dev_jobs_workspace_status ON development_jobs(workspace_id,status);
+CREATE TABLE job_artifacts(artifact_id TEXT PRIMARY KEY,job_id TEXT NOT NULL,name TEXT NOT NULL,storage_name TEXT NOT NULL,size_bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,content_type TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT NOT NULL,FOREIGN KEY(job_id) REFERENCES development_jobs(job_id));
+CREATE INDEX job_artifacts_job ON job_artifacts(job_id);
+CREATE TABLE job_approvals(approval_id TEXT PRIMARY KEY,job_id TEXT NOT NULL,status TEXT NOT NULL,risk TEXT NOT NULL,requested_at TEXT NOT NULL,decided_at TEXT,decided_by TEXT,reason TEXT,FOREIGN KEY(job_id) REFERENCES development_jobs(job_id));
+CREATE TABLE agent_request_nonces(agent_id TEXT NOT NULL,nonce TEXT NOT NULL,used_at TEXT NOT NULL,PRIMARY KEY(agent_id,nonce));""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

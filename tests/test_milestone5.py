@@ -138,3 +138,31 @@ def test_auth_initializes_database_when_history_is_disabled(tmp_path):
  assert db.available is True
  c=app.test_client();assert login(c).status_code==302
  app.extensions["pinoc_actions"].stop()
+
+def test_actions_initialize_database_when_history_and_auth_are_disabled(tmp_path):
+ db=Database(str(tmp_path/"actions.sqlite"));history=HistoryManager(db,{"enabled":False})
+ state=PiNOCState();state.publish([DeviceState("pi","pi","Pi",online=True,address="host",collection_method="local")])
+ app=create_app(state,{"TESTING":True,"AUTH_ENABLED":False,"SECRET_KEY":"test"},history,Coordinator())
+ assert db.available is True
+ c=app.test_client();csrf=c.get("/api/session").json["csrf_token"]
+ response=c.post("/api/devices/pi/refresh",headers={"X-CSRF-Token":csrf})
+ assert response.status_code==202
+ assert db.scalar("SELECT COUNT(*) FROM action_jobs")==1
+ app.extensions["pinoc_actions"].stop()
+
+def test_configuration_maintenance_survives_history_reconciliation(tmp_path):
+ db=Database(str(tmp_path/"maintenance.sqlite"));assert db.initialize()
+ history=HistoryManager(db,{"thresholds":{"cpu_duration_seconds":0}})
+ stamp=datetime.now(timezone.utc).isoformat()
+ device={"id":"pi","hostname":"pi","friendly_name":"Pi","online":True,"last_seen":stamp,"maintenance":True,"maintenance_reason":"configured","cpu":{"utilization_percent":100,"temperature_c":90},"memory":{"percent":100},"storage":[],"services":[],"integrations":{}}
+ history._snapshot([device],stamp)
+ assert device["maintenance"] is True
+ assert device["maintenance_reason"]=="configured"
+ assert db.scalar("SELECT COUNT(*) FROM alerts WHERE resolved_at IS NULL")==0
+
+def test_installer_loads_saved_authentication_default(tmp_path):
+ env=tmp_path/"env";env.write_text("PINOC_AUTH_ENABLED=0\n")
+ script=Path(__file__).parents[1]/"install.sh"
+ command=f'''ENV_FILE={str(env)!r}; source <(sed -n '/^load_env_file()/,/^}}/p' {str(script)!r}); load_env_file; printf %s "$PINOC_AUTH_ENABLED"'''
+ result=subprocess.run(["bash","-c",command],text=True,capture_output=True,check=True)
+ assert result.stdout=="0"

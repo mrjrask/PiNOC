@@ -509,6 +509,118 @@ The helper generates only exact per-unit `systemctl start/stop/restart` entries 
 
 Mitigations address LAN attackers (enable HTTPS/authentication), stolen tokens (minimal scopes, hashes, revocation, last-use), compromised accounts (roles and complete audit), compromised managed Pis (per-device keys/segmentation), SSH host-key changes (fail closed), CSRF (session-bound token), command injection (fixed registry, unit allowlist, argument arrays), privilege escalation (exact sudoers), and secret leakage (central redaction and no private-key APIs). Remaining risks include an administrator's intentional power/config authority, traffic disclosure over HTTP, denial of service by a reachable peer, and the privileges necessarily granted for each selected service. Back up `config.json`, `data/pinoc.db`, SSH material, and the secret key with service-account-only permissions.
 
-### Milestone 6 boundary
+## Milestone 6: Agent and remote development gateway
 
-Milestone 5 identity, roles/scopes, audit schema, job lifecycle, device identity, redaction, configuration validation, and hardened SSH transport are reusable foundations. Milestone 6 remains a separate development-job design. PiNOC does **not** expose a shell, arbitrary command string, workspace/file editing, Codex/ChatGPT execution, remote pytest/npm, Git deployment, or AI hardware-test agent in this milestone.
+### Architecture and protocol
+
+Milestone 6 adds an **optional** outbound-polling `pinoc-agent` beside the existing SSH monitoring and safe-management paths. Non-agent Pis remain fully supported. A trusted client authenticates to PiNOC, PiNOC validates a structured development job and persists it, and the target agent claims it on its next HTTPS heartbeat. The unprivileged agent executes only the resulting policy envelope in an approved workspace and reports a durable result. It has no inbound listener and PiNOC exposes no `/shell`, root command, SSH-key export, arbitrary service, apt-upgrade, destructive rollback, or unrestricted filesystem endpoint.
+
+The protocol version is `1`; agent software is independently versioned (`1.0.0`). Agent methods are limited to enrollment, signed heartbeat/job claim, result upload, cancellation reconciliation, and artifact upload. Each authenticated request covers agent ID, Unix timestamp, a random nonce, and the exact request-body digest with HMAC-SHA256. PiNOC accepts a 60-second clock window and persists recently used nonces. Credentials are unique per agent and stored by PiNOC only as SHA-256 key material. TLS is still required: HMAC authenticates messages but does not hide job source, output, or credentials during enrollment. There are no special network ports beyond the PiNOC HTTPS endpoint and agents require only outbound access to it.
+
+### Install, enroll, rotate, and remove an agent
+
+1. Enable authentication and HTTPS on PiNOC. As an administrator, create a one-use, ten-minute enrollment code:
+
+   ```sh
+   curl -H 'Authorization: Bearer ADMIN_TOKEN' -H 'Content-Type: application/json' \
+     -d '{"device_id":"square","ttl_seconds":600}' \
+     https://pinoc.example/api/v1/dev/agents/enrollment-codes
+   ```
+2. On the intended Pi, verify the PiNOC TLS certificate and run `sudo ./install_agent.sh https://pinoc.example ONE_TIME_CODE /home/pi /opt`. The script creates the locked `pinoc-agent` system account, `/opt/pinoc-agent`, mode-0750 `/etc/pinoc-agent`, a mode-0600 configuration/credential file, and `pinoc-agent.service`. It does not install an SSH credential or reusable fleet enrollment secret. Add only deliberately required groups or workspace permissions; the supplied service has `NoNewPrivileges`, a strict system view, private temporary storage, and no root user.
+3. Confirm identity, version, protocol, last-seen time, capabilities, and candidates at `/agents`. Repository candidates are informational and never become executable automatically.
+4. Rotate with `POST /api/v1/dev/agents/AGENT_ID/rotate`, then replace only that agent's credential in `/etc/pinoc-agent/config.json`. Revoke immediately with `DELETE /api/v1/dev/agents/AGENT_ID/credential`. A revoked credential cannot heartbeat, claim, or report another result. Rotation does not require reimaging.
+5. Remove with `sudo ./uninstall_agent.sh --confirm`. It removes only agent runtime, service, credential, and system account; project workspaces are preserved. There is no automatic self-update. Upgrade the installed files through the administrator's normal package/deployment process and use `/agents` to find version/protocol mismatches.
+
+For an isolated local test only, `allow_insecure_http` can be set in agent configuration. This sends sensitive development traffic in plaintext and is **not secure**, even on a home LAN.
+
+### Capabilities and hardware profile
+
+Heartbeats normalize tool versions for Python, Git, Node, npm, Docker, ffmpeg, and `vcgencmd`; booleans for systemd, GPIO, I2C, SPI, camera, display, framebuffer, X11, and Wayland; and hardware fields for model, RAM, architecture, kernel, named I2C/SPI/camera/framebuffer nodes, DRM connector names, and display-session mode. The code enumerates only these relevant patterns, not unrestricted `/dev`. Profiles may declare `requires_capabilities`; missing capabilities produce `capability_missing` rather than attempting the job. A hardware profile describes what a workspace is approved to test. State-changing hardware profiles should be granted only to tokens with `dev:hardware`; presence of GPIO/I2C/SPI alone grants no arbitrary writes. Capture results must truthfully describe headless render, framebuffer capture, initialization-only, or unavailable physical capture; a generated PNG is not proof that a physical panel looked correct.
+
+### Approved workspaces and execution policy
+
+Administrators approve/update workspaces with `PUT /api/v1/dev/workspaces/WORKSPACE_ID`. Important fields are `device_id`, absolute `path`, `repository`, `mode`, `execution_user`, `allowed_job_types`, `allowed_commands`, `allowed_env`, `test_profiles`, `services`, `artifact_patterns`, `sensitive_patterns`, and `hardware_profile`. `read_only` is the safe default; `development` is required for generic command jobs. Candidate discovery never implies approval. Project-to-device mapping is represented by distinct approved workspace records and matrices explicitly name their target devices.
+
+Paths supplied by clients must be relative. The agent resolves the approved root and target canonically, rejects traversal and absolute paths, verifies containment, rejects symlink escapes/root replacement and non-regular reads, and denies `.env`, keys, credentials, and secret-like patterns by default. File reads are UTF-8 text and size bounded. Milestone 6 intentionally does not expose a general write endpoint. Administrators can later add atomic complete-file or validated patch operations without weakening this boundary.
+
+Named tests use argv arrays, for example:
+
+```json
+{
+  "test_profiles": {
+    "unit": {
+      "description": "Project unit suite",
+      "argv": ["venv/bin/python", "-m", "pytest"],
+      "timeout": 300,
+      "environment": {"DESK_DISPLAY_FORCE_HEADLESS": "1"},
+      "requires_capabilities": ["python"],
+      "artifact_patterns": ["test-output/*.png"]
+    }
+  }
+}
+```
+
+Generic `command` jobs require a development-mode workspace, `dev:command`, an argv array, and an executable in `allowed_commands`. Shells, `sudo`, `su`, `doas`, `pkexec`, environment wrappers, exec-style options, and destructive Git verbs are rejected. `git_status` and bounded `git_diff` are read-only; `git_fetch` is a distinct permissioned job and does not change working files. PiNOC never runs reset, clean, pull, push, or automatic rollback and never discards a dirty tree. `service_status` and `log_read` accept only configured unit names, bounded lines, and no arbitrary journal browsing. Existing Milestone 5 actions remain the sole path for approved service restart.
+
+### Jobs, limits, cancellation, and artifacts
+
+Development jobs are separate from operational `action_jobs`. Statuses are `queued`, `dispatched`, `running`, `succeeded`, `failed`, `timed_out`, `cancelled`, `agent_lost`, and `rejected`; normalized errors include authorization, offline agent, missing workspace/capability, timeout, command failure, artifact limit, and replay rejection. PiNOC rejects an offline target clearly instead of losing work. A server restart marks uncertain dispatched/running work `agent_lost` and never blindly reruns it. `/jobs` shows history/queue state and `/jobs/JOB_ID` shows identity, policy representation, timing, exit code, bounded output, result, artifacts, and audit linkage. Polling is the intentionally simple streaming mechanism.
+
+Every job has a 300-second default and 1,800-second ceiling. The agent creates a new process session, closes stdin, supplies a small explicit environment, enforces wall timeout, and terminates the entire process group on timeout/cancel. Where supported it also limits CPU time, address space (1 GiB), open files (128), output file size (20 MiB), and processes (64). Stdout/stderr are independently capped and truncation is explicit. Conservative per-agent polling executes one claimed job at a time; workspace-changing concurrency remains serialized by the agent. Future isolation can replace the runner with transient systemd units, namespaces, bubblewrap, or containers.
+
+Artifacts are discovered only through administrator-configured workspace glob patterns and canonical containment. The agent limits count, individual bytes, and total bytes; PiNOC generates IDs/storage names, stores mode-0600 files under `data/jobs/JOB_ID`, hashes them, and never accepts a destination path. Defaults are 20 files, 10 MiB each, and 25 MiB total. Successful artifacts expire after seven days and failed-job artifacts after thirty; cleanup removes bytes but not durable job/audit metadata and skips active jobs. Use the authenticated list/download routes, not filesystem paths.
+
+### Client authentication and stable API
+
+Codex, ChatGPT, and other tools use `Authorization: Bearer ID.SECRET` with a dedicated PiNOC API token—not cookies, SSH keys, enrollment codes, or agent credentials. Development scopes are `dev:read`, `dev:test`, `dev:command`, `dev:artifacts`, `dev:cancel`, `dev:write`, and `dev:hardware`. Tokens can additionally restrict device IDs, workspace IDs, and job types. A test-only token does not gain generic commands. A client's claimed product name grants nothing.
+
+Core versioned routes are:
+
+```text
+GET    /api/v1/dev/agents
+GET    /api/v1/dev/workspaces
+GET    /api/v1/dev/jobs
+POST   /api/v1/dev/jobs
+GET    /api/v1/dev/jobs/{id}
+DELETE /api/v1/dev/jobs/{id}
+GET    /api/v1/dev/jobs/{id}/artifacts
+GET    /api/v1/dev/jobs/{id}/artifacts/{artifact_id}
+POST   /api/v1/dev/matrices
+```
+
+Create a tightly restricted client token (returned once):
+
+```sh
+curl -b admin.cookies -H 'X-CSRF-Token: EXAMPLE' -H 'Content-Type: application/json' \
+  -d '{"owner":"codex","scopes":["dev:read","dev:test","dev:artifacts","dev:cancel"],"devices":["square"],"workspaces":["desk-display"],"job_types":["workspace_info","git_status","git_diff","test"]}' \
+  https://pinoc.example/api/tokens
+```
+
+Run and poll an approved test:
+
+```sh
+curl -H 'Authorization: Bearer TOKEN_ID.TOKEN_SECRET' -H 'Content-Type: application/json' \
+  -d '{"device_id":"square","workspace_id":"desk-display","job_type":"test","profile":"unit","timeout_seconds":300}' \
+  https://pinoc.example/api/v1/dev/jobs
+curl -H 'Authorization: Bearer TOKEN_ID.TOKEN_SECRET' https://pinoc.example/api/v1/dev/jobs/JOB_ID
+```
+
+A Codex workflow lists agents/workspaces, checks capabilities and dirty Git state, reads approved status/logs, submits syntax/unit/headless/hardware profiles, polls durable state, then downloads declared artifacts. A ChatGPT integration follows the identical structured flow. Natural-language intent must be mapped by the client to an approved device/workspace/profile; PiNOC does not turn prose into a shell command. A matrix request uses one profile/workspace across up to eight explicit devices, returns a parent ID plus independently persisted child jobs, and keeps each device's artifacts separate.
+
+### Database and audit
+
+Migration 6 extends token restriction metadata and adds normalized enrollment codes, agents, workspaces, development jobs, artifacts, approvals, and replay nonces without deleting prior tables/history. Enrollment, revocation, submission, cancellation, and completion use the Milestone 5 audit log with actor/client token ID, source, device, workspace/job representation, permissions, authorization, outcome, and redacted errors. Job records preserve timestamps, duration, status, exit code, approved argv, sanitized environment, truncation, result summary, and artifact references. Credential plaintext is never stored by PiNOC.
+
+### Security and threat model
+
+This gateway is substantially narrower than unrestricted SSH: stolen development tokens are bounded by scopes and optional device/workspace/job restrictions; malicious clients encounter structured schemas, allowlists, canonical paths, size/time limits, and audits; traversal and symlink escapes fail closed; commands bypass no shell because strings are never evaluated by one; agent replay is rejected; secret-like output is best-effort redacted; agent/PiNOC credentials and unrelated process environment are not inherited; and no development operation implicitly invokes sudo.
+
+**Important limitation:** an approved `pytest`, npm script, Python program, or dependency hook executes project code. That code can perform anything available to the configured Linux execution user, including network access and files/hardware that account can access. Filename rules and output redaction cannot detect every application secret. Use a dedicated low-privilege account, minimal groups/filesystem permissions, HTTPS, short-lived restricted client tokens, network segmentation, and stronger sandboxing for untrusted repositories.
+
+Remaining threats include a compromised PiNOC server dispatching policy-valid work, a compromised agent falsifying results or using its account access, malicious repositories consuming resources within available limits, stolen on-device credentials until revocation, administrator misconfiguration of broad commands/artifact globs/groups, and state-changing hardware tests damaging attached equipment. The agent is not a perfect sandbox and does not claim one. No automatic update or destructive recovery is provided.
+
+### Troubleshooting and manual Pi validation
+
+If an agent is offline, verify systemd status, outbound DNS/TCP/TLS, server URL/certificate, clock synchronization (the signature window is 60 seconds), credential revocation, and protocol version. If a workspace fails, verify its approval, exact canonical path, account traversal permissions, mode, job/executable/environment allowlists, capability prerequisites, and sensitive patterns. If a job times out, inspect its bounded stderr and choose an administrator-approved timeout no greater than the configured maximum. For display tests, inspect the reported validation mode before interpreting a screenshot.
+
+Before deploying broadly, enroll a disposable Pi, approve a temporary repository, exercise status/diff/read/test/timeout/cancel/artifact flows, revoke its credential, confirm reconnect after rotation, and verify processes are absent after cancellation. Never test with production secrets in project output. The automated mock-agent suite covers enrollment/replay/revocation, restrictions, traversal/symlink/sensitive denial, command/sudo policy, environment filtering, timeout/process cleanup/output truncation, Git status, artifact limits/retrieval, matrices, offline agents, cancellation, and schema preservation without requiring Raspberry Pi hardware.

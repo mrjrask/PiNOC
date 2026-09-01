@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block title %}{{ view|title }} · PiNOC{% endblock %}{% block content %}
+<h1>{{ view|title }}</h1><p id="notice">Development gateway data is authenticated and policy controlled.</p>
+<div class="panel"><table><thead id="head"></thead><tbody id="rows"></tbody></table><pre id="detail"></pre></div>
+{% endblock %}{% block scripts %}<script>
+const view={{ view|tojson }}, job={{ job_id|default('',true)|tojson }};
+const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function decide(id,decision){await fetch('/api/v1/dev/approvals/'+id+'/'+decision,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':document.body.dataset.csrf},body:'{}'});load()}
+async function load(){let url=view==='agents'?'/api/v1/dev/agents':view==='workspaces'?'/api/v1/dev/workspaces':view==='approvals'?'/api/v1/dev/approvals':job?'/api/v1/dev/jobs/'+job:'/api/v1/dev/jobs';let r=await fetch(url),d=await r.json();if(!r.ok){notice.textContent=d.error;return}
+if(job){detail.textContent=JSON.stringify(d,null,2);return}let data=d[view]||d.jobs||[];let fields=view==='agents'?['device_id','agent_version','status','last_seen']:view==='workspaces'?['device_id','workspace_id','path','repository','mode','approved']:view==='approvals'?['requested_at','requested_by','device_id','workspace_id','profile','risk','status']:['requested_at','device_id','workspace_id','job_type','status','summary'];head.innerHTML='<tr>'+fields.map(x=>'<th>'+esc(x.replaceAll('_',' '))+'</th>').join('')+(view==='approvals'?'<th>decision</th>':'')+'</tr>';rows.innerHTML=data.map(x=>'<tr>'+fields.map(f=>'<td>'+(f==='job_type'?'<a href="/jobs/'+esc(x.job_id)+'">'+esc(x[f])+'</a>':esc(x[f]))+'</td>').join('')+(view==='approvals'&&x.status==='pending'?'<td><button onclick="decide(\''+esc(x.approval_id)+'\',\'approve\')">Approve once</button> <button onclick="decide(\''+esc(x.approval_id)+'\',\'reject\')">Reject</button></td>':'')+'</tr>').join('')};load();setInterval(load,5000);
+</script>{% endblock %}
