@@ -34,6 +34,8 @@ class Executor:
         if any(fnmatch.fnmatch(part,p) for part in Path(relative).parts for p in patterns):raise ValueError("sensitive file denied")
         base=Path(root).resolve(strict=True);target=(base/relative).resolve(strict=must_exist)
         if target!=base and base not in target.parents:raise ValueError("workspace path escape rejected")
+        resolved_relative=target.relative_to(base)
+        if any(fnmatch.fnmatch(part,p) for part in resolved_relative.parts for p in patterns):raise ValueError("sensitive file denied")
         if base!=Path(root).resolve(strict=True):raise ValueError("workspace root changed")
         return target
     @staticmethod
@@ -130,10 +132,18 @@ class Client:
     def heartbeat(self):
         caps,hardware,candidates=discover(self.c.get("discovery_roots",[]));body={"hostname":platform.node(),"model":hardware["model"],"architecture":hardware["architecture"],"agent_version":AGENT_VERSION,"protocol_version":PROTOCOL_VERSION,"capabilities":caps,"hardware":hardware,"candidates":candidates,"current_job_id":self.current_job};return self.request("/api/v1/agent/heartbeat",body)
     def execute_job(self,job):
+        job_id=job["job_id"]
         try:
-            self.request(f"/api/v1/agent/jobs/{job['job_id']}/result",{"status":"running"})
-            self.request(f"/api/v1/agent/jobs/{job['job_id']}/result",self.executor.execute(job))
-        except Exception as exc:print(f"pinoc-agent job {job['job_id']}: {exc}",file=sys.stderr)
+            self.request(f"/api/v1/agent/jobs/{job_id}/result",{"status":"running"})
+            result=self.executor.execute(job)
+            while True:
+                try:
+                    self.request(f"/api/v1/agent/jobs/{job_id}/result",result)
+                    break
+                except Exception as exc:
+                    print(f"pinoc-agent job {job_id} result delivery: {exc}; retrying",file=sys.stderr)
+                    time.sleep(max(2,min(60,int(self.c.get("poll_seconds",5)))))
+        except Exception as exc:print(f"pinoc-agent job {job_id}: {exc}",file=sys.stderr)
         finally:self.current_job=None
     def run(self):
         while True:

@@ -146,7 +146,18 @@ class DevelopmentGateway:
         exe=argv[0]
         if Path(exe).name!=exe or "/" in exe or "\\" in exe:raise DevError("executable path is not permitted","authorization_denied",403)
         if exe in FORBIDDEN_EXEC or exe not in set(ws["allowed_commands"]):raise DevError("executable is not approved","authorization_denied",403)
-        if exe=="git" and len(argv)>1 and argv[1] in FORBIDDEN_GIT:raise DevError("destructive Git operation is forbidden","authorization_denied",403)
+        if exe=="git":
+            # Global options may precede the operation (for example,
+            # ``git -C . reset``), so argv[1] is not always the subcommand.
+            value_options={"-C","-c","--config-env","--exec-path","--git-dir","--namespace","--super-prefix","--work-tree"}
+            index=1
+            while index<len(argv) and argv[index].startswith("-"):
+                option=argv[index].split("=",1)[0]
+                index+=1
+                if option in value_options and "=" not in argv[index-1]:
+                    if index>=len(argv):raise DevError("Git global option requires a value","authorization_denied",403)
+                    index+=1
+            if index<len(argv) and argv[index] in FORBIDDEN_GIT:raise DevError("destructive Git operation is forbidden","authorization_denied",403)
         if any(x in {"--exec","-exec"} for x in argv):raise DevError("command option is forbidden","authorization_denied",403)
     def matrix(self,identity,body,ip=None):
         devices=body.get("devices",[])

@@ -7,7 +7,7 @@ from pinoc.history import HistoryManager
 from pinoc.security import SecurityManager
 from pinoc.state import PiNOCState
 from pinoc.web.app import create_app
-from pinoc_agent import Executor
+from pinoc_agent import Client,Executor
 
 def setup(tmp_path):
  db=Database(str(tmp_path/"pinoc.db"));assert db.initialize();gw=DevelopmentGateway(db,str(tmp_path/"jobs"),{"output_limit_bytes":1024,"artifact_file_limit_bytes":1024,"artifact_total_limit_bytes":2048});return db,gw
@@ -30,9 +30,9 @@ def test_schema_enrollment_replay_rotation_and_revocation(tmp_path):
  with pytest.raises(DevError):gw.authenticate_agent(a["agent_id"],stamp,"new",body,gw.sign(a["agent_id"],replacement,stamp,"new",body))
 
 def test_workspace_paths_sensitive_files_and_symlink_escape(tmp_path):
- root=tmp_path/"repo";root.mkdir();(root/"ok.txt").write_text("ok");(root/".env").write_text("SECRET=x");outside=tmp_path/"outside";outside.write_text("no");(root/"link").symlink_to(outside)
+ root=tmp_path/"repo";root.mkdir();(root/"ok.txt").write_text("ok");(root/".env").write_text("SECRET=x");outside=tmp_path/"outside";outside.write_text("no");(root/"link").symlink_to(outside);(root/"innocent").symlink_to(root/".env")
  assert Executor.safe_path(root,"ok.txt")==root/"ok.txt"
- for path in ("../outside","/etc/passwd","link",".env"):
+ for path in ("../outside","/etc/passwd","link",".env","innocent"):
   with pytest.raises(ValueError):Executor.safe_path(root,path)
 
 def test_scope_device_workspace_command_and_environment_policy(tmp_path):
@@ -40,10 +40,22 @@ def test_scope_device_workspace_command_and_environment_policy(tmp_path):
  with pytest.raises(DevError):gw.submit(identity(devices=["other"]),{"device_id":"pi","workspace_id":"project","job_type":"git_status"})
  with pytest.raises(DevError):gw.submit(identity(workspaces=["other"]),{"device_id":"pi","workspace_id":"project","job_type":"git_status"})
  with pytest.raises(DevError):gw.submit(identity(scopes=["dev:read"]),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"]})
- for argv in (["sudo","id"],["sh","-c","id"],["git","reset","--hard"],["./git","status"],["/usr/bin/git","status"]):
+ for argv in (["sudo","id"],["sh","-c","id"],["git","reset","--hard"],["git","-C",".","reset","--hard"],["./git","status"],["/usr/bin/git","status"]):
   with pytest.raises(DevError):gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":argv})
  with pytest.raises(DevError):gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"],"environment":{"PINOC_SECRET":"x"}})
  assert gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"],"environment":{"HEADLESS":"1"}})["status"]=="queued"
+
+def test_agent_retries_terminal_result_before_releasing_job(monkeypatch):
+ client=Client({"poll_seconds":2});client.current_job="job-1";result={"status":"succeeded"};client.executor.execute=lambda job:result
+ deliveries=[]
+ def request(path,body):
+  deliveries.append(body)
+  if body is result and deliveries.count(result)<3:raise OSError("temporary outage")
+  return {}
+ client.request=request;monkeypatch.setattr(time,"sleep",lambda _:None)
+ client.execute_job({"job_id":"job-1"})
+ assert deliveries==[{"status":"running"},result,result,result]
+ assert client.current_job is None
 
 def test_state_changing_profile_requires_hardware_scope_and_approval(tmp_path):
  db,gw=setup(tmp_path);enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root)
