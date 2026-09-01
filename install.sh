@@ -70,7 +70,7 @@ load_env_file() {
 }
 
 configure_frontends() {
-  local display_enabled display_type web_enabled web_host web_port
+  local display_enabled display_type web_enabled web_host web_port auth_enabled
   prompt_default display_enabled "Enable physical display (1/0)" "${PINOC_DISPLAY_ENABLED:-1}"
   prompt_default auth_enabled "Enable PiNOC web authentication (1/0)" "${PINOC_AUTH_ENABLED:-1}"
   prompt_default display_type "Display type (ADA_BONNET/PIM_DHM)" "${DISPLAY:-ADA_BONNET}"
@@ -79,6 +79,16 @@ configure_frontends() {
   web_host="${PINOC_WEB_HOST:-0.0.0.0}"
   prompt_default web_port "Web console port" "${PINOC_WEB_PORT:-8088}"
   [[ "$web_port" =~ ^[0-9]+$ ]] && ((web_port >= 1 && web_port <= 65535)) || fail "Invalid web port: ${web_port}"
+  # Keep the selected values available to the remainder of this installer as
+  # well as persisting them for the service. Function-local prompt variables
+  # disappear on return, which previously made the completion message abort
+  # under `set -u` and left later checks using stale/default values.
+  PINOC_DISPLAY_ENABLED="$display_enabled"
+  DISPLAY="$display_type"
+  PINOC_WEB_ENABLED="$web_enabled"
+  PINOC_WEB_HOST="$web_host"
+  PINOC_WEB_PORT="$web_port"
+  PINOC_AUTH_ENABLED="$auth_enabled"
   python3 - "$ENV_FILE" "$display_enabled" "$display_type" "$web_enabled" "$web_host" "$web_port" "$auth_enabled" <<'PY'
 import sys
 path, display_enabled, display_type, web_enabled, web_host, web_port, auth_enabled = sys.argv[1:]
@@ -236,7 +246,11 @@ install_service() {
   install -m 0644 "$tmp_service" "$SERVICE_DEST"
   rm -f "$tmp_service"
   systemctl daemon-reload
+  # Start (or restart) the service now in addition to enabling it at boot. This
+  # brings an enabled bonnet to life as part of a successful installation and
+  # applies updated environment settings on upgrades.
   systemctl enable "$SERVICE_NAME"
+  systemctl restart "$SERVICE_NAME"
 }
 
 configure_wireguard_controls() {
@@ -309,9 +323,11 @@ main() {
   install_service
 
   log "Installation complete"
-  log "Web console: http://$(hostname -I 2>/dev/null | awk '{print $1}'):${web_port}/ (when enabled)"
-  log "Reboot if I2C or new group membership was not already active, then start with: sudo systemctl start ${SERVICE_NAME}"
-  if [[ ${auth_enabled:-1} == 1 ]]; then
+  if [[ "$PINOC_WEB_ENABLED" == 1 ]]; then
+    log "Web console: http://$(hostname -I 2>/dev/null | awk '{print $1}'):${PINOC_WEB_PORT}/"
+  fi
+  log "The ${SERVICE_NAME} service is enabled and started; reboot if I2C or new group membership was not already active"
+  if [[ "$PINOC_AUTH_ENABLED" == 1 ]]; then
     log "Create the initial administrator before exposing the web port: sudo -u ${INSTALL_USER} ${VENV_DIR}/bin/python -m pinoc.admin create-user --role administrator USERNAME"
   else
     log "WARNING: authentication is disabled; every client able to reach PiNOC has trusted-LAN administrator access. HTTP is not encrypted."
