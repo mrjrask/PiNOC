@@ -45,7 +45,7 @@ class Executor:
         if hasattr(resource,"RLIMIT_AS"):resource.setrlimit(resource.RLIMIT_AS,(1024*1024*1024,1024*1024*1024))
     def cancel(self,jid):
         with self.lock:proc=self.processes.get(jid);self.cancelled.add(jid)
-        if proc and proc.poll() is None:
+        if proc:
             try:os.killpg(proc.pid,signal.SIGTERM);time.sleep(.2);os.killpg(proc.pid,signal.SIGKILL)
             except ProcessLookupError:pass
     @staticmethod
@@ -81,6 +81,9 @@ class Executor:
             try:
                 proc.wait(timeout=int(job["timeout_seconds"]));cancelled=jid in self.cancelled
                 status="cancelled" if cancelled else "succeeded" if proc.returncode==0 else "failed";etype="job_cancelled" if cancelled else None if proc.returncode==0 else "command_failed"
+                # The session can outlive its leader and keep the capture pipes
+                # open forever.  Reap all descendants before joining readers.
+                self.cancel(jid)
             except subprocess.TimeoutExpired:
                 self.cancel(jid);proc.wait();status="timed_out";etype="job_timeout"
             finally:

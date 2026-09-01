@@ -40,7 +40,7 @@ def test_scope_device_workspace_command_and_environment_policy(tmp_path):
  with pytest.raises(DevError):gw.submit(identity(devices=["other"]),{"device_id":"pi","workspace_id":"project","job_type":"git_status"})
  with pytest.raises(DevError):gw.submit(identity(workspaces=["other"]),{"device_id":"pi","workspace_id":"project","job_type":"git_status"})
  with pytest.raises(DevError):gw.submit(identity(scopes=["dev:read"]),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"]})
- for argv in (["sudo","id"],["sh","-c","id"],["git","reset","--hard"],["git","-C",".","reset","--hard"],["./git","status"],["/usr/bin/git","status"]):
+ for argv in (["sudo","id"],["sh","-c","id"],["git","reset","--hard"],["git","-C",".","reset","--hard"],["git","-c","alias.run=!sh -c id","run"],["git","-calias.run=!sh -c id","run"],["git","--config-env=alias.run=EVIL","run"],["./git","status"],["/usr/bin/git","status"]):
   with pytest.raises(DevError):gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":argv})
  with pytest.raises(DevError):gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"],"environment":{"PINOC_SECRET":"x"}})
  assert gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"],"environment":{"HEADLESS":"1"}})["status"]=="queued"
@@ -95,6 +95,9 @@ def test_offline_read_only_timeout_cancel_artifacts_and_matrix(tmp_path):
  claimed=gw.claim("pi");assert claimed["job_id"]==job["job_id"]
  gw.result(gw.agent(a["agent_id"]),job["job_id"],{"status":"succeeded","exit_code":0,"stdout":"token=abc","artifacts":[{"name":"screen.png","data":base64.b64encode(b"png").decode()}]});assert gw.artifacts(job["job_id"])[0]["name"]=="screen.png"
  row,path=gw.artifact(job["job_id"],gw.artifacts(job["job_id"])[0]["artifact_id"]);assert path.read_bytes()==b"png"
+ # Retrying after a lost terminal-result response is an idempotent success.
+ gw.result(gw.agent(a["agent_id"]),job["job_id"],{"status":"succeeded","artifacts":[{"name":"screen.png","data":base64.b64encode(b"png").decode()}]})
+ assert len(gw.artifacts(job["job_id"]))==1
  queued=gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"git_status"});assert gw.cancel(identity(),queued["job_id"])["status"]=="cancelled"
  matrix=gw.matrix(identity(),{"devices":["pi"],"workspace_id":"project","job_type":"test","profile":"unit"});assert len(matrix["jobs"])==1
  db.execute("UPDATE agents SET last_seen='2000-01-01T00:00:00+00:00'")
@@ -127,6 +130,11 @@ def test_executor_can_cancel_a_running_job(tmp_path):
   time.sleep(.01)
  ex.cancel(job["job_id"]);worker.join(5)
  assert not worker.is_alive() and result["status"]=="cancelled" and not ex.processes
+
+def test_executor_reaps_background_descendants_after_leader_exits(tmp_path):
+ root=tmp_path/"repo";root.mkdir();ex=Executor();job={"job_id":"background","job_type":"command","workspace":{"path":str(root),"artifact_patterns":[]},"argv":["python3","-c","import subprocess; subprocess.Popen(['sleep','30'])"],"environment":{},"request":{},"timeout_seconds":2,"output_limit_bytes":100,"file_limit_bytes":100,"artifact_limits":{"count":1,"file_bytes":10,"total_bytes":10}}
+ started=time.monotonic();result=ex.execute(job)
+ assert result["status"]=="succeeded" and time.monotonic()-started<2
 
 def test_development_token_restrictions_are_persisted(tmp_path):
  db,_=setup(tmp_path);s=SecurityManager(db,True);s.create_user("admin","correct horse battery","administrator");raw=s.create_token("admin",["dev:test"],["pi"],["project"],["test"]);row=db.rows("SELECT * FROM api_tokens WHERE token_id=?",(raw.split('.')[0],))[0]

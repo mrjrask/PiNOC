@@ -152,10 +152,14 @@ class DevelopmentGateway:
         if exe=="git":
             # Global options may precede the operation (for example,
             # ``git -C . reset``), so argv[1] is not always the subcommand.
-            value_options={"-C","-c","--config-env","--exec-path","--git-dir","--namespace","--super-prefix","--work-tree"}
+            value_options={"-C","--exec-path","--git-dir","--namespace","--super-prefix","--work-tree"}
             index=1
             while index<len(argv) and argv[index].startswith("-"):
                 option=argv[index].split("=",1)[0]
+                # Git configuration can define executable aliases.  It must
+                # never be accepted from an otherwise allowlisted command.
+                if option=="--config-env" or option=="-c" or (option.startswith("-c") and option!="-C"):
+                    raise DevError("Git configuration options are forbidden","authorization_denied",403)
                 index+=1
                 if option in value_options and "=" not in argv[index-1]:
                     if index>=len(argv):raise DevError("Git global option requires a value","authorization_denied",403)
@@ -183,21 +187,27 @@ class DevelopmentGateway:
         if not job or job["device_id"]!=agent["device_id"]:raise DevError("job not found","job_not_found",404)
         status=str(body.get("status"));
         if status not in {"running","succeeded","failed","timed_out","cancelled"}:raise DevError("invalid job status")
+        # A lost HTTP response causes the agent to retry the terminal payload.
+        # Acknowledge an already committed result without storing its artifacts
+        # again (or allowing a retry to rewrite the terminal outcome).
+        if job["status"] in {"succeeded","failed","timed_out","cancelled"}:return job
         if status=="running":self.db.execute("UPDATE development_jobs SET status='running',started_at=COALESCE(started_at,?) WHERE job_id=?",(utcnow(),job_id));return self.job(job_id)
         stdout=str(redact(body.get("stdout","")))[:self.output_limit];stderr=str(redact(body.get("stderr","")))[:self.output_limit];done=utcnow()
-        self.db.execute("UPDATE development_jobs SET status=?,completed_at=?,started_at=COALESCE(started_at,?),exit_code=?,error_type=?,summary=?,stdout=?,stderr=?,stdout_truncated=?,stderr_truncated=?,duration_ms=?,result_json=? WHERE job_id=?",(status,done,done,body.get("exit_code"),body.get("error_type"),str(body.get("summary",""))[:1000],stdout,stderr,int(bool(body.get("stdout_truncated")) or len(str(body.get("stdout","")))>self.output_limit),int(bool(body.get("stderr_truncated")) or len(str(body.get("stderr","")))>self.output_limit),body.get("duration_ms"),json.dumps(redact(body.get("result",{}))),job_id))
         for item in body.get("artifacts",[])[:self.artifact_count]:self._store_artifact(job_id,item,status)
+        self.db.execute("UPDATE development_jobs SET status=?,completed_at=?,started_at=COALESCE(started_at,?),exit_code=?,error_type=?,summary=?,stdout=?,stderr=?,stdout_truncated=?,stderr_truncated=?,duration_ms=?,result_json=? WHERE job_id=?",(status,done,done,body.get("exit_code"),body.get("error_type"),str(body.get("summary",""))[:1000],stdout,stderr,int(bool(body.get("stdout_truncated")) or len(str(body.get("stdout","")))>self.output_limit),int(bool(body.get("stderr_truncated")) or len(str(body.get("stderr","")))>self.output_limit),body.get("duration_ms"),json.dumps(redact(body.get("result",{}))),job_id))
         self.audit({"username":"agent:"+agent["agent_id"],"role":"agent"},None,agent["device_id"],"dev.job.result",job_id,{},"allowed",status,body.get("error_type"));return self.job(job_id)
     def _store_artifact(self,job_id,item,status):
         try:data=base64.b64decode(item.get("data", ""),validate=True)
         except Exception:raise DevError("invalid artifact","artifact_invalid")
+        name=Path(str(item.get("name","artifact"))).name[:200] or "artifact";digest=hashlib.sha256(data).hexdigest()
+        if self.db.scalar("SELECT 1 FROM job_artifacts WHERE job_id=? AND name=? AND sha256=?",(job_id,name,digest)):return
         current=self.db.scalar("SELECT COALESCE(SUM(size_bytes),0) FROM job_artifacts WHERE job_id=?",(job_id,)) or 0
         count=self.db.scalar("SELECT COUNT(*) FROM job_artifacts WHERE job_id=?",(job_id,)) or 0
         if len(data)>self.artifact_file_limit or current+len(data)>self.artifact_total_limit or count>=self.artifact_count:raise DevError("artifact limit exceeded","artifact_too_large",413)
-        aid=str(uuid.uuid4());name=Path(str(item.get("name","artifact"))).name[:200] or "artifact";storage=aid+Path(name).suffix[:16];folder=(self.root/job_id).resolve()
+        aid=str(uuid.uuid5(uuid.NAMESPACE_URL,f"pinoc-artifact:{job_id}:{name}:{digest}"));storage=aid+Path(name).suffix[:16];folder=(self.root/job_id).resolve()
         if self.root not in folder.parents:raise DevError("artifact path rejected","artifact_path_escape")
         folder.mkdir(mode=0o700,parents=True,exist_ok=True);path=folder/storage;path.write_bytes(data);os.chmod(path,0o600);days=30 if status!="succeeded" else 7
-        self.db.execute("INSERT INTO job_artifacts VALUES(?,?,?,?,?,?,?,?,?)",(aid,job_id,name,storage,len(data),hashlib.sha256(data).hexdigest(),str(item.get("content_type") or mimetypes.guess_type(name)[0] or "application/octet-stream")[:100],utcnow(),(datetime.now(timezone.utc)+timedelta(days=days)).isoformat()))
+        self.db.execute("INSERT INTO job_artifacts VALUES(?,?,?,?,?,?,?,?,?)",(aid,job_id,name,storage,len(data),digest,str(item.get("content_type") or mimetypes.guess_type(name)[0] or "application/octet-stream")[:100],utcnow(),(datetime.now(timezone.utc)+timedelta(days=days)).isoformat()))
     def artifacts(self,job_id):return self.db.rows("SELECT artifact_id,job_id,name,size_bytes,sha256,content_type,created_at,expires_at FROM job_artifacts WHERE job_id=? ORDER BY created_at",(job_id,))
     def artifact(self,job_id,aid):
         rows=self.db.rows("SELECT * FROM job_artifacts WHERE job_id=? AND artifact_id=?",(job_id,aid));row=rows[0] if rows else None
