@@ -102,7 +102,7 @@ class DevelopmentGateway:
     def _restricted(self,identity,device,wid,kind):
         for key,value in (("devices",device),("workspaces",wid),("job_types",kind)):
             if identity.get(key) and value not in identity[key]:raise DevError(f"token is not authorized for {key[:-1]}","authorization_denied",403)
-    def submit(self,identity,body,ip=None,parent=None):
+    def submit(self,identity,body,ip=None,parent=None,validate_only=False):
         device=str(body.get("device_id",body.get("device", "")));wid=str(body.get("workspace_id",body.get("workspace", "")));kind=str(body.get("job_type", ""));self._restricted(identity,device,wid,kind)
         if kind not in ALL_TYPES:raise DevError("unsupported job type")
         required="dev:read" if kind in READ_TYPES else "dev:test" if kind in TEST_TYPES else "dev:command"
@@ -120,9 +120,12 @@ class DevelopmentGateway:
             if not definition:raise DevError("test profile is not approved")
             requires=definition.get("requires_capabilities",[]);caps=agent.get("capabilities",{})
             if any(not caps.get(x) for x in requires):raise DevError("required capability missing","capability_missing",409)
-            if definition.get("hardware"):
+            # State-changing profiles are hardware-authorized and approved based
+            # on their risk, even if an administrator omitted the advisory
+            # ``hardware`` marker from the profile.
+            if definition.get("hardware") or definition.get("state_changing"):
                 if identity.get("token") and "dev:hardware" not in identity.get("scopes",[]):raise DevError("hardware scope missing","authorization_denied",403)
-                approval_required=bool(definition.get("state_changing"))
+            approval_required=bool(definition.get("state_changing"))
             argv=definition.get("argv",[])
         if kind=="command":self._validate_command(ws,argv)
         if kind=="git_fetch":argv=["git","fetch","--prune"]
@@ -130,19 +133,27 @@ class DevelopmentGateway:
         if not isinstance(env,dict) or any(k not in (ws or {}).get("allowed_env",[]) or not isinstance(v,str) or len(v)>4096 for k,v in env.items()):raise DevError("environment variable is not approved")
         timeout=int(body.get("timeout_seconds",self.default_timeout));timeout=max(1,min(timeout,self.max_timeout));job_id=str(uuid.uuid4());stamp=utcnow();permissions=[required]
         request_data={"relative_path":body.get("relative_path"),"staged":bool(body.get("staged")),"lines":min(1000,max(1,int(body.get("lines",200))))}
+        if validate_only:return None
         self.db.execute("INSERT INTO development_jobs(job_id,parent_job_id,device_id,workspace_id,job_type,profile,argv_json,environment_json,permissions_json,requested_by,api_token_id,source_ip,requested_at,status,timeout_seconds,request_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(job_id,parent,device,wid or None,kind,profile,json.dumps(argv),json.dumps(redact(env)),json.dumps(permissions),identity["username"],identity.get("token_id"),ip,stamp,"queued",timeout,json.dumps(request_data)))
         if approval_required:
             self.db.execute("UPDATE development_jobs SET queue_reason='waiting_for_approval' WHERE job_id=?",(job_id,));self.db.execute("INSERT INTO job_approvals VALUES(?,?,?,?,?,?,?,?)",(str(uuid.uuid4()),job_id,"pending","hardware_state_change",stamp,None,None,None))
         self.audit(identity,ip,device,"dev.job.submit",job_id,{"workspace":wid,"job_type":kind,"profile":profile,"argv":argv,"permissions":permissions},"allowed","queued");return self.job(job_id)
     def _validate_command(self,ws,argv):
         if not ws or ws["mode"]!="development" or not isinstance(argv,list) or not argv or any(not isinstance(x,str) or len(x)>4096 or "\x00" in x for x in argv):raise DevError("command is not permitted","authorization_denied",403)
-        exe=Path(argv[0]).name
+        # Only bare names may be resolved through the agent's controlled PATH.
+        # Comparing basenames while retaining a supplied path would let a
+        # workspace-local symlink impersonate an allowlisted executable.
+        exe=argv[0]
+        if Path(exe).name!=exe or "/" in exe or "\\" in exe:raise DevError("executable path is not permitted","authorization_denied",403)
         if exe in FORBIDDEN_EXEC or exe not in set(ws["allowed_commands"]):raise DevError("executable is not approved","authorization_denied",403)
         if exe=="git" and len(argv)>1 and argv[1] in FORBIDDEN_GIT:raise DevError("destructive Git operation is forbidden","authorization_denied",403)
         if any(x in {"--exec","-exec"} for x in argv):raise DevError("command option is forbidden","authorization_denied",403)
     def matrix(self,identity,body,ip=None):
         devices=body.get("devices",[])
         if not isinstance(devices,list) or not devices or len(devices)>8:raise DevError("matrix requires 1-8 devices")
+        # Validate the complete matrix before persisting any child.  A bad late
+        # target must not leave earlier, undisclosed jobs eligible for claiming.
+        for device in devices:self.submit(identity,{**body,"device_id":device},ip,validate_only=True)
         parent=str(uuid.uuid4());jobs=[]
         for device in devices:jobs.append(self.submit(identity,{**body,"device_id":device},ip,parent))
         return {"parent_job_id":parent,"jobs":jobs}

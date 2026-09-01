@@ -29,6 +29,11 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     security=SecurityManager(security_db,auth_enabled) if security_db else None
     actions=ActionDispatcher(history.db,state,coordinator,int(app.config.get("ACTION_WORKERS",2))) if history else None
     development=DevelopmentGateway(history.db,app.config.get("DEV_ARTIFACT_ROOT","data/jobs"),app.config.get("DEV_CONFIG",{})) if history else None
+    # Flask/Werkzeug enforces this while reading the stream, before the public
+    # agent endpoints buffer a body for HMAC verification.  Allow enough room
+    # for the configured artifact total after base64 and JSON encoding.
+    artifact_total=int(app.config.get("DEV_CONFIG",{}).get("artifact_total_limit_bytes",25*1024*1024))
+    app.config["MAX_CONTENT_LENGTH"]=int(app.config.get("DEV_AGENT_MAX_REQUEST_BYTES",artifact_total*4//3+1024*1024))
     app.config["TOKEN_SCOPE_PERMISSIONS"]={
         "api_session":"view",
         "api_status":"view","api_devices":"view","api_device":"view","api_integrations":"view",

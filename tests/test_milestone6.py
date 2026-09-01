@@ -3,7 +3,10 @@ from pathlib import Path
 import pytest
 from pinoc.database import Database,SCHEMA_VERSION
 from pinoc.development import DevelopmentGateway,DevError,PROTOCOL_VERSION
+from pinoc.history import HistoryManager
 from pinoc.security import SecurityManager
+from pinoc.state import PiNOCState
+from pinoc.web.app import create_app
 from pinoc_agent import Executor
 
 def setup(tmp_path):
@@ -37,10 +40,19 @@ def test_scope_device_workspace_command_and_environment_policy(tmp_path):
  with pytest.raises(DevError):gw.submit(identity(devices=["other"]),{"device_id":"pi","workspace_id":"project","job_type":"git_status"})
  with pytest.raises(DevError):gw.submit(identity(workspaces=["other"]),{"device_id":"pi","workspace_id":"project","job_type":"git_status"})
  with pytest.raises(DevError):gw.submit(identity(scopes=["dev:read"]),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"]})
- for argv in (["sudo","id"],["sh","-c","id"],["git","reset","--hard"]):
+ for argv in (["sudo","id"],["sh","-c","id"],["git","reset","--hard"],["./git","status"],["/usr/bin/git","status"]):
   with pytest.raises(DevError):gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":argv})
  with pytest.raises(DevError):gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"],"environment":{"PINOC_SECRET":"x"}})
  assert gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"],"environment":{"HEADLESS":"1"}})["status"]=="queued"
+
+def test_state_changing_profile_requires_hardware_scope_and_approval(tmp_path):
+ db,gw=setup(tmp_path);enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root)
+ profiles={"flash":{"argv":["python3","-c","print('flash')"],"state_changing":True}}
+ db.execute("UPDATE workspaces SET test_profiles_json=? WHERE workspace_id='project'",(json.dumps(profiles),))
+ with pytest.raises(DevError) as error:gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"test","profile":"flash"})
+ assert error.value.error_type=="authorization_denied"
+ job=gw.submit(identity(scopes=identity()["scopes"]+["dev:hardware"]),{"device_id":"pi","workspace_id":"project","job_type":"test","profile":"flash"})
+ assert job["queue_reason"]=="waiting_for_approval" and db.scalar("SELECT COUNT(*) FROM job_approvals WHERE job_id=?",(job["job_id"],))==1
 
 def test_test_jobs_require_an_approved_profile(tmp_path):
  _,gw=setup(tmp_path);enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root)
@@ -60,6 +72,18 @@ def test_offline_read_only_timeout_cancel_artifacts_and_matrix(tmp_path):
  db.execute("UPDATE agents SET last_seen='2000-01-01T00:00:00+00:00'")
  with pytest.raises(DevError) as e:gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"git_status"})
  assert e.value.error_type=="agent_offline"
+
+def test_matrix_validates_every_target_before_creating_children(tmp_path):
+ db,gw=setup(tmp_path);enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root)
+ with pytest.raises(DevError):gw.matrix(identity(),{"devices":["pi","offline"],"workspace_id":"project","job_type":"test","profile":"unit"})
+ assert db.scalar("SELECT COUNT(*) FROM development_jobs")==0
+
+def test_agent_request_body_is_capped_before_authentication(tmp_path):
+ db=Database(str(tmp_path/"web.db"));assert db.initialize();history=HistoryManager(db,{})
+ app=create_app(PiNOCState(),{"TESTING":True,"AUTH_ENABLED":False,"DEV_AGENT_MAX_REQUEST_BYTES":64},history)
+ response=app.test_client().post("/api/v1/agent/heartbeat",data=b"x"*65,content_type="application/json")
+ assert response.status_code==413
+ app.extensions["pinoc_actions"].stop()
 
 def test_executor_timeout_output_process_cleanup_and_git(tmp_path):
  root=tmp_path/"repo";root.mkdir();subprocess.run(["git","init",str(root)],check=True,capture_output=True);workspace={"path":str(root),"sensitive_patterns":[],"artifact_patterns":[],"services":[]};ex=Executor()
