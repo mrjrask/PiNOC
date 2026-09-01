@@ -112,7 +112,7 @@ class DevelopmentGateway:
         if ws and kind not in ws["allowed_job_types"]:raise DevError("job type is not approved for workspace","authorization_denied",403)
         agent=next((x for x in self.agents() if x["device_id"]==device),None)
         if not agent or agent["status"]!="connected" or not agent["enabled"] or agent["credential_revoked"]:raise DevError("agent is offline","agent_offline",409)
-        argv=body.get("argv",[]);profile=body.get("profile")
+        argv=body.get("argv",[]);profile=body.get("profile");definition=None
         approval_required=False
         if kind in TEST_TYPES:
             if not profile:raise DevError("an approved test profile is required","authorization_denied",403)
@@ -129,9 +129,12 @@ class DevelopmentGateway:
             argv=definition.get("argv",[])
         if kind=="command":self._validate_command(ws,argv)
         if kind=="git_fetch":argv=["git","fetch","--prune"]
-        env=body.get("environment",{});
+        # Approved test profiles are authoritative for execution settings.
+        # Callers cannot extend their environment or timeout at submission time.
+        env=definition.get("environment",{}) if definition is not None else body.get("environment",{})
         if not isinstance(env,dict) or any(k not in (ws or {}).get("allowed_env",[]) or not isinstance(v,str) or len(v)>4096 for k,v in env.items()):raise DevError("environment variable is not approved")
-        timeout=int(body.get("timeout_seconds",self.default_timeout));timeout=max(1,min(timeout,self.max_timeout));job_id=str(uuid.uuid4());stamp=utcnow();permissions=[required]
+        timeout_value=definition.get("timeout",self.default_timeout) if definition is not None else body.get("timeout_seconds",self.default_timeout)
+        timeout=int(timeout_value);timeout=max(1,min(timeout,self.max_timeout));job_id=str(uuid.uuid4());stamp=utcnow();permissions=[required]
         request_data={"relative_path":body.get("relative_path"),"staged":bool(body.get("staged")),"lines":min(1000,max(1,int(body.get("lines",200))))}
         if validate_only:return None
         self.db.execute("INSERT INTO development_jobs(job_id,parent_job_id,device_id,workspace_id,job_type,profile,argv_json,environment_json,permissions_json,requested_by,api_token_id,source_ip,requested_at,status,timeout_seconds,request_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(job_id,parent,device,wid or None,kind,profile,json.dumps(argv),json.dumps(redact(env)),json.dumps(permissions),identity["username"],identity.get("token_id"),ip,stamp,"queued",timeout,json.dumps(request_data)))

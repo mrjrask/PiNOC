@@ -72,10 +72,26 @@ def test_test_jobs_require_an_approved_profile(tmp_path):
   with pytest.raises(DevError) as error:gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":kind,"argv":["bash","-c","id"]})
   assert error.value.error_type=="authorization_denied"
 
+def test_test_profile_controls_environment_and_timeout(tmp_path):
+ _,gw=setup(tmp_path);enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root)
+ profile={"unit":{"argv":["python3","-V"],"environment":{"HEADLESS":"1"},"timeout":10}}
+ gw.db.execute("UPDATE workspaces SET test_profiles_json=? WHERE workspace_id='project'",(json.dumps(profile),))
+ job=gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"test","profile":"unit","environment":{},"timeout_seconds":999})
+ assert json.loads(job["environment_json"])=={"HEADLESS":"1"}
+ assert job["timeout_seconds"]==10
+
+def test_file_read_rejects_oversize_file_without_unbounded_read(tmp_path,monkeypatch):
+ root=tmp_path/"repo";root.mkdir();large=root/"large.txt";large.write_bytes(b"x"*20);ex=Executor()
+ job={"job_id":"read","job_type":"file_read","workspace":{"path":str(root),"sensitive_patterns":[]},"request":{"relative_path":"large.txt"},"output_limit_bytes":100,"file_limit_bytes":10}
+ monkeypatch.setattr(Path,"read_bytes",lambda self:pytest.fail("read_bytes must not buffer the file"))
+ result=ex.execute(job)
+ assert result["status"]=="failed" and result["error_type"]=="invalid_request"
+ assert result["stderr"]=="file exceeds read limit"
+
 def test_offline_read_only_timeout_cancel_artifacts_and_matrix(tmp_path):
  db,gw=setup(tmp_path);a=enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root,"read_only")
  with pytest.raises(DevError):gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"]})
- db.execute("UPDATE workspaces SET mode='development' WHERE workspace_id='project'");job=gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"test","profile":"unit","timeout_seconds":99999});assert job["timeout_seconds"]==1800
+ db.execute("UPDATE workspaces SET mode='development' WHERE workspace_id='project'");job=gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"test","profile":"unit","timeout_seconds":99999});assert job["timeout_seconds"]==10
  claimed=gw.claim("pi");assert claimed["job_id"]==job["job_id"]
  gw.result(gw.agent(a["agent_id"]),job["job_id"],{"status":"succeeded","exit_code":0,"stdout":"token=abc","artifacts":[{"name":"screen.png","data":base64.b64encode(b"png").decode()}]});assert gw.artifacts(job["job_id"])[0]["name"]=="screen.png"
  row,path=gw.artifact(job["job_id"],gw.artifacts(job["job_id"])[0]["artifact_id"]);assert path.read_bytes()==b"png"

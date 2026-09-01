@@ -64,9 +64,11 @@ class Executor:
         started=time.monotonic();jid=job["job_id"];kind=job["job_type"];ws=job.get("workspace") or {};limit=int(job["output_limit_bytes"]);root=Path(ws.get("path","/")).resolve(strict=True)
         try:
             if kind=="file_read":
-                target=self.safe_path(root,job["request"].get("relative_path"),ws.get("sensitive_patterns",SENSITIVE));data=target.read_bytes()
+                target=self.safe_path(root,job["request"].get("relative_path"),ws.get("sensitive_patterns",SENSITIVE));read_limit=int(job["file_limit_bytes"])
                 if not target.is_file():raise ValueError("not a regular file")
-                if len(data)>job["file_limit_bytes"]:raise ValueError("file exceeds read limit")
+                if target.stat().st_size>read_limit:raise ValueError("file exceeds read limit")
+                with target.open("rb") as handle:data=handle.read(read_limit+1)
+                if len(data)>read_limit:raise ValueError("file exceeds read limit")
                 try:text=data.decode("utf-8")
                 except UnicodeDecodeError:raise ValueError("binary file denied")
                 return self.done(started,0,text,"","file read")
