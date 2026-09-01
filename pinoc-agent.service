@@ -1,0 +1,25 @@
+[Unit]
+Description=PiNOC controlled development agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pinoc-agent
+Group=pinoc-agent
+WorkingDirectory=/opt/pinoc-agent
+ExecStart=/opt/pinoc-agent/venv/bin/python /opt/pinoc-agent/pinoc_agent.py --config /etc/pinoc-agent/config.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+# Workspace Unix permissions remain the primary boundary. ProtectHome cannot be
+# enabled when an administrator deliberately grants a development workspace.
+ProtectHome=false
+ReadWritePaths=/var/lib/pinoc-agent
+LockPersonality=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -59,8 +59,11 @@ class HistoryManager:
             self._write_event(did,"maintenance_ended","info","Maintenance window expired",{},stamp)
         if expected_until and datetime.fromisoformat(expected_until)<=now and not maintenance_until:
             self.db.execute("UPDATE device_operational_state SET expected_offline=0,expected_offline_reason=NULL,expected_offline_until=NULL,updated_at=?,updated_by='system' WHERE device_id=?",(stamp,did));operational["expected_offline"]=0
+        # Collector/config maintenance remains authoritative even when no
+        # operational-state row exists. Persisted maintenance augments it.
+        configured_maintenance=bool(d.get("maintenance"))
         maintenance_active=operational.get("expected_offline_reason")=="maintenance"
-        d["maintenance"]=bool(maintenance_active or maintenance_until or operational.get("maintenance_reason"));d["maintenance_until"]=maintenance_until;d["maintenance_reason"]=operational.get("maintenance_reason") or ""
+        d["maintenance"]=bool(configured_maintenance or maintenance_active or maintenance_until or operational.get("maintenance_reason"));d["maintenance_until"]=maintenance_until;d["maintenance_reason"]=operational.get("maintenance_reason") or d.get("maintenance_reason") or ""
         d["expected_offline"]=bool(operational.get("expected_offline"));d["expected_offline_reason"]=operational.get("expected_offline_reason") or ""
         persisted=self.db.scalar("SELECT 1 FROM devices WHERE device_id=?",(did,)) is not None
         self.db.execute("""INSERT INTO devices(device_id,hostname,friendly_name,first_seen,last_seen,first_ip,last_ip,model,roles_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET hostname=excluded.hostname,friendly_name=excluded.friendly_name,last_seen=excluded.last_seen,last_ip=CASE WHEN excluded.last_ip<>'' THEN excluded.last_ip ELSE devices.last_ip END,model=excluded.model,roles_json=excluded.roles_json,updated_at=excluded.updated_at""",(did,d.get("hostname"),d.get("friendly_name"),d.get("first_seen") or stamp,d.get("last_seen"),ip,ip,d.get("model"),json.dumps(d.get("roles",[])),stamp,stamp))

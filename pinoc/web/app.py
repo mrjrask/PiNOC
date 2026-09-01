@@ -1,17 +1,18 @@
 """Flask application backed exclusively by the shared state cache."""
 from __future__ import annotations
 
-import logging, os, secrets
+import logging, os, secrets, json
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from flask import Flask, abort, jsonify, render_template, request, session, redirect, url_for, g
+from flask import Flask, abort, jsonify, render_template, request, session, redirect, url_for, g, send_file
 
 from pinoc.state import PiNOCState
 from pinoc.integrations import sanitize
 from pinoc.integrations.adsb import compare as compare_adsb
 from pinoc.security import SecurityManager, install_security, redact, restore_redacted
 from pinoc.actions import ActionDispatcher, ActionError
+from pinoc.development import DevelopmentGateway, DevError
 from pinoc.config_store import atomic_save, validate_config
 
 
@@ -22,9 +23,12 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     app.config.update(SESSION_COOKIE_SECURE=bool(app.config.get("SESSION_COOKIE_SECURE",False)),SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE="Lax")
     auth_enabled=bool(app.config.get("AUTH_ENABLED",False))
     security_db=history.db if history else app.config.get("DATABASE")
-    if auth_enabled and security_db and not security_db.available:security_db.initialize()
+    # Actions, maintenance, audit, and development jobs need the persistence
+    # schema even when metric history and authentication are both disabled.
+    if security_db and not security_db.available:security_db.initialize()
     security=SecurityManager(security_db,auth_enabled) if security_db else None
     actions=ActionDispatcher(history.db,state,coordinator,int(app.config.get("ACTION_WORKERS",2))) if history else None
+    development=DevelopmentGateway(history.db,app.config.get("DEV_ARTIFACT_ROOT","data/jobs"),app.config.get("DEV_CONFIG",{})) if history else None
     app.config["TOKEN_SCOPE_PERMISSIONS"]={
         "api_session":"view",
         "api_status":"view","api_devices":"view","api_device":"view","api_integrations":"view",
@@ -36,6 +40,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     }
     if security:install_security(app,security)
     app.extensions["pinoc_security"]=security;app.extensions["pinoc_actions"]=actions
+    app.extensions["pinoc_development"]=development
 
     @app.route("/login",methods=["GET","POST"])
     def login():
@@ -91,7 +96,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def create_token():
         if not security.allowed(g.identity,"users.write"):return jsonify({"error":"permission denied"}),403
         body=request.get_json(silent=True) or {}
-        try:token=security.create_token(str(body.get("owner") or g.identity["username"]),body.get("scopes",[]))
+        try:token=security.create_token(str(body.get("owner") or g.identity["username"]),body.get("scopes",[]),body.get("devices"),body.get("workspaces"),body.get("job_types"))
         except ValueError as exc:return jsonify({"error":str(exc)}),400
         return jsonify({"token":token,"display_once":True}),201
     @app.delete("/api/tokens/<token_id>")
@@ -125,6 +130,124 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
 
     @app.get("/audit")
     def audit_page(): return render_template("audit.html")
+
+    @app.get("/agents")
+    def agents_page(): return render_template("development.html",view="agents")
+    @app.get("/workspaces")
+    def workspaces_page(): return render_template("development.html",view="workspaces")
+    @app.get("/jobs")
+    def jobs_page(): return render_template("development.html",view="jobs")
+    @app.get("/jobs/<job_id>")
+    def job_page(job_id): return render_template("development.html",view="detail",job_id=job_id)
+    @app.get("/jobs/approvals")
+    def approvals_page(): return render_template("development.html",view="approvals")
+
+    def dev_identity(scope=None):
+        ident=g.get("identity")
+        if not ident:return None
+        if ident.get("token") and scope and scope not in ident.get("scopes",[]):return None
+        if not ident.get("token") and ident.get("role") not in {"operator","administrator"}:return None
+        return ident
+    def dev_error(exc):return jsonify({"error":str(exc),"error_type":exc.error_type}),exc.status
+    def authenticate_agent():
+        raw=request.get_data(cache=True)
+        return development.authenticate_agent(request.headers.get("X-PiNOC-Agent",""),request.headers.get("X-PiNOC-Timestamp",""),request.headers.get("X-PiNOC-Nonce",""),raw,request.headers.get("X-PiNOC-Signature",""))
+
+    @app.post("/api/v1/agent/enroll")
+    def agent_enroll():
+        try:return jsonify(development.enroll(request.get_json(silent=True) or {})),201
+        except DevError as exc:return dev_error(exc)
+    @app.post("/api/v1/agent/heartbeat")
+    def agent_heartbeat():
+        try:
+            agent=authenticate_agent();development.heartbeat(agent["agent_id"],request.get_json(silent=True) or {})
+            return jsonify({"job":development.claim(agent["device_id"]),"cancel":development.cancellations(agent["device_id"])})
+        except DevError as exc:return dev_error(exc)
+    @app.post("/api/v1/agent/jobs/<job_id>/result")
+    def agent_result(job_id):
+        try:return jsonify(development.result(authenticate_agent(),job_id,request.get_json(silent=True) or {}))
+        except DevError as exc:return dev_error(exc)
+
+    @app.get("/api/v1/dev/agents")
+    def dev_agents():
+        if not dev_identity("dev:read"):return jsonify({"error":"dev:read required"}),403
+        return jsonify({"agents":development.agents()})
+    @app.post("/api/v1/dev/agents/enrollment-codes")
+    def enrollment_code():
+        if not security.allowed(g.identity,"users.write"):return jsonify({"error":"administrator required"}),403
+        body=request.get_json(silent=True) or {}
+        try:code=development.enrollment_code(str(body.get("device_id","")),g.identity["username"],int(body.get("ttl_seconds",600)));return jsonify({"enrollment_code":code,"display_once":True}),201
+        except DevError as exc:return dev_error(exc)
+    @app.post("/api/v1/dev/agents/<agent_id>/rotate")
+    def rotate_agent(agent_id):
+        if not security.allowed(g.identity,"users.write"):return jsonify({"error":"administrator required"}),403
+        try:return jsonify({"credential":development.rotate(agent_id),"display_once":True})
+        except DevError as exc:return dev_error(exc)
+    @app.delete("/api/v1/dev/agents/<agent_id>/credential")
+    def revoke_agent(agent_id):
+        if not security.allowed(g.identity,"users.write"):return jsonify({"error":"administrator required"}),403
+        development.db.execute("UPDATE agents SET credential_revoked=1,status='credential_revoked' WHERE agent_id=?",(agent_id,));development.audit(g.identity,request.remote_addr,None,"agent.credential.revoke",agent_id,{},"allowed","succeeded");return jsonify({"ok":True})
+    @app.get("/api/v1/dev/workspaces")
+    def dev_workspaces():
+        ident=dev_identity("dev:read")
+        if not ident:return jsonify({"error":"dev:read required"}),403
+        rows=development.workspaces();rows=[x for x in rows if (not ident.get("devices") or x["device_id"] in ident["devices"]) and (not ident.get("workspaces") or x["workspace_id"] in ident["workspaces"])]
+        return jsonify({"workspaces":rows})
+    @app.put("/api/v1/dev/workspaces/<workspace_id>")
+    def save_workspace(workspace_id):
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"administrator required"}),403
+        try:return jsonify(development.save_workspace({**(request.get_json(silent=True) or {}),"workspace_id":workspace_id}))
+        except DevError as exc:return dev_error(exc)
+    @app.get("/api/v1/dev/jobs")
+    def dev_jobs():
+        ident=dev_identity("dev:read")
+        if not ident:return jsonify({"error":"dev:read required"}),403
+        return jsonify({"jobs":development.jobs(ident,request.args.get("limit",100,type=int))})
+    @app.get("/api/v1/dev/approvals")
+    def dev_approvals():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"administrator required"}),403
+        return jsonify({"approvals":development.approvals()})
+    @app.post("/api/v1/dev/approvals/<approval_id>/<decision>")
+    def decide_approval(approval_id,decision):
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"administrator required"}),403
+        if decision not in {"approve","reject"}:return jsonify({"error":"invalid decision"}),400
+        try:return jsonify(development.decide(g.identity,approval_id,decision=="approve",(request.get_json(silent=True) or {}).get("reason","")))
+        except DevError as exc:return dev_error(exc)
+    @app.post("/api/v1/dev/jobs")
+    def submit_dev_job():
+        ident=dev_identity()
+        if not ident:return jsonify({"error":"development authentication required"}),403
+        try:return jsonify(development.submit(ident,request.get_json(silent=True) or {},request.remote_addr)),202
+        except DevError as exc:return dev_error(exc)
+    @app.post("/api/v1/dev/matrices")
+    def submit_matrix():
+        ident=dev_identity("dev:test")
+        if not ident:return jsonify({"error":"dev:test required"}),403
+        try:return jsonify(development.matrix(ident,request.get_json(silent=True) or {},request.remote_addr)),202
+        except DevError as exc:return dev_error(exc)
+    @app.get("/api/v1/dev/jobs/<job_id>")
+    def dev_job(job_id):
+        ident=dev_identity("dev:read");job=development.job(job_id)
+        if not ident:return jsonify({"error":"dev:read required"}),403
+        if not job:return jsonify({"error":"job not found"}),404
+        try:development._restricted(ident,job["device_id"],job.get("workspace_id"),job["job_type"])
+        except DevError as exc:return dev_error(exc)
+        return jsonify({**job,"artifacts":development.artifacts(job_id)})
+    @app.delete("/api/v1/dev/jobs/<job_id>")
+    def cancel_dev_job(job_id):
+        ident=dev_identity("dev:cancel")
+        if not ident:return jsonify({"error":"dev:cancel required"}),403
+        try:return jsonify(development.cancel(ident,job_id,request.remote_addr))
+        except DevError as exc:return dev_error(exc)
+    @app.get("/api/v1/dev/jobs/<job_id>/artifacts")
+    def dev_artifacts(job_id):
+        if not dev_identity("dev:artifacts"):return jsonify({"error":"dev:artifacts required"}),403
+        return jsonify({"artifacts":development.artifacts(job_id)})
+    @app.get("/api/v1/dev/jobs/<job_id>/artifacts/<artifact_id>")
+    def dev_artifact(job_id,artifact_id):
+        if not dev_identity("dev:artifacts"):return jsonify({"error":"dev:artifacts required"}),403
+        row,path=development.artifact(job_id,artifact_id)
+        return send_file(path,mimetype=row["content_type"],as_attachment=True,download_name=row["name"]) if row else (jsonify({"error":"artifact not found"}),404)
 
     @app.get("/integrations")
     @app.get("/adsb")

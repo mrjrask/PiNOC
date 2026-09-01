@@ -10,6 +10,7 @@ from pinoc.database import utcnow
 
 ROLES={"viewer":0,"operator":1,"administrator":2}
 PERMISSIONS={"view":"viewer","history.read":"viewer","alerts.read":"viewer","alerts.write":"operator","actions.execute":"operator","maintenance.write":"operator","device.power":"administrator","config.write":"administrator","users.write":"administrator"}
+DEV_SCOPES={"dev:read","dev:test","dev:command","dev:artifacts","dev:cancel","dev:write","dev:hardware"}
 SECRET_KEYS=re.compile(r"password|passwd|secret|token|private.?key|credential|authorization|cookie",re.I)
 
 def redact(value:Any)->Any:
@@ -57,11 +58,16 @@ class SecurityManager:
             return None,"Invalid username or password."
         with self.lock:self.failures.pop(ip,None)
         self.db.execute("UPDATE users SET last_login=? WHERE username=?",(utcnow(),username));return row,None
-    def create_token(self,owner,scopes:Iterable[str]):
-        allowed={"read:fleet","read:history","read:alerts","write:alerts","execute:safe_actions","admin:config"}; scopes=sorted(set(scopes))
+    def create_token(self,owner,scopes:Iterable[str],devices=None,workspaces=None,job_types=None):
+        allowed={"read:fleet","read:history","read:alerts","write:alerts","execute:safe_actions","admin:config"}|DEV_SCOPES; scopes=sorted(set(scopes))
         if not scopes or not set(scopes)<=allowed:raise ValueError("invalid token scopes")
+        restrictions=[]
+        for values in (devices or [],workspaces or [],job_types or []):
+            values=list(values)
+            if len(values)>100 or any(not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}",str(v)) for v in values):raise ValueError("invalid token restriction")
+            restrictions.append(json.dumps(sorted(set(values))))
         token_id=secrets.token_urlsafe(9); secret=secrets.token_urlsafe(32)
-        self.db.execute("INSERT INTO api_tokens VALUES(?,?,?,?,?,?,?)",(token_id,hash_token(secret),owner,json.dumps(scopes),utcnow(),None,1));return token_id+"."+secret
+        self.db.execute("INSERT INTO api_tokens(token_id,secret_hash,owner,scopes_json,created_at,last_used,enabled,device_restrictions_json,workspace_restrictions_json,job_type_restrictions_json) VALUES(?,?,?,?,?,?,?,?,?,?)",(token_id,hash_token(secret),owner,json.dumps(scopes),utcnow(),None,1,*restrictions));return token_id+"."+secret
     def identity(self):
         auth=request.headers.get("Authorization","")
         if auth.startswith("Bearer "):
@@ -69,7 +75,7 @@ class SecurityManager:
             rows=self.db.rows("SELECT t.*,u.role,u.enabled AS user_enabled FROM api_tokens t JOIN users u ON u.username=t.owner WHERE token_id=? AND t.enabled=1",(token_id,)) if sep else []
             row=rows[0] if rows else None
             if row and row["user_enabled"] and hmac.compare_digest(row["secret_hash"],hash_token(secret)):
-                self.db.execute("UPDATE api_tokens SET last_used=? WHERE token_id=?",(utcnow(),token_id));return {"username":row["owner"],"role":row["role"],"scopes":json.loads(row["scopes_json"]),"token":True}
+                self.db.execute("UPDATE api_tokens SET last_used=? WHERE token_id=?",(utcnow(),token_id));return {"username":row["owner"],"role":row["role"],"scopes":json.loads(row["scopes_json"]),"token":True,"token_id":token_id,"devices":json.loads(row.get("device_restrictions_json") or "[]"),"workspaces":json.loads(row.get("workspace_restrictions_json") or "[]"),"job_types":json.loads(row.get("job_type_restrictions_json") or "[]")}
             return None
         if session.get("username"):
             rows=self.db.rows("SELECT username,role FROM users WHERE username=? AND enabled=1",(session["username"],))
@@ -94,7 +100,8 @@ def install_security(app,manager):
         if request.endpoint=="login" and request.method=="POST":
             supplied=request.form.get("csrf_token")
             if not supplied or not hmac.compare_digest(str(supplied),str(session.get("csrf_token",""))):return jsonify({"error":"CSRF token missing or invalid"}),400
-        public=request.endpoint in {"static","health","login"}
+        # Agent protocol endpoints perform independent per-device HMAC auth.
+        public=request.endpoint in {"static","health","login","agent_enroll","agent_heartbeat","agent_result"}
         if manager.enabled and not g.identity and not public:
             if request.path.startswith("/api/"):return jsonify({"error":"authentication required"}),401
             return redirect(url_for("login",next=request.full_path))

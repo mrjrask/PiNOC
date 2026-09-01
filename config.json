@@ -11,6 +11,17 @@
     "enabled": false,
     "session_timeout_seconds": 3600
   },
+  "development_gateway": {
+    "artifact_root": "data/jobs",
+    "default_timeout_seconds": 300,
+    "max_timeout_seconds": 1800,
+    "output_limit_bytes": 262144,
+    "file_read_limit_bytes": 1048576,
+    "artifact_file_limit_bytes": 10485760,
+    "artifact_total_limit_bytes": 26214400,
+    "artifact_count": 20,
+    "offline_seconds": 45
+  },
   "polling": {
     "local_seconds": 10,
     "network_seconds": 10,
