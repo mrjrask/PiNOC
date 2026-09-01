@@ -110,17 +110,25 @@ install_system_dependencies() {
 # when the display is enabled. The apt package name differs across releases
 # (libopenjp2-7 on Debian bookworm/trixie, libopenjp2-2.3 on bullseye,
 # libopenjp2-7-1/-2 on Ubuntu), so try candidates until the library resolves.
+openjpeg_library_present() {
+  # grep must read the entire stream (no -q/-m1): with `set -o pipefail` an
+  # early grep exit leaves ldconfig -p dying on SIGPIPE (exit 141), which fails
+  # the pipeline even when the library IS in the cache.
+  ldconfig -p 2>/dev/null | grep -c 'libopenjp2\.so' >/dev/null
+}
+
 install_openjpeg() {
   local package
-  if ldconfig -p 2>/dev/null | grep -q 'libopenjp2\.so'; then
+  if openjpeg_library_present; then
     return 0
   fi
   for package in libopenjp2-7 libopenjp2-7-1 libopenjp2-7-2 libopenjp2-2.3; do
     if apt-get install -y --no-install-recommends -- "$package" 2>/dev/null; then
-      if ldconfig -p 2>/dev/null | grep -q 'libopenjp2\.so'; then
+      ldconfig >/dev/null 2>&1 || true  # defensive: rebuild the cache in case the dpkg trigger did not run
+      if openjpeg_library_present; then
         return 0
       fi
-      warn "${package} installed but libopenjp2 is still unresolvable"
+      warn "${package} installed but libopenjp2 is still unresolvable; check 'dpkg -L ${package}' and 'ls -l /usr/lib/*/libopenjp2*'"
     else
       log "OpenJPEG package ${package} is not available on this release"
     fi
