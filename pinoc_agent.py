@@ -27,7 +27,7 @@ def discover(roots=()):
     return caps,hardware,candidates[:100]
 
 class Executor:
-    def __init__(self):self.processes={};self.lock=threading.Lock()
+    def __init__(self):self.processes={};self.cancelled=set();self.lock=threading.Lock()
     @staticmethod
     def safe_path(root,relative,patterns=SENSITIVE,must_exist=True):
         if not isinstance(relative,str) or not relative or Path(relative).is_absolute():raise ValueError("absolute or empty path rejected")
@@ -42,7 +42,7 @@ class Executor:
         if hasattr(resource,"RLIMIT_NPROC"):resource.setrlimit(resource.RLIMIT_NPROC,(64,64))
         if hasattr(resource,"RLIMIT_AS"):resource.setrlimit(resource.RLIMIT_AS,(1024*1024*1024,1024*1024*1024))
     def cancel(self,jid):
-        with self.lock:proc=self.processes.get(jid)
+        with self.lock:proc=self.processes.get(jid);self.cancelled.add(jid)
         if proc and proc.poll() is None:
             try:os.killpg(proc.pid,signal.SIGTERM);time.sleep(.2);os.killpg(proc.pid,signal.SIGKILL)
             except ProcessLookupError:pass
@@ -60,11 +60,13 @@ class Executor:
             env={"PATH":"/usr/local/bin:/usr/bin:/bin","HOME":str(root),"LANG":"C.UTF-8","LC_ALL":"C.UTF-8","TMPDIR":"/tmp"};env.update(job.get("environment",{}))
             proc=subprocess.Popen(argv,cwd=root,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=False,start_new_session=True,preexec_fn=lambda:self.limits(int(job["timeout_seconds"])))
             with self.lock:self.processes[jid]=proc
-            try:out,err=proc.communicate(timeout=int(job["timeout_seconds"]));status="succeeded" if proc.returncode==0 else "failed";etype=None if proc.returncode==0 else "command_failed"
+            try:
+                out,err=proc.communicate(timeout=int(job["timeout_seconds"]));cancelled=jid in self.cancelled
+                status="cancelled" if cancelled else "succeeded" if proc.returncode==0 else "failed";etype="job_cancelled" if cancelled else None if proc.returncode==0 else "command_failed"
             except subprocess.TimeoutExpired:
                 self.cancel(jid);out,err=proc.communicate();status="timed_out";etype="job_timeout"
             finally:
-                with self.lock:self.processes.pop(jid,None)
+                with self.lock:self.processes.pop(jid,None);self.cancelled.discard(jid)
             artifacts=self.collect(root,ws.get("artifact_patterns",[]),job["artifact_limits"])
             return self.done(started,proc.returncode,out.decode("utf-8","replace")[:limit],err.decode("utf-8","replace")[:limit],"command completed" if proc.returncode==0 else status,status,etype,len(out)>limit,len(err)>limit,artifacts)
         except Exception as exc:return self.done(started,None,"",str(exc),"job rejected","failed","invalid_request")
@@ -102,7 +104,7 @@ class Executor:
     def done(started,code,out,err,summary,status="succeeded",etype=None,ot=False,et=False,artifacts=None):return {"status":status,"exit_code":code,"stdout":out,"stderr":err,"summary":summary,"error_type":etype,"stdout_truncated":ot,"stderr_truncated":et,"duration_ms":int((time.monotonic()-started)*1000),"artifacts":artifacts or [],"result":{"status":status,"exit_code":code}}
 
 class Client:
-    def __init__(self,config):self.c=config;self.executor=Executor()
+    def __init__(self,config):self.c=config;self.executor=Executor();self.current_job=None;self.worker=None
     def request(self,path,data=None,signed=True):
         body=json.dumps(data or {},separators=(",",":"),sort_keys=True).encode();headers={"Content-Type":"application/json"}
         if signed:
@@ -110,15 +112,21 @@ class Client:
         req=urllib.request.Request(self.c["server"].rstrip("/")+path,data=body,headers=headers,method="POST")
         with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
     def heartbeat(self):
-        caps,hardware,candidates=discover(self.c.get("discovery_roots",[]));body={"hostname":platform.node(),"model":hardware["model"],"architecture":hardware["architecture"],"agent_version":AGENT_VERSION,"protocol_version":PROTOCOL_VERSION,"capabilities":caps,"hardware":hardware,"candidates":candidates};return self.request("/api/v1/agent/heartbeat",body)
+        caps,hardware,candidates=discover(self.c.get("discovery_roots",[]));body={"hostname":platform.node(),"model":hardware["model"],"architecture":hardware["architecture"],"agent_version":AGENT_VERSION,"protocol_version":PROTOCOL_VERSION,"capabilities":caps,"hardware":hardware,"candidates":candidates,"current_job_id":self.current_job};return self.request("/api/v1/agent/heartbeat",body)
+    def execute_job(self,job):
+        try:
+            self.request(f"/api/v1/agent/jobs/{job['job_id']}/result",{"status":"running"})
+            self.request(f"/api/v1/agent/jobs/{job['job_id']}/result",self.executor.execute(job))
+        except Exception as exc:print(f"pinoc-agent job {job['job_id']}: {exc}",file=sys.stderr)
+        finally:self.current_job=None
     def run(self):
         while True:
             try:
                 response=self.heartbeat()
                 for jid in response.get("cancel",[]):self.executor.cancel(jid)
                 job=response.get("job")
-                if job:
-                    self.request(f"/api/v1/agent/jobs/{job['job_id']}/result",{"status":"running"});self.request(f"/api/v1/agent/jobs/{job['job_id']}/result",self.executor.execute(job))
+                if job and self.current_job is None:
+                    self.current_job=job["job_id"];self.worker=threading.Thread(target=self.execute_job,args=(job,),daemon=True);self.worker.start()
             except Exception as exc:print(f"pinoc-agent: {exc}",file=sys.stderr)
             time.sleep(max(2,min(60,int(self.c.get("poll_seconds",5)))))
 

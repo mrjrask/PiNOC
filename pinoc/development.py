@@ -114,7 +114,8 @@ class DevelopmentGateway:
         if not agent or agent["status"]!="connected" or not agent["enabled"] or agent["credential_revoked"]:raise DevError("agent is offline","agent_offline",409)
         argv=body.get("argv",[]);profile=body.get("profile")
         approval_required=False
-        if kind in TEST_TYPES and profile:
+        if kind in TEST_TYPES:
+            if not profile:raise DevError("an approved test profile is required","authorization_denied",403)
             definition=(ws or {}).get("test_profiles",{}).get(profile)
             if not definition:raise DevError("test profile is not approved")
             requires=definition.get("requires_capabilities",[]);caps=agent.get("capabilities",{})

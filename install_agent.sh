@@ -10,7 +10,7 @@ python3 -m venv /opt/pinoc-agent/venv
 install -m 0755 "$(dirname "$0")/pinoc_agent.py" /opt/pinoc-agent/pinoc_agent.py
 install -d /opt/pinoc-agent/pinoc; install -m 0644 "$(dirname "$0")/pinoc/development.py" "$(dirname "$0")/pinoc/database.py" "$(dirname "$0")/pinoc/security.py" /opt/pinoc-agent/pinoc/
 printf '{"server":%s,"discovery_roots":%s}\n' "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$SERVER")" "$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1:]))' "$@")" > /etc/pinoc-agent/config.json
-chmod 0600 /etc/pinoc-agent/config.json; chown root:pinoc-agent /etc/pinoc-agent/config.json
+chmod 0600 /etc/pinoc-agent/config.json; chown pinoc-agent:pinoc-agent /etc/pinoc-agent/config.json
 /opt/pinoc-agent/venv/bin/python /opt/pinoc-agent/pinoc_agent.py --config /etc/pinoc-agent/config.json --enroll --code "$CODE"
 install -m 0644 "$(dirname "$0")/pinoc-agent.service" /etc/systemd/system/pinoc-agent.service
 systemctl daemon-reload; systemctl enable --now pinoc-agent.service

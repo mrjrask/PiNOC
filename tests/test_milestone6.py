@@ -1,4 +1,4 @@
-import base64,json,os,subprocess,time
+import base64,json,os,subprocess,threading,time
 from pathlib import Path
 import pytest
 from pinoc.database import Database,SCHEMA_VERSION
@@ -42,6 +42,12 @@ def test_scope_device_workspace_command_and_environment_policy(tmp_path):
  with pytest.raises(DevError):gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"],"environment":{"PINOC_SECRET":"x"}})
  assert gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"],"environment":{"HEADLESS":"1"}})["status"]=="queued"
 
+def test_test_jobs_require_an_approved_profile(tmp_path):
+ _,gw=setup(tmp_path);enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root)
+ for kind in ("test","pytest"):
+  with pytest.raises(DevError) as error:gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":kind,"argv":["bash","-c","id"]})
+  assert error.value.error_type=="authorization_denied"
+
 def test_offline_read_only_timeout_cancel_artifacts_and_matrix(tmp_path):
  db,gw=setup(tmp_path);a=enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root,"read_only")
  with pytest.raises(DevError):gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"]})
@@ -60,6 +66,15 @@ def test_executor_timeout_output_process_cleanup_and_git(tmp_path):
  base={"job_id":"j","job_type":"command","workspace":workspace,"argv":["python3","-c","import time;print('x'*5000,flush=True);time.sleep(3)"],"environment":{},"request":{},"timeout_seconds":1,"output_limit_bytes":100,"file_limit_bytes":100,"artifact_limits":{"count":1,"file_bytes":10,"total_bytes":10}}
  result=ex.execute(base);assert result["status"]=="timed_out" and result["stdout_truncated"] and len(result["stdout"])==100 and not ex.processes
  status=ex.execute({**base,"job_id":"g","job_type":"git_status","timeout_seconds":5});assert status["status"]=="succeeded"
+
+def test_executor_can_cancel_a_running_job(tmp_path):
+ root=tmp_path/"repo";root.mkdir();ex=Executor();job={"job_id":"cancel-me","job_type":"command","workspace":{"path":str(root),"artifact_patterns":[]},"argv":["python3","-c","import time; time.sleep(30)"],"environment":{},"request":{},"timeout_seconds":60,"output_limit_bytes":100,"file_limit_bytes":100,"artifact_limits":{"count":1,"file_bytes":10,"total_bytes":10}}
+ result={};worker=threading.Thread(target=lambda:result.update(ex.execute(job)));worker.start()
+ for _ in range(100):
+  if job["job_id"] in ex.processes:break
+  time.sleep(.01)
+ ex.cancel(job["job_id"]);worker.join(5)
+ assert not worker.is_alive() and result["status"]=="cancelled" and not ex.processes
 
 def test_development_token_restrictions_are_persisted(tmp_path):
  db,_=setup(tmp_path);s=SecurityManager(db,True);s.create_user("admin","correct horse battery","administrator");raw=s.create_token("admin",["dev:test"],["pi"],["project"],["test"]);row=db.rows("SELECT * FROM api_tokens WHERE token_id=?",(raw.split('.')[0],))[0]

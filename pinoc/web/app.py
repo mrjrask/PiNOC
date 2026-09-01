@@ -160,8 +160,9 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     @app.post("/api/v1/agent/heartbeat")
     def agent_heartbeat():
         try:
-            agent=authenticate_agent();development.heartbeat(agent["agent_id"],request.get_json(silent=True) or {})
-            return jsonify({"job":development.claim(agent["device_id"]),"cancel":development.cancellations(agent["device_id"])})
+            agent=authenticate_agent();body=request.get_json(silent=True) or {};development.heartbeat(agent["agent_id"],body)
+            job=None if body.get("current_job_id") else development.claim(agent["device_id"])
+            return jsonify({"job":job,"cancel":development.cancellations(agent["device_id"])})
         except DevError as exc:return dev_error(exc)
     @app.post("/api/v1/agent/jobs/<job_id>/result")
     def agent_result(job_id):
@@ -241,11 +242,19 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         except DevError as exc:return dev_error(exc)
     @app.get("/api/v1/dev/jobs/<job_id>/artifacts")
     def dev_artifacts(job_id):
-        if not dev_identity("dev:artifacts"):return jsonify({"error":"dev:artifacts required"}),403
+        ident=dev_identity("dev:artifacts");job=development.job(job_id)
+        if not ident:return jsonify({"error":"dev:artifacts required"}),403
+        if not job:return jsonify({"error":"job not found"}),404
+        try:development._restricted(ident,job["device_id"],job.get("workspace_id"),job["job_type"])
+        except DevError as exc:return dev_error(exc)
         return jsonify({"artifacts":development.artifacts(job_id)})
     @app.get("/api/v1/dev/jobs/<job_id>/artifacts/<artifact_id>")
     def dev_artifact(job_id,artifact_id):
-        if not dev_identity("dev:artifacts"):return jsonify({"error":"dev:artifacts required"}),403
+        ident=dev_identity("dev:artifacts");job=development.job(job_id)
+        if not ident:return jsonify({"error":"dev:artifacts required"}),403
+        if not job:return jsonify({"error":"job not found"}),404
+        try:development._restricted(ident,job["device_id"],job.get("workspace_id"),job["job_type"])
+        except DevError as exc:return dev_error(exc)
         row,path=development.artifact(job_id,artifact_id)
         return send_file(path,mimetype=row["content_type"],as_attachment=True,download_name=row["name"]) if row else (jsonify({"error":"artifact not found"}),404)
 
