@@ -105,6 +105,29 @@ install_system_dependencies() {
   apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
 }
 
+# Pillow is built with JPEG2000 (OpenJPEG) support, and a missing libopenjp2
+# runtime library makes `import PIL.Image` fail, which crash-loops pi-noc.service
+# when the display is enabled. The apt package name differs across releases
+# (libopenjp2-7 on Debian bookworm/trixie, libopenjp2-2.3 on bullseye,
+# libopenjp2-7-1/-2 on Ubuntu), so try candidates until the library resolves.
+install_openjpeg() {
+  local package
+  if ldconfig -p 2>/dev/null | grep -q 'libopenjp2\.so'; then
+    return 0
+  fi
+  for package in libopenjp2-7 libopenjp2-7-1 libopenjp2-7-2 libopenjp2-2.3; do
+    if apt-get install -y --no-install-recommends -- "$package" 2>/dev/null; then
+      if ldconfig -p 2>/dev/null | grep -q 'libopenjp2\.so'; then
+        return 0
+      fi
+      warn "${package} installed but libopenjp2 is still unresolvable"
+    else
+      log "OpenJPEG package ${package} is not available on this release"
+    fi
+  done
+  fail "Pillow requires the OpenJPEG runtime library (libopenjp2.so); install the libopenjp2 package for your distro"
+}
+
 enable_i2c() {
   log "Enabling I2C"
   if command -v raspi-config >/dev/null 2>&1; then
@@ -162,6 +185,20 @@ setup_venv() {
   run_as_user python3 -m venv "$VENV_DIR"
   run_as_user "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
   run_as_user "$VENV_DIR/bin/python" -m pip install -r "${REPO_DIR}/requirements.txt"
+}
+
+# pi_noc.py imports PIL.Image at startup when the display is enabled; fail the
+# install early with an actionable message instead of letting the service crash-loop.
+verify_python_environment() {
+  if [[ "${PINOC_DISPLAY_ENABLED:-1}" == "0" ]]; then
+    log "Display disabled; skipping Pillow verification"
+    return 0
+  fi
+  if run_as_user "$VENV_DIR/bin/python" -c "import PIL.Image" >/dev/null 2>&1; then
+    log "Pillow is importable in the venv"
+    return 0
+  fi
+  fail "Pillow cannot be imported into ${VENV_DIR}; a missing system library (most often the OpenJPEG libopenjp2 library) is the usual cause; install it, then re-run sudo ./install.sh"
 }
 
 install_service() {
@@ -251,10 +288,12 @@ main() {
   configure_frontends
 
   install_system_dependencies
+  install_openjpeg
   enable_i2c
   enable_spi
   setup_user_groups
   setup_venv
+  verify_python_environment
   log "Creating persistent history directory (existing databases are preserved)"
   install -d -m 0750 -o "$INSTALL_USER" -g "$INSTALL_USER" "$(dirname "${PINOC_DATABASE_PATH:-$DATA_DIR/pinoc.db}")"
   configure_wireguard_controls

@@ -258,6 +258,14 @@ Delete those only after making your own backup.
   `journalctl -u pi-noc`; verify the selected port is not already used.
 * **Display blank:** check `PINOC_DISPLAY_ENABLED`, `DISPLAY`, I2C/SPI, service
   group membership, cabling, and `display_address`.
+* **Service crash-loops with `ImportError: libopenjp2.so.7`** from Pillow: the
+  OpenJPEG runtime library is missing. Install it, then
+  `sudo systemctl restart pi-noc`. On Raspberry Pi OS/Debian (bookworm or later)
+  the package is `libopenjp2-7`; on older releases it is `libopenjp2-2.3`, and on
+  Ubuntu `libopenjp2-7-1` or `libopenjp2-7-2`. Re-running `sudo ./install.sh`
+  detects and installs it automatically. Verify with
+  `/home/pi/PiNOC/.venv/bin/python -c "import PIL.Image"` and
+  `ldconfig -p | grep openjp2`.
 * **CM5 offline:** test key SSH as the service user; check the fallback password,
   remote address/port, trusted Wi-Fi list, and WireGuard state.
 * **SMB unavailable:** install/permit `smbstatus` remotely. **RAID unknown:**
