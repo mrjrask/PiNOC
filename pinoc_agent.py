@@ -61,8 +61,9 @@ class Executor:
         finally:pipe.close()
         state.update(data=b"".join(kept),truncated=total>limit)
     def execute(self,job):
-        started=time.monotonic();jid=job["job_id"];kind=job["job_type"];ws=job.get("workspace") or {};limit=int(job["output_limit_bytes"]);root=Path(ws.get("path","/")).resolve(strict=True)
+        started=time.monotonic();jid=job["job_id"];kind=job["job_type"];ws=job.get("workspace") or {};limit=int(job["output_limit_bytes"])
         try:
+            root=Path(ws.get("path","/")).resolve(strict=True)
             if kind=="file_read":
                 target=self.safe_path(root,job["request"].get("relative_path"),ws.get("sensitive_patterns",SENSITIVE));read_limit=int(job["file_limit_bytes"])
                 if not target.is_file():raise ValueError("not a regular file")
@@ -101,7 +102,10 @@ class Executor:
         if kind=="git_diff":
             argv=["git","diff","--no-ext-diff"]
             if req.get("staged"):argv.append("--cached")
-            if req.get("relative_path"):argv.extend(["--",str(self.safe_path(root,req["relative_path"]).relative_to(root))])
+            relative=req.get("relative_path")
+            if not relative:raise ValueError("git diff requires a non-sensitive relative path")
+            patterns=job.get("workspace",{}).get("sensitive_patterns",SENSITIVE)
+            argv.extend(["--",str(self.safe_path(root,relative,patterns,must_exist=False).relative_to(root))])
             return argv
         if kind=="service_status":
             service=req.get("relative_path")
@@ -139,7 +143,13 @@ class Client:
     def execute_job(self,job):
         job_id=job["job_id"]
         try:
-            self.request(f"/api/v1/agent/jobs/{job_id}/result",{"status":"running"})
+            while True:
+                try:
+                    self.request(f"/api/v1/agent/jobs/{job_id}/result",{"status":"running"})
+                    break
+                except Exception as exc:
+                    print(f"pinoc-agent job {job_id} running acknowledgement: {exc}; retrying",file=sys.stderr)
+                    time.sleep(max(2,min(60,int(self.c.get("poll_seconds",5)))))
             result=self.executor.execute(job)
             while True:
                 try:

@@ -57,6 +57,33 @@ def test_agent_retries_terminal_result_before_releasing_job(monkeypatch):
  assert deliveries==[{"status":"running"},result,result,result]
  assert client.current_job is None
 
+def test_agent_retries_running_acknowledgement_before_execution(monkeypatch):
+ client=Client({"poll_seconds":2});client.current_job="job-1";executions=[]
+ client.executor.execute=lambda job:executions.append(job) or {"status":"succeeded"}
+ deliveries=[]
+ def request(path,body):
+  deliveries.append(body)
+  if body=={"status":"running"} and deliveries.count(body)<3:raise OSError("temporary outage")
+  return {}
+ client.request=request;monkeypatch.setattr(time,"sleep",lambda _:None)
+ job={"job_id":"job-1"};client.execute_job(job)
+ assert deliveries==[{"status":"running"}]*3+[{"status":"succeeded"}]
+ assert executions==[job] and client.current_job is None
+
+def test_executor_reports_a_missing_workspace_as_failure(tmp_path):
+ missing=tmp_path/"deleted"
+ result=Executor().execute({"job_id":"missing","job_type":"file_read","workspace":{"path":str(missing)},"request":{"relative_path":"file.txt"},"output_limit_bytes":100,"file_limit_bytes":100})
+ assert result["status"]=="failed" and result["error_type"]=="invalid_request"
+ assert str(missing) in result["stderr"]
+
+def test_git_diff_requires_a_safe_explicit_path(tmp_path):
+ root=tmp_path/"repo";root.mkdir();(root/".env").write_text("SECRET=changed")
+ workspace={"path":str(root),"sensitive_patterns":[".env"]};executor=Executor()
+ base={"job_type":"git_diff","workspace":workspace,"request":{}}
+ with pytest.raises(ValueError):executor.argv(base,root)
+ with pytest.raises(ValueError):executor.argv({**base,"request":{"relative_path":".env"}},root)
+ assert executor.argv({**base,"request":{"relative_path":"safe.txt"}},root)[-2:]==["--","safe.txt"]
+
 def test_state_changing_profile_requires_hardware_scope_and_approval(tmp_path):
  db,gw=setup(tmp_path);enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root)
  profiles={"flash":{"argv":["python3","-c","print('flash')"],"state_changing":True}}
