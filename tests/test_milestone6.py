@@ -63,8 +63,8 @@ def test_offline_read_only_timeout_cancel_artifacts_and_matrix(tmp_path):
 
 def test_executor_timeout_output_process_cleanup_and_git(tmp_path):
  root=tmp_path/"repo";root.mkdir();subprocess.run(["git","init",str(root)],check=True,capture_output=True);workspace={"path":str(root),"sensitive_patterns":[],"artifact_patterns":[],"services":[]};ex=Executor()
- base={"job_id":"j","job_type":"command","workspace":workspace,"argv":["python3","-c","import time;print('x'*5000,flush=True);time.sleep(3)"],"environment":{},"request":{},"timeout_seconds":1,"output_limit_bytes":100,"file_limit_bytes":100,"artifact_limits":{"count":1,"file_bytes":10,"total_bytes":10}}
- result=ex.execute(base);assert result["status"]=="timed_out" and result["stdout_truncated"] and len(result["stdout"])==100 and not ex.processes
+ base={"job_id":"j","job_type":"command","workspace":workspace,"argv":["python3","-c","import sys,time;sys.stdout.write('x'*2_000_000);sys.stderr.write('y'*2_000_000);sys.stdout.flush();sys.stderr.flush();time.sleep(3)"],"environment":{},"request":{},"timeout_seconds":1,"output_limit_bytes":100,"file_limit_bytes":100,"artifact_limits":{"count":1,"file_bytes":10,"total_bytes":10}}
+ result=ex.execute(base);assert result["status"]=="timed_out" and result["stdout_truncated"] and result["stderr_truncated"] and len(result["stdout"])==len(result["stderr"])==100 and not ex.processes
  status=ex.execute({**base,"job_id":"g","job_type":"git_status","timeout_seconds":5});assert status["status"]=="succeeded"
 
 def test_executor_can_cancel_a_running_job(tmp_path):

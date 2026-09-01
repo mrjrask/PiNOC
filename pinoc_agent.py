@@ -46,6 +46,18 @@ class Executor:
         if proc and proc.poll() is None:
             try:os.killpg(proc.pid,signal.SIGTERM);time.sleep(.2);os.killpg(proc.pid,signal.SIGKILL)
             except ProcessLookupError:pass
+    @staticmethod
+    def drain(pipe,limit,state):
+        """Drain a child pipe without retaining more than the configured limit."""
+        kept=[];total=0
+        try:
+            while True:
+                chunk=pipe.read(65536)
+                if not chunk:break
+                total+=len(chunk);remaining=limit-sum(map(len,kept))
+                if remaining>0:kept.append(chunk[:remaining])
+        finally:pipe.close()
+        state.update(data=b"".join(kept),truncated=total>limit)
     def execute(self,job):
         started=time.monotonic();jid=job["job_id"];kind=job["job_type"];ws=job.get("workspace") or {};limit=int(job["output_limit_bytes"]);root=Path(ws.get("path","/")).resolve(strict=True)
         try:
@@ -60,15 +72,19 @@ class Executor:
             env={"PATH":"/usr/local/bin:/usr/bin:/bin","HOME":str(root),"LANG":"C.UTF-8","LC_ALL":"C.UTF-8","TMPDIR":"/tmp"};env.update(job.get("environment",{}))
             proc=subprocess.Popen(argv,cwd=root,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=False,start_new_session=True,preexec_fn=lambda:self.limits(int(job["timeout_seconds"])))
             with self.lock:self.processes[jid]=proc
+            out_state={};err_state={};readers=[threading.Thread(target=self.drain,args=(proc.stdout,limit,out_state),daemon=True),threading.Thread(target=self.drain,args=(proc.stderr,limit,err_state),daemon=True)]
+            for reader in readers:reader.start()
             try:
-                out,err=proc.communicate(timeout=int(job["timeout_seconds"]));cancelled=jid in self.cancelled
+                proc.wait(timeout=int(job["timeout_seconds"]));cancelled=jid in self.cancelled
                 status="cancelled" if cancelled else "succeeded" if proc.returncode==0 else "failed";etype="job_cancelled" if cancelled else None if proc.returncode==0 else "command_failed"
             except subprocess.TimeoutExpired:
-                self.cancel(jid);out,err=proc.communicate();status="timed_out";etype="job_timeout"
+                self.cancel(jid);proc.wait();status="timed_out";etype="job_timeout"
             finally:
+                for reader in readers:reader.join()
                 with self.lock:self.processes.pop(jid,None);self.cancelled.discard(jid)
+            out=out_state.get("data",b"");err=err_state.get("data",b"")
             artifacts=self.collect(root,ws.get("artifact_patterns",[]),job["artifact_limits"])
-            return self.done(started,proc.returncode,out.decode("utf-8","replace")[:limit],err.decode("utf-8","replace")[:limit],"command completed" if proc.returncode==0 else status,status,etype,len(out)>limit,len(err)>limit,artifacts)
+            return self.done(started,proc.returncode,out.decode("utf-8","replace"),err.decode("utf-8","replace"),"command completed" if proc.returncode==0 else status,status,etype,out_state.get("truncated",False),err_state.get("truncated",False),artifacts)
         except Exception as exc:return self.done(started,None,"",str(exc),"job rejected","failed","invalid_request")
     def argv(self,job,root):
         kind=job["job_type"];req=job["request"]
