@@ -38,3 +38,10 @@ def test_percentage_values_include_percent_symbol():
 
 def test_ambiguous_totals_are_not_assumed_to_be_bytes():
     assert run_formatter("PiNOC.humanValue('total', 42)") == 42
+
+
+def test_missing_byte_values_remain_unavailable():
+    assert run_formatter(
+        "[PiNOC.formatBytes(null), PiNOC.formatBytes(undefined), "
+        "PiNOC.humanValue('memory_bytes', null)]"
+    ) == ["—", "—", "—"]
