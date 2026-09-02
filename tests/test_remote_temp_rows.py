@@ -125,28 +125,35 @@ class RemoteTempRowsTest(unittest.TestCase):
 
     def test_temperature_devices_are_added_to_fleet_collection_with_ssh_settings(self):
         state = PiNOCState()
-        coordinator = SharedSnapshotCoordinator(state)
-        coordinator.temp_devices = {
-            "192.168.1.202:square": TempDevice(
-                device_id="192.168.1.202:square", hostname="square",
-                celsius=39.4, fahrenheit=102.9,
-                last_seen=datetime.now(timezone.utc).timestamp(), ip="192.168.1.202",
-            )
-        }
-        coordinator.authenticated_temp_devices = dict(coordinator.temp_devices)
-        try:
-            with patch.dict(CONFIG["remote_temp_monitor"], {
-                "enabled": False, "collect_system_metrics": True,
-                "ssh_user": "pi", "ssh_port": 22, "max_device_age": 60,
-            }):
+        with patch.dict(CONFIG["remote_temp_monitor"], {
+            "enabled": False, "collect_system_metrics": True,
+            "ssh_user": "pi", "ssh_port": 22, "max_device_age": 60,
+        }), patch.dict(CONFIG, {"health_thresholds": {
+            "cpu_warning": 61, "memory_warning": 72,
+        }}):
+            coordinator = SharedSnapshotCoordinator(state)
+            try:
+                coordinator.temp_devices = {
+                    "192.168.1.202:square": TempDevice(
+                        device_id="192.168.1.202:square", hostname="square",
+                        celsius=39.4, fahrenheit=102.9,
+                        last_seen=datetime.now(timezone.utc).timestamp(), ip="192.168.1.202",
+                    )
+                }
+                coordinator.authenticated_temp_devices = dict(coordinator.temp_devices)
                 coordinator.collect_temperatures()
-            discovered = next(device for device in coordinator.fleet_collector.devices
-                              if device.id == "192.168.1.202:square")
-            self.assertEqual(discovered.address, "192.168.1.202")
-            self.assertEqual(discovered.ssh_user, "pi")
-            self.assertEqual(discovered.ssh_port, 22)
-        finally:
-            coordinator.stop()
+                discovered = next(device for device in coordinator.fleet_collector.devices
+                                  if device.id == "192.168.1.202:square")
+                self.assertEqual(discovered.address, "192.168.1.202")
+                self.assertEqual(discovered.ssh_user, "pi")
+                self.assertEqual(discovered.ssh_port, 22)
+                self.assertTrue(discovered.service_discovery)
+                self.assertEqual(discovered.thresholds, {
+                    "cpu_warning": 61.0, "memory_warning": 72.0,
+                })
+                self.assertIn("__discover__", coordinator.fleet_collector._command(discovered))
+            finally:
+                coordinator.stop()
 
     def test_unsigned_temperature_snapshot_is_not_scheduled_for_ssh(self):
         state = PiNOCState()

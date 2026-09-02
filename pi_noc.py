@@ -2178,6 +2178,14 @@ class SharedSnapshotCoordinator:
             devices, int(CONFIG.get("fleet_max_workers", 4)),
             float(CONFIG.get("ssh_command_timeout", 8)), read_env_value("CM5_SSH_PASS"))
         self.configured_fleet_devices = tuple(devices)
+        global_thresholds = CONFIG.get("health_thresholds", {})
+        try:
+            self.global_health_thresholds = {
+                str(name): float(value) for name, value in global_thresholds.items()
+            } if isinstance(global_thresholds, dict) else {}
+        except (TypeError, ValueError):
+            # load_devices has already reported the invalid configuration.
+            self.global_health_thresholds = {}
         self.local_fleet_ids = {device.id for device in devices if device.collection_method == "local"}
         self.fleet_devices: List[Any] = []
         polling = CONFIG.get("polling", {})
@@ -2339,6 +2347,8 @@ class SharedSnapshotCoordinator:
                     id=temp.device_id, hostname=temp.hostname, friendly_name=temp.hostname,
                     address=temp.ip, collection_method="ssh", roles=("general",),
                     ssh_user=ssh_user, ssh_port=ssh_port,
+                    service_discovery=True,
+                    thresholds=dict(self.global_health_thresholds),
                 ) for temp in self.authenticated_temp_devices.values()
                     if temp.ip and temp.ip != endpoint
                     and temp.ip not in configured_addresses and temp.hostname not in configured_addresses]
