@@ -2215,7 +2215,8 @@ class SharedSnapshotCoordinator:
             for device in self.fleet_devices:
                 raw = device.to_dict()
                 matching_temp = next((temp for temp in snapshot.temp_devices
-                                      if temp.ip in {raw.get("address"), raw.get("ip"), raw.get("network", {}).get("ip")}
+                                      if temp.device_id == device.id
+                                      or temp.ip in {raw.get("address"), raw.get("ip"), raw.get("network", {}).get("ip")}
                                       or temp.hostname == raw.get("hostname")), None)
                 legacy_device = legacy_by_id.get(device.id)
                 if legacy_device is not None:
@@ -2338,10 +2339,13 @@ class SharedSnapshotCoordinator:
             if temp_config.get("collect_system_metrics", True):
                 configured_addresses = {value for device in self.configured_fleet_devices
                                         for value in (device.address, device.hostname) if value}
+                configured_ids = {device.id for device in self.configured_fleet_devices}
                 ssh_user = str(temp_config.get("ssh_user", "pi"))
                 try:
                     ssh_port = int(temp_config.get("ssh_port", 22))
                 except (TypeError, ValueError):
+                    ssh_port = 22
+                if not 1 <= ssh_port <= 65535:
                     ssh_port = 22
                 discovered = [DeviceConfig(
                     id=temp.device_id, hostname=temp.hostname, friendly_name=temp.hostname,
@@ -2350,7 +2354,8 @@ class SharedSnapshotCoordinator:
                     service_discovery=True,
                     thresholds=dict(self.global_health_thresholds),
                 ) for temp in self.authenticated_temp_devices.values()
-                    if temp.ip and temp.ip != endpoint
+                    if temp.device_id not in configured_ids
+                    and temp.ip and temp.ip != endpoint
                     and temp.ip not in configured_addresses and temp.hostname not in configured_addresses]
                 self.fleet_collector.devices = [*self.configured_fleet_devices, *discovered]
         self._publish()
