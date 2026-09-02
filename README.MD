@@ -288,6 +288,10 @@ Delete those only after making your own backup.
   authentication-disabled service to the Internet.
 * **Display blank:** check `PINOC_DISPLAY_ENABLED`, `DISPLAY`, I2C/SPI, service
   group membership, cabling, and `display_address`.
+* **Service crash-loops with `NameError: board_module is not defined`:** update
+  to a checkout containing the lazy button-hardware import fix, then restart
+  with `sudo systemctl restart pi-noc.service`. As a temporary web-only recovery,
+  set `PINOC_DISPLAY_ENABLED=0` in `.env` and restart the service.
 * **Service crash-loops with `ImportError: libfreetype.so.6`:** install the
   FreeType runtime and restart the service:
 
