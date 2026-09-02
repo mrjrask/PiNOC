@@ -267,7 +267,7 @@ Delete those only after making your own backup.
   sudo journalctl -u pi-noc.service -b -n 100 --no-pager
   sudo journalctl -u pi-noc.service -b -f
   sudo systemctl show pi-noc.service -p NRestarts -p ExecMainCode -p ExecMainStatus
-  sudo cat /home/pi/PiNOC/.env
+  sudo grep -E '^(PINOC_WEB_ENABLED|PINOC_WEB_HOST|PINOC_WEB_PORT)=' /home/pi/PiNOC/.env
   sudo ss -ltnp '( sport = :8088 )'
   curl -v --connect-timeout 5 http://127.0.0.1:8088/
   ```
