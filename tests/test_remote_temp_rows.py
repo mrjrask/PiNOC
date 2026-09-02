@@ -155,6 +155,61 @@ class RemoteTempRowsTest(unittest.TestCase):
             finally:
                 coordinator.stop()
 
+    def test_discovered_device_invalid_ssh_ports_fall_back_to_default(self):
+        for invalid_port in (0, -1, 65536, "not-a-port"):
+            with self.subTest(ssh_port=invalid_port), patch.dict(CONFIG["remote_temp_monitor"], {
+                "enabled": False, "collect_system_metrics": True,
+                "ssh_port": invalid_port, "max_device_age": 60,
+            }):
+                coordinator = SharedSnapshotCoordinator(PiNOCState())
+                try:
+                    temp = TempDevice(
+                        device_id="discovered", hostname="discovered",
+                        celsius=20, fahrenheit=68,
+                        last_seen=datetime.now(timezone.utc).timestamp(), ip="192.0.2.10",
+                    )
+                    coordinator.temp_devices = {temp.device_id: temp}
+                    coordinator.authenticated_temp_devices = {temp.device_id: temp}
+
+                    coordinator.collect_temperatures()
+
+                    discovered = next(device for device in coordinator.fleet_collector.devices
+                                      if device.id == temp.device_id)
+                    self.assertEqual(discovered.ssh_port, 22)
+                finally:
+                    coordinator.stop()
+
+    def test_configured_device_id_is_not_duplicated_when_discovery_address_changes(self):
+        state = PiNOCState()
+        coordinator = SharedSnapshotCoordinator(state)
+        configured = coordinator.configured_fleet_devices[0]
+        temp = TempDevice(
+            device_id=configured.id, hostname="renamed-host",
+            celsius=42.5, fahrenheit=108.5,
+            last_seen=datetime.now(timezone.utc).timestamp(), ip="192.0.2.99",
+        )
+        try:
+            coordinator.temp_devices = {temp.device_id: temp}
+            coordinator.authenticated_temp_devices = {temp.device_id: temp}
+            with patch.dict(CONFIG["remote_temp_monitor"], {
+                "enabled": False, "collect_system_metrics": True, "max_device_age": 60,
+            }):
+                coordinator.collect_temperatures()
+
+            matching_configs = [device for device in coordinator.fleet_collector.devices
+                                if device.id == configured.id]
+            self.assertEqual(matching_configs, [configured])
+
+            coordinator.fleet_devices = [DeviceState(
+                id=configured.id, hostname=configured.hostname,
+                friendly_name=configured.friendly_name, address=configured.address,
+                online=True,
+            )]
+            coordinator._publish()
+            self.assertEqual(state.device(configured.id)["cpu"]["temperature_c"], 42.5)
+        finally:
+            coordinator.stop()
+
     def test_unsigned_temperature_snapshot_is_not_scheduled_for_ssh(self):
         state = PiNOCState()
         coordinator = SharedSnapshotCoordinator(state)
