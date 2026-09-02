@@ -256,10 +256,51 @@ Delete those only after making your own backup.
 
 ## Troubleshooting
 
-* **Web unavailable:** inspect `PINOC_WEB_ENABLED`, host/port, `ss -ltnp`, and
-  `journalctl -u pi-noc`; verify the selected port is not already used.
+* **Web unavailable:** diagnose the listener from the PiNOC host first, then the
+  network path. Do not rely on a single `systemctl status` snapshot: a unit can
+  briefly show `active (running)` while systemd is repeatedly restarting it.
+  A very short uptime together with `Scheduled restart job` is evidence of a
+  crash loop. Run:
+
+  ```sh
+  sudo systemctl status pi-noc.service --no-pager --full
+  sudo journalctl -u pi-noc.service -b -n 100 --no-pager
+  sudo journalctl -u pi-noc.service -b -f
+  sudo systemctl show pi-noc.service -p NRestarts -p ExecMainCode -p ExecMainStatus
+  sudo cat /home/pi/PiNOC/.env
+  sudo ss -ltnp '( sport = :8088 )'
+  curl -v --connect-timeout 5 http://127.0.0.1:8088/
+  ```
+
+  The environment should have `PINOC_WEB_ENABLED=1`, normally
+  `PINOC_WEB_HOST=0.0.0.0`, and the expected `PINOC_WEB_PORT`. If the checkout
+  uses different capitalization or a different path, use the path shown by
+  `systemctl cat pi-noc.service` instead of `/home/pi/PiNOC`. No `LISTEN` result
+  means the journal (or a disabled/misconfigured listener) is the next place to
+  investigate. A listener plus a successful loopback `curl` proves the app is
+  running; continue with `curl -v http://192.168.1.130:8088/` from another LAN
+  machine and check client isolation/VLAN routing and host firewall rules
+  (`sudo nft list ruleset`, or `sudo ufw status verbose` when UFW is installed).
+  Confirm that `192.168.1.130` is still assigned with `hostname -I` and
+  `ip -br address`; the installation message reports the address at install
+  time, not a permanently reserved address. Test with `http://`, not `https://`,
+  unless a TLS reverse proxy has been configured. Do not expose this unencrypted,
+  authentication-disabled service to the Internet.
 * **Display blank:** check `PINOC_DISPLAY_ENABLED`, `DISPLAY`, I2C/SPI, service
   group membership, cabling, and `display_address`.
+* **Service crash-loops with `ImportError: libfreetype.so.6`:** install the
+  FreeType runtime and restart the service:
+
+  ```sh
+  sudo apt-get update
+  sudo apt-get install -y libfreetype6
+  sudo systemctl restart pi-noc.service
+  ```
+
+  Updated checkouts also install this dependency when `sudo ./install.sh` is
+  re-run. Verify it with `ldconfig -p | grep 'libfreetype\.so\.6'` and confirm
+  recovery with `systemctl show pi-noc.service -p NRestarts` followed by
+  `curl -v http://127.0.0.1:8088/`.
 * **Service crash-loops with `ImportError: libopenjp2.so.7`** from Pillow: the
   OpenJPEG runtime library is missing. Install it, then
   `sudo systemctl restart pi-noc`. On Raspberry Pi OS/Debian (bookworm or later)

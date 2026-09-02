@@ -21,6 +21,7 @@ APT_PACKAGES=(
   i2c-tools
   python3-smbus
   libgpiod3
+  libfreetype6
   fonts-dejavu-core
   wireguard-tools
   iproute2
@@ -205,18 +206,21 @@ setup_venv() {
   run_as_user "$VENV_DIR/bin/python" -m pip install -r "${REPO_DIR}/requirements.txt"
 }
 
-# pi_noc.py imports PIL.Image at startup when the display is enabled; fail the
-# install early with an actionable message instead of letting the service crash-loop.
+# pi_noc.py imports Pillow and loads TrueType fonts at startup when the display
+# is enabled; fail the install early with an actionable message instead of
+# letting the service crash-loop.
 verify_python_environment() {
   if [[ "${PINOC_DISPLAY_ENABLED:-1}" == "0" ]]; then
     log "Display disabled; skipping Pillow verification"
     return 0
   fi
-  if run_as_user "$VENV_DIR/bin/python" -c "import PIL.Image" >/dev/null 2>&1; then
-    log "Pillow is importable in the venv"
+  if run_as_user "$VENV_DIR/bin/python" -c \
+    "from PIL import Image, ImageFont; ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 10)" \
+    >/dev/null 2>&1; then
+    log "Pillow can load images and TrueType fonts in the venv"
     return 0
   fi
-  fail "Pillow cannot be imported into ${VENV_DIR}; a missing system library (most often the OpenJPEG libopenjp2 library) is the usual cause; install it, then re-run sudo ./install.sh"
+  fail "Pillow cannot load images and fonts in ${VENV_DIR}; verify the FreeType libfreetype.so.6 and OpenJPEG libopenjp2 runtime libraries, then re-run sudo ./install.sh"
 }
 
 install_service() {
