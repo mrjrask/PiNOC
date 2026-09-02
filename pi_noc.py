@@ -2040,6 +2040,11 @@ def create_display() -> DisplayDevice:
 
 class Buttons:
     def __init__(self) -> None:
+        # Keep hardware imports lazy so web-only/headless operation does not
+        # require Blinka, while ensuring the names are available when a display
+        # and its buttons are enabled.
+        board_module = importlib.import_module("board")
+        digitalio_module = importlib.import_module("digitalio")
         self.devices: Dict[
             str,
             Any,
