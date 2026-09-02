@@ -3,7 +3,7 @@ from __future__ import annotations
 import json, os, queue, re, subprocess, threading, time, uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Callable
 from pinoc.database import utcnow
 from pinoc.security import redact
 

@@ -1,7 +1,7 @@
 """Flask application backed exclusively by the shared state cache."""
 from __future__ import annotations
 
-import logging, os, secrets, json
+import logging, os, secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
