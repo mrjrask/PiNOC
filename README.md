@@ -147,10 +147,21 @@ normal SSH collection uses keys and `BatchMode=yes`.
 | `integration_polling.*` | integration-specific | Integration collection intervals. |
 | `development_gateway.*` | bounded defaults | Job timeouts, output, file-read, artifact, and offline limits. |
 | `remote_*`, `raid_device` | legacy CM5 defaults | Backward-compatible file-server collection. |
-| `remote_temp_monitor` | enabled | Temperature endpoint, timeout, freshness, and optional shared secret. |
+| `remote_temp_monitor` | enabled | Temperature endpoint, timeout, freshness, optional shared secret, and SSH settings for system metrics from discovered devices. |
 | `inside_sensor` | auto | BME280, BME680/BME688, or SHT4x detection. |
 | `vpn_*` | WireGuard defaults | Interface/service, handshake freshness, and Wi-Fi networks where VPN is optional. |
 | `lan_inventory` | disabled | Passive inventory source; PiNOC does not actively scan the LAN. |
+
+When `remote_temp_monitor.collect_system_metrics` is enabled, PiNOC uses each
+authenticated temperature record's `ip` field to collect CPU, memory, storage,
+services, and uptime over SSH. Set `shared_secret` on PiNOC and the temperature
+monitor so the snapshot HMAC can be verified; unsigned or incorrectly signed
+records remain visible as temperature data but are never scheduled for SSH.
+The defaults use `pi` on port 22. Configure passwordless SSH
+for the PiNOC service account, or provide the existing `CM5_SSH_PASS` environment
+secret when every discovered device shares that password. Devices already
+declared in `config/devices.json` retain their explicit SSH settings and are
+merged with matching temperature records by address or hostname.
 
 Run the validator after every manual configuration change:
 

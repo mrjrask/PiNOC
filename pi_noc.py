@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from pinoc.collectors import CollectionScheduler, CollectionTask
 from pinoc.collectors.fleet import FleetCollector
-from pinoc.device_config import load_devices
+from pinoc.device_config import DeviceConfig, load_devices
 from pinoc.health import evaluate
 from pinoc.legacy import normalize_snapshot
 from pinoc.models import DeviceState
@@ -118,6 +118,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "timeout_seconds": 3,
         "max_device_age": 60,
         "shared_secret": "",
+        "collect_system_metrics": True,
+        "ssh_user": "pi",
+        "ssh_port": 22,
     },
     "inside_sensor": {
         "enabled": True,
@@ -958,6 +961,7 @@ def parse_temp_monitor_device(
     )
     device_id = str(
         data.get("device_id")
+        or data.get("deviceId")
         or data.get("id")
         or f"{source}:{hostname}"
     )
@@ -968,17 +972,38 @@ def parse_temp_monitor_device(
         celsius=celsius,
         fahrenheit=fahrenheit,
         last_seen=time.time(),
-        ip=source,
+        ip=str(data.get("ip") or data.get("address") or source),
     )
+
+
+def authenticated_temp_monitor_response(data: Any) -> bool:
+    """Return whether a temperature response has a valid configured HMAC."""
+    secret = str(CONFIG.get("remote_temp_monitor", {}).get("shared_secret", ""))
+    if not secret or not isinstance(data, dict):
+        return False
+
+    signature = str(data.get("hmac", ""))
+    unsigned = dict(data)
+    unsigned.pop("hmac", None)
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        json.dumps(unsigned, separators=(",", ":")).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
 
 
 def parse_temp_monitor_response(
     payload: bytes,
     source: str,
+    require_authentication: bool = False,
 ) -> List[TempDevice]:
     try:
         data = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
+        return []
+
+    if require_authentication and not authenticated_temp_monitor_response(data):
         return []
 
     if isinstance(data, dict):
@@ -2142,6 +2167,9 @@ class SharedSnapshotCoordinator:
             temp_devices=[],
         )
         self.temp_devices: Dict[str, TempDevice] = {}
+        # Keep authenticated records separate: an unsigned response must never
+        # be able to replace an address that is eligible for SSH collection.
+        self.authenticated_temp_devices: Dict[str, TempDevice] = {}
         devices, errors = load_devices(CONFIG, APP_DIR)
         for error in errors:
             logging.getLogger("pinoc.config").error("invalid fleet configuration: %s", error)
@@ -2149,6 +2177,15 @@ class SharedSnapshotCoordinator:
         self.fleet_collector = FleetCollector(
             devices, int(CONFIG.get("fleet_max_workers", 4)),
             float(CONFIG.get("ssh_command_timeout", 8)), read_env_value("CM5_SSH_PASS"))
+        self.configured_fleet_devices = tuple(devices)
+        global_thresholds = CONFIG.get("health_thresholds", {})
+        try:
+            self.global_health_thresholds = {
+                str(name): float(value) for name, value in global_thresholds.items()
+            } if isinstance(global_thresholds, dict) else {}
+        except (TypeError, ValueError):
+            # load_devices has already reported the invalid configuration.
+            self.global_health_thresholds = {}
         self.local_fleet_ids = {device.id for device in devices if device.collection_method == "local"}
         self.fleet_devices: List[Any] = []
         polling = CONFIG.get("polling", {})
@@ -2177,17 +2214,29 @@ class SharedSnapshotCoordinator:
             thresholds_by_id = {device.id: device.thresholds for device in self.fleet_collector.devices}
             for device in self.fleet_devices:
                 raw = device.to_dict()
+                matching_temp = next((temp for temp in snapshot.temp_devices
+                                      if temp.ip in {raw.get("address"), raw.get("ip"), raw.get("network", {}).get("ip")}
+                                      or temp.hostname == raw.get("hostname")), None)
                 legacy_device = legacy_by_id.get(device.id)
                 if legacy_device is not None:
                     raw["applications"] = {
                         **legacy_device.applications,
                         **raw.get("applications", {}),
                     }
+                if matching_temp is not None:
+                    raw.setdefault("cpu", {})["temperature_c"] = matching_temp.celsius
+                    health, reasons, stale = evaluate(raw, thresholds_by_id.get(device.id))
+                    raw.update(health=health, health_reasons=reasons, stale=stale)
+                elif legacy_device is not None:
                     health, reasons, stale = evaluate(raw, thresholds_by_id.get(device.id))
                     raw.update(health=health, health_reasons=reasons, stale=stale)
                 fleet_devices.append(DeviceState.from_dict(raw))
+            fleet_addresses = {value for device in fleet_devices for value in
+                               (device.address, device.ip, device.network.get("ip"), device.hostname) if value}
             devices = [device for device in legacy
                        if device.id not in fleet_ids
+                       and not ("temperature_sensor" in device.roles
+                                and (device.ip in fleet_addresses or device.hostname in fleet_addresses))
                        and not (local_fleet_published and device.id == legacy_local_id)] + fleet_devices
             device_rows = [device.to_dict() for device in devices]
             alerts_by_device: Dict[str, List[Dict[str, Any]]] = {}
@@ -2266,8 +2315,12 @@ class SharedSnapshotCoordinator:
         if temp_config.get("enabled", True) and endpoint:
             try:
                 with urllib.request.urlopen(endpoint, timeout=float(temp_config.get("timeout_seconds", 3))) as response:
-                    for device in parse_temp_monitor_response(response.read(65536), endpoint):
+                    payload = response.read(65536)
+                    for device in parse_temp_monitor_response(payload, endpoint):
                         self.temp_devices[device.device_id] = device
+                    for device in parse_temp_monitor_response(
+                            payload, endpoint, require_authentication=True):
+                        self.authenticated_temp_devices[device.device_id] = device
             except (OSError, urllib.error.URLError, ValueError) as exc:
                 logging.getLogger("pinoc.collectors").warning("temperature collection failed: %s", exc)
         max_age = float(temp_config.get("max_device_age", 60))
@@ -2276,8 +2329,30 @@ class SharedSnapshotCoordinator:
             device_id: device for device_id, device in self.temp_devices.items()
             if now - device.last_seen <= max_age
         }
+        self.authenticated_temp_devices = {
+            device_id: device for device_id, device in self.authenticated_temp_devices.items()
+            if now - device.last_seen <= max_age
+        }
         with self.lock:
             self.snapshot.temp_devices = list(self.temp_devices.values())
+            if temp_config.get("collect_system_metrics", True):
+                configured_addresses = {value for device in self.configured_fleet_devices
+                                        for value in (device.address, device.hostname) if value}
+                ssh_user = str(temp_config.get("ssh_user", "pi"))
+                try:
+                    ssh_port = int(temp_config.get("ssh_port", 22))
+                except (TypeError, ValueError):
+                    ssh_port = 22
+                discovered = [DeviceConfig(
+                    id=temp.device_id, hostname=temp.hostname, friendly_name=temp.hostname,
+                    address=temp.ip, collection_method="ssh", roles=("general",),
+                    ssh_user=ssh_user, ssh_port=ssh_port,
+                    service_discovery=True,
+                    thresholds=dict(self.global_health_thresholds),
+                ) for temp in self.authenticated_temp_devices.values()
+                    if temp.ip and temp.ip != endpoint
+                    and temp.ip not in configured_addresses and temp.hostname not in configured_addresses]
+                self.fleet_collector.devices = [*self.configured_fleet_devices, *discovered]
         self._publish()
 
     def start(self) -> None:
