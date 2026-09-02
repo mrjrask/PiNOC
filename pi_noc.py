@@ -976,13 +976,34 @@ def parse_temp_monitor_device(
     )
 
 
+def authenticated_temp_monitor_response(data: Any) -> bool:
+    """Return whether a temperature response has a valid configured HMAC."""
+    secret = str(CONFIG.get("remote_temp_monitor", {}).get("shared_secret", ""))
+    if not secret or not isinstance(data, dict):
+        return False
+
+    signature = str(data.get("hmac", ""))
+    unsigned = dict(data)
+    unsigned.pop("hmac", None)
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        json.dumps(unsigned, separators=(",", ":")).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
 def parse_temp_monitor_response(
     payload: bytes,
     source: str,
+    require_authentication: bool = False,
 ) -> List[TempDevice]:
     try:
         data = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
+        return []
+
+    if require_authentication and not authenticated_temp_monitor_response(data):
         return []
 
     if isinstance(data, dict):
@@ -2146,6 +2167,9 @@ class SharedSnapshotCoordinator:
             temp_devices=[],
         )
         self.temp_devices: Dict[str, TempDevice] = {}
+        # Keep authenticated records separate: an unsigned response must never
+        # be able to replace an address that is eligible for SSH collection.
+        self.authenticated_temp_devices: Dict[str, TempDevice] = {}
         devices, errors = load_devices(CONFIG, APP_DIR)
         for error in errors:
             logging.getLogger("pinoc.config").error("invalid fleet configuration: %s", error)
@@ -2283,14 +2307,22 @@ class SharedSnapshotCoordinator:
         if temp_config.get("enabled", True) and endpoint:
             try:
                 with urllib.request.urlopen(endpoint, timeout=float(temp_config.get("timeout_seconds", 3))) as response:
-                    for device in parse_temp_monitor_response(response.read(65536), endpoint):
+                    payload = response.read(65536)
+                    for device in parse_temp_monitor_response(payload, endpoint):
                         self.temp_devices[device.device_id] = device
+                    for device in parse_temp_monitor_response(
+                            payload, endpoint, require_authentication=True):
+                        self.authenticated_temp_devices[device.device_id] = device
             except (OSError, urllib.error.URLError, ValueError) as exc:
                 logging.getLogger("pinoc.collectors").warning("temperature collection failed: %s", exc)
         max_age = float(temp_config.get("max_device_age", 60))
         now = time.time()
         self.temp_devices = {
             device_id: device for device_id, device in self.temp_devices.items()
+            if now - device.last_seen <= max_age
+        }
+        self.authenticated_temp_devices = {
+            device_id: device for device_id, device in self.authenticated_temp_devices.items()
             if now - device.last_seen <= max_age
         }
         with self.lock:
@@ -2307,7 +2339,7 @@ class SharedSnapshotCoordinator:
                     id=temp.device_id, hostname=temp.hostname, friendly_name=temp.hostname,
                     address=temp.ip, collection_method="ssh", roles=("general",),
                     ssh_user=ssh_user, ssh_port=ssh_port,
-                ) for temp in self.temp_devices.values()
+                ) for temp in self.authenticated_temp_devices.values()
                     if temp.ip and temp.ip != endpoint
                     and temp.ip not in configured_addresses and temp.hostname not in configured_addresses]
                 self.fleet_collector.devices = [*self.configured_fleet_devices, *discovered]

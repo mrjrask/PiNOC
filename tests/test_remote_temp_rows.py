@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import json
 import sys
 import types
 import unittest
@@ -52,6 +55,14 @@ def make_snapshot(temp_devices):
 
 
 class RemoteTempRowsTest(unittest.TestCase):
+    @staticmethod
+    def signed_payload(data, secret):
+        data = dict(data)
+        data["hmac"] = hmac.new(
+            secret.encode(), json.dumps(data, separators=(",", ":")).encode(), hashlib.sha256
+        ).hexdigest()
+        return json.dumps(data).encode()
+
     def test_temperature_snapshot_preserves_device_ip_for_ssh_collection(self):
         payload = b'''{"type":"temperature_snapshot","devices":[{
             "deviceId":"192.168.1.202:square","hostname":"square",
@@ -122,6 +133,7 @@ class RemoteTempRowsTest(unittest.TestCase):
                 last_seen=datetime.now(timezone.utc).timestamp(), ip="192.168.1.202",
             )
         }
+        coordinator.authenticated_temp_devices = dict(coordinator.temp_devices)
         try:
             with patch.dict(CONFIG["remote_temp_monitor"], {
                 "enabled": False, "collect_system_metrics": True,
@@ -133,6 +145,51 @@ class RemoteTempRowsTest(unittest.TestCase):
             self.assertEqual(discovered.address, "192.168.1.202")
             self.assertEqual(discovered.ssh_user, "pi")
             self.assertEqual(discovered.ssh_port, 22)
+        finally:
+            coordinator.stop()
+
+    def test_unsigned_temperature_snapshot_is_not_scheduled_for_ssh(self):
+        state = PiNOCState()
+        coordinator = SharedSnapshotCoordinator(state)
+        snapshot = {"type": "temperature_snapshot", "devices": [{
+            "deviceId": "attacker", "hostname": "attacker", "ip": "203.0.113.9",
+            "temperature": {"celsius": 20},
+        }]}
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(snapshot).encode()
+        try:
+            with patch.dict(CONFIG["remote_temp_monitor"], {
+                "enabled": True, "endpoint": "http://monitor.test/temps",
+                "shared_secret": "expected-secret", "collect_system_metrics": True,
+            }), patch("pi_noc.urllib.request.urlopen", return_value=response):
+                coordinator.collect_temperatures()
+            self.assertTrue(any(
+                temp.device_id == "attacker" for temp in coordinator.snapshot.temp_devices
+            ))
+            self.assertFalse(any(
+                device.id == "attacker" for device in coordinator.fleet_collector.devices
+            ))
+        finally:
+            coordinator.stop()
+
+    def test_signed_temperature_snapshot_is_scheduled_for_ssh(self):
+        state = PiNOCState()
+        coordinator = SharedSnapshotCoordinator(state)
+        snapshot = {"type": "temperature_snapshot", "devices": [{
+            "deviceId": "trusted", "hostname": "trusted", "ip": "192.0.2.10",
+            "temperature": {"celsius": 20},
+        }]}
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = self.signed_payload(snapshot, "secret")
+        try:
+            with patch.dict(CONFIG["remote_temp_monitor"], {
+                "enabled": True, "endpoint": "http://monitor.test/temps",
+                "shared_secret": "secret", "collect_system_metrics": True,
+            }), patch("pi_noc.urllib.request.urlopen", return_value=response):
+                coordinator.collect_temperatures()
+            self.assertTrue(any(
+                device.id == "trusted" for device in coordinator.fleet_collector.devices
+            ))
         finally:
             coordinator.stop()
 

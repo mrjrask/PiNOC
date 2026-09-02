@@ -153,8 +153,11 @@ normal SSH collection uses keys and `BatchMode=yes`.
 | `lan_inventory` | disabled | Passive inventory source; PiNOC does not actively scan the LAN. |
 
 When `remote_temp_monitor.collect_system_metrics` is enabled, PiNOC uses each
-temperature record's `ip` field to collect CPU, memory, storage, services, and
-uptime over SSH. The defaults use `pi` on port 22. Configure passwordless SSH
+authenticated temperature record's `ip` field to collect CPU, memory, storage,
+services, and uptime over SSH. Set `shared_secret` on PiNOC and the temperature
+monitor so the snapshot HMAC can be verified; unsigned or incorrectly signed
+records remain visible as temperature data but are never scheduled for SSH.
+The defaults use `pi` on port 22. Configure passwordless SSH
 for the PiNOC service account, or provide the existing `CM5_SSH_PASS` environment
 secret when every discovered device shares that password. Devices already
 declared in `config/devices.json` retain their explicit SSH settings and are
