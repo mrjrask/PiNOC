@@ -1,6 +1,6 @@
 """Non-blocking history writer, transition detector, alerts and maintenance."""
 from __future__ import annotations
-import hashlib, json, logging, queue, threading, time
+import json, logging, queue, threading, time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from .database import Database, utcnow
@@ -88,7 +88,7 @@ class HistoryManager:
     def _sample(self,d,stamp):
         did=d["id"]
         if d.get("online") and self._due(did,"core",stamp):
-            c,m,h=d.get("cpu",{}),d.get("memory",{}),d.get("hardware",{})
+            c,m=d.get("cpu",{}),d.get("memory",{})
             self.db.execute("INSERT OR IGNORE INTO device_metrics(timestamp,device_id,cpu_percent,load_1m,load_5m,load_15m,cpu_freq_mhz,cpu_temp_c,soc_temp_c,memory_percent,memory_used_bytes,swap_percent,uptime_seconds) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(stamp,did,c.get("utilization_percent"),c.get("load_1m"),c.get("load_5m"),c.get("load_15m"),c.get("frequency_mhz"),c.get("temperature_c"),c.get("soc_temperature_c"),m.get("percent"),m.get("used"),m.get("swap_percent"),d.get("uptime_seconds")))
         if d.get("online") and self._due(did,"network",stamp):
             n=d.get("network",{}); interface=n.get("interface") or "unknown"

@@ -1,6 +1,6 @@
 """dump1090-fa/SkyAware normalization."""
 from __future__ import annotations
-import json, math
+import json
 
 def _load(v): return json.loads(v) if isinstance(v,str) else (v or {})
 def parse_aircraft(value):

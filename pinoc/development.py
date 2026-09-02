@@ -4,7 +4,7 @@ Agents poll outbound.  They authenticate each request with a per-agent HMAC
 credential; development clients never receive that credential.
 """
 from __future__ import annotations
-import base64, fnmatch, hashlib, hmac, json, mimetypes, os, secrets, time, uuid
+import base64, hashlib, hmac, json, mimetypes, os, secrets, time, uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from pinoc.database import utcnow

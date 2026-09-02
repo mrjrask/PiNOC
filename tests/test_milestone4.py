@@ -1,4 +1,3 @@
-import json
 from pinoc.integrations import active_integrations, IntegrationStatus, sanitize
 from pinoc.integrations.adsb import parse_aircraft, parse_stats, compare
 from pinoc.integrations.magicmirror import parse_pm2

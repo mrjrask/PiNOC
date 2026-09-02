@@ -4,7 +4,7 @@ import copy, hashlib, hmac, json, re, secrets, threading, time
 from datetime import timedelta
 from functools import wraps
 from typing import Any, Iterable
-from flask import abort, g, jsonify, redirect, request, session, url_for
+from flask import g, jsonify, redirect, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 from pinoc.database import utcnow
 
@@ -108,7 +108,14 @@ def install_security(app,manager):
         permission=app.config.get("TOKEN_SCOPE_PERMISSIONS",{}).get(request.endpoint)
         if permission and g.identity and g.identity.get("token") and not manager.allowed(g.identity,permission):
             return jsonify({"error":"permission denied"}),403
-        if request.method in {"POST","PUT","PATCH","DELETE"} and g.identity and not g.identity.get("token"):
+        # Agent protocol requests do not use browser sessions. Heartbeats and
+        # results have per-agent HMAC authentication, while enrollment has a
+        # short-lived one-use credential.  Requiring a browser CSRF token here
+        # breaks every agent request when interactive authentication is
+        # disabled, because that mode supplies the synthetic ``trusted-lan``
+        # session identity.
+        agent_protocol = request.endpoint in {"agent_enroll", "agent_heartbeat", "agent_result"}
+        if request.method in {"POST","PUT","PATCH","DELETE"} and g.identity and not g.identity.get("token") and not agent_protocol:
             supplied=request.headers.get("X-CSRF-Token") or request.form.get("csrf_token")
             if not supplied or not hmac.compare_digest(str(supplied),str(session.get("csrf_token",""))):return jsonify({"error":"CSRF token missing or invalid"}),400
     @app.after_request

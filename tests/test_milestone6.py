@@ -1,4 +1,4 @@
-import base64,json,os,subprocess,threading,time
+import base64,json,subprocess,threading,time
 from pathlib import Path
 import pytest
 from pinoc.database import Database,SCHEMA_VERSION
@@ -167,6 +167,16 @@ def test_agent_request_body_is_capped_before_authentication(tmp_path):
  app=create_app(PiNOCState(),{"TESTING":True,"AUTH_ENABLED":False,"DEV_AGENT_MAX_REQUEST_BYTES":64},history)
  response=app.test_client().post("/api/v1/agent/heartbeat",data=b"x"*65,content_type="application/json")
  assert response.status_code==413
+ app.extensions["pinoc_actions"].stop()
+
+def test_agent_protocol_does_not_require_browser_csrf_when_auth_is_disabled(tmp_path):
+ db=Database(str(tmp_path/"web.db"));assert db.initialize();history=HistoryManager(db,{})
+ app=create_app(PiNOCState(),{"TESTING":True,"AUTH_ENABLED":False},history)
+ response=app.test_client().post("/api/v1/agent/heartbeat",json={})
+ # The request reaches agent HMAC authentication rather than being rejected
+ # by the unrelated browser-session CSRF layer.
+ assert response.status_code==401
+ assert response.get_json()["error_type"]=="agent_credential_rejected"
  app.extensions["pinoc_actions"].stop()
 
 def test_executor_timeout_output_process_cleanup_and_git(tmp_path):

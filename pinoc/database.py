@@ -1,9 +1,9 @@
 """SQLite history store with ordered, transactional migrations."""
 from __future__ import annotations
-import json, logging, shutil, sqlite3
+import json, logging, sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc

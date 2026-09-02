@@ -2003,8 +2003,6 @@ class PimoroniDisplayHATMiniDisplay(DisplayDevice):
     LCD_HEIGHT = PIM_HEIGHT
 
     def __init__(self) -> None:
-        board_module = importlib.import_module("board")
-        digitalio_module = importlib.import_module("digitalio")
         displayhatmini_module = importlib.import_module("displayhatmini")
         self.buffer = Image.new(
             "RGB",
@@ -2205,9 +2203,6 @@ class SharedSnapshotCoordinator:
         with self.lock:
             self.fleet_devices = devices
         self._publish()
-
-    def refresh(self) -> None:
-        self.scheduler.refresh()
 
     def refresh_device(self, _device_id: str) -> None:
         # Fleet collection remains batched, but is always dispatched by the
