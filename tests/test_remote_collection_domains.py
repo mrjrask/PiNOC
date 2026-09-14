@@ -1,7 +1,6 @@
 import os
 import unittest
 
-os.environ["PINOC_DISPLAY_ENABLED"] = "0"
 
 from pi_noc import build_remote_script
 

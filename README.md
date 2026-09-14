@@ -2,8 +2,8 @@
 
 PiNOC is a Raspberry Pi network-operations console for monitoring and safely
 managing a fleet of Pis. A single background backend collects local, SSH, and
-legacy telemetry into a thread-safe cache used by both the responsive web
-console and an optional physical display. SQLite adds durable metrics, alerts,
+legacy telemetry into a thread-safe cache used by the responsive web console.
+SQLite adds durable metrics, alerts,
 events, actions, audit records, and the optional outbound-agent development
 workflow.
 
@@ -28,9 +28,9 @@ other collection domains.
 - **Remote development gateway:** optional outbound-only agents, one-use
   enrollment, restricted workspaces, approved test profiles, bounded output and
   artifacts, explicit state-changing approvals, cancellation, and matrix jobs.
-- **Two frontends:** a responsive Flask/Waitress console and either an Adafruit
-  128×64 OLED Bonnet or Pimoroni Display HAT Mini. Headless web-only operation
-  is supported.
+- **Web operations console:** a responsive, accessible Flask/Waitress interface
+  with fleet health summaries, search and filters, device drill-downs, history,
+  integrations, alerts, events, safe actions, and development workflows.
 
 ## Architecture
 
@@ -40,12 +40,12 @@ other collection domains.
         +---------- collection scheduler/cache -------------------+
                               |
                   normalized PiNOC state
-                    /                    \
-             history queue            display renderer
-                  |                         |
-             SQLite/WAL              physical display
-                  |
-       Flask/Waitress web + cached APIs
+                              |
+                    history queue
+                              |
+                         SQLite/WAL
+                              |
+               Flask/Waitress web + cached APIs
 ```
 
 Collectors use explicit timeouts and independent schedules. HTTP handlers read
@@ -60,7 +60,7 @@ and a sanitized error.
 - Python 3 and a virtual environment (the installer installs system and Python
   dependencies from `requirements.txt`)
 - SSH key access from the PiNOC service user to remotely collected devices
-- Optional I²C/SPI display and sensor hardware
+- Optional I²C environmental sensor hardware
 - Optional WireGuard tools, Cockpit, and remote application services
 
 The supplied installer must run as root through `sudo` and assumes the checkout
@@ -78,8 +78,8 @@ python3 -m pinoc.validate_config
 sudo ./install.sh
 ```
 
-The installer interactively selects the physical display, authentication, web
-listener, and port; installs dependencies; enables I²C/SPI; creates the virtual
+The installer configures authentication and the web port, installs dependencies,
+enables I²C for optional environmental sensors, creates the virtual
 environment; provisions CM5 SSH key access; installs the WireGuard sudoers rule;
 and enables/restarts `pi-noc.service`.
 
@@ -118,9 +118,6 @@ in `.env` override the corresponding runtime settings.
 
 ```dotenv
 CM5_SSH_PASS=                # temporary/runtime password fallback; keys preferred
-DISPLAY=ADA_BONNET           # ADA_BONNET or PIM_DHM
-PINOC_DISPLAY_ENABLED=1      # 0 for a headless deployment
-PINOC_WEB_ENABLED=1
 PINOC_WEB_HOST=0.0.0.0
 PINOC_WEB_PORT=8088
 PINOC_DATABASE_PATH=         # empty uses data/pinoc.db
@@ -137,7 +134,7 @@ normal SSH collection uses keys and `BatchMode=yes`.
 
 | Setting | Default | Purpose |
 | --- | ---: | --- |
-| `web_enabled`, `web_host`, `web_port` | `true`, `0.0.0.0`, `8088` | Web listener fallback values. |
+| `web_host`, `web_port` | `0.0.0.0`, `8088` | Web listener values. PiNOC always starts its web console. |
 | `authentication.enabled` | `false` | Authentication fallback; `PINOC_AUTH_ENABLED` takes precedence. |
 | `polling.*` | 10–60 s | Independent fleet, local, network, remote, service, storage, sensor, and temperature schedules. |
 | `fleet_max_workers` | `4` | Maximum concurrent fleet collection workers. |
@@ -397,20 +394,6 @@ file descriptors, memory, and file size are bounded. Cancellation terminates the
 process group. PiNOC provides no unrestricted shell, filesystem-write endpoint,
 SSH-key export, automatic pull/reset/rollback, or root agent.
 
-## Physical display
-
-The physical pages use the shared cache: Summary, Fleet, Alerts, WireGuard,
-RAID, Storage, Server, SMB, remote temperatures, Local, Sensors, and Network.
-
-- **Adafruit Bonnet:** left/right changes page, up/down scrolls, center refreshes,
-  Button B toggles rotation, and holding Button A requests the configured
-  WireGuard restart.
-- **Pimoroni Display HAT Mini:** A/B changes page, double-click A/B scrolls, X
-  refreshes, Y toggles rotation, and holding/triple-clicking A requests the same
-  WireGuard action.
-
-Refresh signals the shared scheduler; it does not start a second collector path.
-
 ## Operations and troubleshooting
 
 ```sh
@@ -421,14 +404,9 @@ sudo ss -ltnp '( sport = :8088 )'
 curl -v --connect-timeout 5 http://127.0.0.1:8088/health
 ```
 
-- **Web unavailable:** verify `PINOC_WEB_ENABLED`, host/port, the systemd
+- **Web unavailable:** verify the configured host/port, the systemd
   environment file, journal, listener, and loopback request before debugging
   VLAN/client-isolation/firewall paths. Use `http://` unless a TLS proxy exists.
-- **Display blank:** verify `PINOC_DISPLAY_ENABLED`, `DISPLAY`, I²C/SPI, service
-  group membership, cabling, and `display_address`. For web-only recovery, set
-  `PINOC_DISPLAY_ENABLED=0` and restart.
-- **Pillow import failure:** rerun `sudo ./install.sh`; it installs and verifies
-  FreeType and the distro-appropriate OpenJPEG runtime.
 - **Device offline:** validate configuration and test key SSH as the service
   user. Check DNS/mDNS, host keys, firewall, WireGuard requirements, and
   `logs/pinoc.log`.
@@ -455,7 +433,7 @@ and job data. Back up and remove preserved data manually only when intended.
 
 | Path | Purpose |
 | --- | --- |
-| `pi_noc.py` | Unified process, legacy collectors, shared scheduler, and display frontend. |
+| `pi_noc.py` | Web-only process, legacy collectors, and shared scheduler. |
 | `pinoc_agent.py` | Unprivileged outbound development agent. |
 | `pinoc/collectors/` | Fleet collection, parsing, scheduling, and failure isolation. |
 | `pinoc/integrations/` | Role/application normalizers. |
@@ -482,5 +460,4 @@ python3 -m json.tool config/devices.example.json >/dev/null
 The test suite covers the shared cache, scheduler isolation, local/SSH parsing,
 health, history, migrations, alerts, integrations, safe actions, authentication,
 CSRF, agent enrollment and replay protection, workspace restrictions, execution
-limits, artifacts, cancellation, installer dependencies, headless import, and
-physical-button behavior.
+limits, artifacts, cancellation, installer dependencies, web-only runtime imports, and web console behavior.

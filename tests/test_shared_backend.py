@@ -1,5 +1,6 @@
 import importlib.util
 import unittest
+from tempfile import TemporaryDirectory
 
 from pinoc.collectors.base import Collector
 from pinoc.models import DeviceState
@@ -57,12 +58,60 @@ class APIBackendTest(unittest.TestCase):
     def test_required_api_and_health_responses(self):
         self.assertEqual(self.client.get("/health").get_json()["online"], 1)
         self.assertEqual(self.client.get("/api/status").status_code, 200)
+        overview = self.client.get("/api/overview")
+        self.assertEqual(overview.status_code, 200)
+        self.assertEqual(overview.get_json()["summary"]["devices"], 1)
+        self.assertIn("generated_at", overview.get_json())
         self.assertEqual(self.client.get("/api/devices/stable-id").status_code, 200)
         self.assertEqual(self.client.get("/api/devices/stable-id/services").get_json()["services"][0]["state"], "active")
         self.assertEqual(self.client.get("/api/alerts").get_json(), {"alerts": []})
 
     def test_unknown_device_is_404(self):
         self.assertEqual(self.client.get("/api/devices/missing").status_code, 404)
+
+    def test_shared_pages_initialize_the_connection_indicator(self):
+        template, _, _ = self.client.application.jinja_env.loader.get_source(
+            self.client.application.jinja_env, "base.html"
+        )
+        self.assertIn("PiNOC.connection();", template)
+
+    def test_overview_fallback_only_includes_active_alerts(self):
+        self.state.set_alerts([
+            {"alert_id": 1, "state": "active"},
+            {"alert_id": 2, "state": "acknowledged"},
+            {"alert_id": 3, "state": "muted"},
+        ])
+
+        alerts = self.client.get("/api/overview").get_json()["active_alerts"]
+
+        self.assertEqual([alert["alert_id"] for alert in alerts], [1])
+
+    def test_overview_database_query_only_includes_active_alerts(self):
+        from pinoc.database import Database
+        from pinoc.history import HistoryManager
+        from pinoc.web import create_app
+
+        with TemporaryDirectory() as folder:
+            database = Database(f"{folder}/pinoc.db")
+            self.assertTrue(database.initialize(), database.error)
+            for alert_id, alert_state in enumerate(
+                ("active", "acknowledged", "muted"), start=1
+            ):
+                database.execute(
+                    "INSERT INTO alerts(alert_id, device_id, alert_type, severity, "
+                    "message, fingerprint, opened_at, last_seen_at, state) "
+                    "VALUES(?, 'device', 'health', 'warning', 'message', ?, "
+                    "'2026-09-14T00:00:00Z', '2026-09-14T00:00:00Z', ?)",
+                    (alert_id, f"fingerprint-{alert_id}", alert_state),
+                )
+            history = HistoryManager(database, {})
+            client = create_app(
+                self.state, {"TESTING": True}, history=history
+            ).test_client()
+
+            alerts = client.get("/api/overview").get_json()["active_alerts"]
+
+        self.assertEqual([alert["alert_id"] for alert in alerts], [1])
 
     def test_status_summary_preserves_updates_available(self):
         self.state.publish([DeviceState(id="updates", hostname="updates", friendly_name="Updates",

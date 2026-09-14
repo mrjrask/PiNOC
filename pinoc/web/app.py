@@ -36,7 +36,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     app.config["MAX_CONTENT_LENGTH"]=int(app.config.get("DEV_AGENT_MAX_REQUEST_BYTES",artifact_total*4//3+1024*1024))
     app.config["TOKEN_SCOPE_PERMISSIONS"]={
         "api_session":"view",
-        "api_status":"view","api_devices":"view","api_device":"view","api_integrations":"view",
+        "api_status":"view","api_overview":"view","api_devices":"view","api_device":"view","api_integrations":"view",
         "api_device_integrations":"view","api_device_integration":"view","api_adsb":"view","api_displays":"view",
         "api_deployments":"view","api_software":"view","api_network_inventory":"view","api_services":"view",
         "api_alerts":"alerts.read","api_alert":"alerts.read",
@@ -291,6 +291,40 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     @app.get("/api/status")
     def api_status():
         return jsonify(state.summary())
+
+    @app.get("/api/overview")
+    def api_overview():
+        """Return the dashboard's operational context in one cached request."""
+        can_read_alerts = security is None or security.allowed(g.identity, "alerts.read")
+        can_read_history = security is None or security.allowed(g.identity, "history.read")
+        devices = state.devices()
+        integration_counts: Dict[str, int] = {}
+        for device in devices:
+            for name in device.get("integrations", {}):
+                integration_counts[name] = integration_counts.get(name, 0) + 1
+        alerts = (
+            [alert for alert in state.alerts() if alert.get("state") == "active"]
+            if can_read_alerts else []
+        )
+        events = []
+        if history and history.db.available:
+            if can_read_alerts:
+                alerts = history.db.rows(
+                    "SELECT * FROM alerts WHERE resolved_at IS NULL AND state='active' ORDER BY "
+                    "CASE severity WHEN 'critical' THEN 3 WHEN 'degraded' THEN 2 "
+                    "WHEN 'warning' THEN 1 ELSE 0 END DESC, last_seen_at DESC LIMIT 5"
+                )
+            if can_read_history:
+                events = history.db.rows(
+                    "SELECT * FROM events ORDER BY timestamp DESC LIMIT 8"
+                )
+        return jsonify({
+            "summary": state.summary(),
+            "active_alerts": sanitize(alerts[:5]),
+            "recent_events": sanitize(events),
+            "integration_counts": integration_counts,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        })
 
     @app.get("/api/devices")
     def api_devices():

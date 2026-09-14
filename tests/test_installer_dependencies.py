@@ -1,18 +1,24 @@
 from pathlib import Path
 import unittest
 
-
 INSTALLER = Path(__file__).parents[1] / "install.sh"
-
+REQUIREMENTS = Path(__file__).parents[1] / "requirements.txt"
 
 class InstallerDependenciesTest(unittest.TestCase):
-    def test_installer_includes_freetype_runtime_for_pillow_fonts(self):
+    def test_installer_is_web_only(self):
         script = INSTALLER.read_text(encoding="utf-8")
-        dependency_block = script.split("APT_PACKAGES=(", 1)[1].split(")", 1)[0]
+        requirements = REQUIREMENTS.read_text(encoding="utf-8").lower()
+        self.assertNotIn("enable_spi", script)
+        self.assertNotIn("PINOC_DISPLAY_ENABLED", script)
+        self.assertNotIn("pillow", requirements)
+        self.assertNotIn("displayhatmini", requirements)
+        self.assertIn("waitress", requirements)
 
-        self.assertIn("libfreetype6", dependency_block.split())
-        self.assertIn("ImageFont.truetype", script)
-
+    def test_service_omits_unavailable_supplementary_groups(self):
+        script = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn("mapfile -t groups < <(existing_hardware_groups)", script)
+        self.assertIn("if ((${#groups[@]})); then", script)
+        self.assertIn("sed -i '/^SupplementaryGroups=/d' \"$tmp_service\"", script)
 
 if __name__ == "__main__":
     unittest.main()

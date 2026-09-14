@@ -95,6 +95,22 @@ def test_bearer_read_scopes_are_enforced_per_endpoint(tmp_path):
  assert c.get("/api/actions",headers={"Authorization":"Bearer "+execute}).status_code==200
  app.extensions["pinoc_actions"].stop()
 
+def test_overview_omits_alerts_and_events_without_their_scopes(tmp_path):
+ app,db=fixture(tmp_path,"administrator");security=app.extensions["pinoc_security"]
+ db.execute("INSERT INTO alerts(device_id,alert_type,severity,message,fingerprint,opened_at,last_seen_at,state) VALUES('pi','health','warning','alert','scope-alert','2026-09-14T00:00:00Z','2026-09-14T00:00:00Z','active')")
+ db.execute("INSERT INTO events(timestamp,device_id,event_type,severity,message) VALUES('2026-09-14T00:00:00Z','pi','health','warning','event')")
+ fleet=security.create_token("person",["read:fleet"])
+ full=security.create_token("person",["read:fleet","read:alerts","read:history"])
+ c=app.test_client()
+ restricted=c.get("/api/overview",headers={"Authorization":"Bearer "+fleet})
+ assert restricted.status_code==200
+ assert restricted.json["active_alerts"]==[]
+ assert restricted.json["recent_events"]==[]
+ permitted=c.get("/api/overview",headers={"Authorization":"Bearer "+full}).json
+ assert [row["message"] for row in permitted["active_alerts"]]==["alert"]
+ assert [row["message"] for row in permitted["recent_events"]]==["event"]
+ app.extensions["pinoc_actions"].stop()
+
 def test_failed_shutdown_clears_expected_offline_state(tmp_path):
  app,db=fixture(tmp_path,"administrator");state=app.extensions["pinoc_actions"].state
  def failed(args,**kwargs):return subprocess.CompletedProcess(args,1,"","no")

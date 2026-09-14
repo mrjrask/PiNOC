@@ -1,5 +1,5 @@
 [Unit]
-Description=Desk Pi Network Operations Console
+Description=PiNOC Web Network Operations Console
 Wants=network-online.target
 After=network-online.target wg-quick@wg0.service
 
@@ -7,7 +7,7 @@ After=network-online.target wg-quick@wg0.service
 Type=simple
 User=pi
 Group=pi
-SupplementaryGroups=i2c gpio
+SupplementaryGroups=i2c
 WorkingDirectory=/home/pi/pi-noc
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/home/pi/pi-noc/.env
