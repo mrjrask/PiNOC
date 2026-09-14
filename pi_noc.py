@@ -1416,30 +1416,30 @@ def main() -> None:
         "DEV_CONFIG":CONFIG.get("development_gateway",{}),
         "DEV_ARTIFACT_ROOT":str(APP_DIR/CONFIG.get("development_gateway",{}).get("artifact_root","data/jobs")),
         "PINOC_CONFIG":CONFIG,"CONFIG_PATH":str(APP_DIR/"config.json"),"APP_DIR":str(APP_DIR)}, history, coordinator)
-    threading.Thread(target=serve, args=(web_app, host, port), name="pinoc-web", daemon=True).start()
-    stop_event = threading.Event()
 
-    def request_stop(
-        _signum: int,
-        _frame: Any,
-    ) -> None:
-        stop_event.set()
+    previous_signal_handlers = {
+        signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
+    }
 
-    signal.signal(
-        signal.SIGTERM,
-        request_stop,
-    )
-    signal.signal(
-        signal.SIGINT,
-        request_stop,
-    )
+    def request_stop(_signum: int, _frame: Any) -> None:
+        # Raising in the main thread unwinds the blocking server call so the
+        # coordinator and queued history snapshots are shut down in `finally`.
+        raise SystemExit(0)
 
+    for signum in previous_signal_handlers:
+        signal.signal(signum, request_stop)
     try:
-        while not stop_event.wait(1):
-            pass
+        # The web console is PiNOC's sole frontend. Keep it in the main thread
+        # so bind errors and unexpected server termination fail the process and
+        # allow the service manager to restart it.
+        serve(web_app, host, port)
     finally:
-        coordinator.stop()
-        history.stop()
+        try:
+            coordinator.stop()
+            history.stop()
+        finally:
+            for signum, previous_handler in previous_signal_handlers.items():
+                signal.signal(signum, previous_handler)
 
 
 if __name__ == "__main__":

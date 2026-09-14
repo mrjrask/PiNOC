@@ -1,7 +1,7 @@
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pi_noc
 
@@ -42,6 +42,50 @@ class WebOnlyRuntimeTest(unittest.TestCase):
             [call.args[0] for call in import_module.call_args_list],
             ["busio", "board"],
         )
+
+    def test_web_server_failure_propagates_and_stops_backends(self):
+        history = MagicMock()
+        coordinator = MagicMock()
+        failure = OSError("address already in use")
+        with (
+            patch("pinoc.database.Database"),
+            patch("pinoc.history.HistoryManager", return_value=history),
+            patch.object(pi_noc, "SharedSnapshotCoordinator", return_value=coordinator),
+            patch("pinoc.web.create_app", return_value=object()),
+            patch("pinoc.web.serve", side_effect=failure),
+        ):
+            with self.assertRaisesRegex(OSError, "address already in use"):
+                pi_noc.main()
+
+        coordinator.stop.assert_called_once_with()
+        history.stop.assert_called_once_with()
+
+    def test_sigterm_stops_backends_before_exiting(self):
+        history = MagicMock()
+        coordinator = MagicMock()
+        installed_handlers = {}
+
+        def install_handler(signum, handler):
+            installed_handlers[signum] = handler
+
+        def terminate_during_serve(*_args):
+            installed_handlers[pi_noc.signal.SIGTERM](pi_noc.signal.SIGTERM, None)
+
+        with (
+            patch("pinoc.database.Database"),
+            patch("pinoc.history.HistoryManager", return_value=history),
+            patch.object(pi_noc, "SharedSnapshotCoordinator", return_value=coordinator),
+            patch("pinoc.web.create_app", return_value=object()),
+            patch("pinoc.web.serve", side_effect=terminate_during_serve),
+            patch.object(pi_noc.signal, "getsignal", return_value=pi_noc.signal.SIG_DFL),
+            patch.object(pi_noc.signal, "signal", side_effect=install_handler),
+        ):
+            with self.assertRaises(SystemExit) as exit_context:
+                pi_noc.main()
+
+        self.assertEqual(exit_context.exception.code, 0)
+        coordinator.stop.assert_called_once_with()
+        history.stop.assert_called_once_with()
 
 
 if __name__ == "__main__":
