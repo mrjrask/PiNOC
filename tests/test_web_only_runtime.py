@@ -1,7 +1,7 @@
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pi_noc
 
@@ -42,6 +42,23 @@ class WebOnlyRuntimeTest(unittest.TestCase):
             [call.args[0] for call in import_module.call_args_list],
             ["busio", "board"],
         )
+
+    def test_web_server_failure_propagates_and_stops_backends(self):
+        history = MagicMock()
+        coordinator = MagicMock()
+        failure = OSError("address already in use")
+        with (
+            patch("pinoc.database.Database"),
+            patch("pinoc.history.HistoryManager", return_value=history),
+            patch.object(pi_noc, "SharedSnapshotCoordinator", return_value=coordinator),
+            patch("pinoc.web.create_app", return_value=object()),
+            patch("pinoc.web.serve", side_effect=failure),
+        ):
+            with self.assertRaisesRegex(OSError, "address already in use"):
+                pi_noc.main()
+
+        coordinator.stop.assert_called_once_with()
+        history.stop.assert_called_once_with()
 
 
 if __name__ == "__main__":
