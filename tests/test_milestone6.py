@@ -179,6 +179,16 @@ def test_agent_protocol_does_not_require_browser_csrf_when_auth_is_disabled(tmp_
  assert response.get_json()["error_type"]=="agent_credential_rejected"
  app.extensions["pinoc_actions"].stop()
 
+def test_development_pages_link_to_each_development_view(tmp_path):
+ db=Database(str(tmp_path/"web.db"));assert db.initialize();history=HistoryManager(db,{})
+ app=create_app(PiNOCState(),{"TESTING":True,"AUTH_ENABLED":False},history);client=app.test_client()
+ expected=(('href="/agents"','Agents'),('href="/workspaces"','Workspaces'),('href="/jobs"','Jobs'),('href="/jobs/approvals"','Approvals'))
+ for path,active in (("/agents","Agents"),("/workspaces","Workspaces"),("/jobs","Jobs"),("/jobs/example","Jobs"),("/jobs/approvals","Approvals")):
+  body=client.get(path).get_data(as_text=True);navigation=body.split('<nav class="development-nav"',1)[1].split('</nav>',1)[0]
+  assert all(link in navigation for link,_ in expected)
+  assert f'aria-current="page">{active}</a>' in navigation
+ app.extensions["pinoc_actions"].stop()
+
 def test_executor_timeout_output_process_cleanup_and_git(tmp_path):
  root=tmp_path/"repo";root.mkdir();subprocess.run(["git","init",str(root)],check=True,capture_output=True);workspace={"path":str(root),"sensitive_patterns":[],"artifact_patterns":[],"services":[]};ex=Executor()
  base={"job_id":"j","job_type":"command","workspace":workspace,"argv":["python3","-c","import sys,time;sys.stdout.write('x'*2_000_000);sys.stderr.write('y'*2_000_000);sys.stdout.flush();sys.stderr.flush();time.sleep(3)"],"environment":{},"request":{},"timeout_seconds":1,"output_limit_bytes":100,"file_limit_bytes":100,"artifact_limits":{"count":1,"file_bytes":10,"total_bytes":10}}

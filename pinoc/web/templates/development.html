@@ -1,5 +1,11 @@
 {% extends "base.html" %}{% block title %}{{ view|title }} · PiNOC{% endblock %}{% block content %}
 <h1>{{ view|title }}</h1><p id="notice">Development gateway data is authenticated and policy controlled.</p>
+<nav class="development-nav" aria-label="Development navigation">
+<a href="/agents" {% if view == 'agents' %}aria-current="page"{% endif %}>Agents</a>
+<a href="/workspaces" {% if view == 'workspaces' %}aria-current="page"{% endif %}>Workspaces</a>
+<a href="/jobs" {% if view in ['jobs','detail'] %}aria-current="page"{% endif %}>Jobs</a>
+<a href="/jobs/approvals" {% if view == 'approvals' %}aria-current="page"{% endif %}>Approvals</a>
+</nav>
 <div class="panel"><table><thead id="head"></thead><tbody id="rows"></tbody></table><pre id="detail"></pre></div>
 {% endblock %}{% block scripts %}<script>
 const view={{ view|tojson }}, job={{ job_id|default('',true)|tojson }};
