@@ -300,11 +300,11 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         for device in devices:
             for name in device.get("integrations", {}):
                 integration_counts[name] = integration_counts.get(name, 0) + 1
-        alerts = state.alerts()
+        alerts = [alert for alert in state.alerts() if alert.get("state") == "active"]
         events = []
         if history and history.db.available:
             alerts = history.db.rows(
-                "SELECT * FROM alerts WHERE resolved_at IS NULL ORDER BY "
+                "SELECT * FROM alerts WHERE resolved_at IS NULL AND state='active' ORDER BY "
                 "CASE severity WHEN 'critical' THEN 3 WHEN 'degraded' THEN 2 "
                 "WHEN 'warning' THEN 1 ELSE 0 END DESC, last_seen_at DESC LIMIT 5"
             )
