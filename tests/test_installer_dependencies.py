@@ -14,5 +14,11 @@ class InstallerDependenciesTest(unittest.TestCase):
         self.assertNotIn("displayhatmini", requirements)
         self.assertIn("waitress", requirements)
 
+    def test_service_omits_unavailable_supplementary_groups(self):
+        script = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn("mapfile -t groups < <(existing_hardware_groups)", script)
+        self.assertIn("if ((${#groups[@]})); then", script)
+        self.assertIn("sed -i '/^SupplementaryGroups=/d' \"$tmp_service\"", script)
+
 if __name__ == "__main__":
     unittest.main()
