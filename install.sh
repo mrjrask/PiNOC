@@ -20,9 +20,6 @@ APT_PACKAGES=(
   git
   i2c-tools
   python3-smbus
-  libgpiod3
-  libfreetype6
-  fonts-dejavu-core
   wireguard-tools
   iproute2
   openssh-client
@@ -59,9 +56,6 @@ load_env_file() {
     line="${line%$'\r'}"
     case "$line" in
       CM5_SSH_PASS=*) CM5_SSH_PASS="${line#CM5_SSH_PASS=}" ;;
-      DISPLAY=*) DISPLAY="${line#DISPLAY=}" ;;
-      PINOC_DISPLAY_ENABLED=*) PINOC_DISPLAY_ENABLED="${line#PINOC_DISPLAY_ENABLED=}" ;;
-      PINOC_WEB_ENABLED=*) PINOC_WEB_ENABLED="${line#PINOC_WEB_ENABLED=}" ;;
       PINOC_WEB_HOST=*) PINOC_WEB_HOST="${line#PINOC_WEB_HOST=}" ;;
       PINOC_WEB_PORT=*) PINOC_WEB_PORT="${line#PINOC_WEB_PORT=}" ;;
       PINOC_AUTH_ENABLED=*) PINOC_AUTH_ENABLED="${line#PINOC_AUTH_ENABLED=}" ;;
@@ -70,31 +64,19 @@ load_env_file() {
   done < "$ENV_FILE"
 }
 
-configure_frontends() {
-  local display_enabled display_type web_enabled web_host web_port auth_enabled
-  prompt_default display_enabled "Enable physical display (1/0)" "${PINOC_DISPLAY_ENABLED:-1}"
+configure_web() {
+  local web_host web_port auth_enabled
   prompt_default auth_enabled "Enable PiNOC web authentication (1/0)" "${PINOC_AUTH_ENABLED:-1}"
-  prompt_default display_type "Display type (ADA_BONNET/PIM_DHM)" "${DISPLAY:-ADA_BONNET}"
-  [[ "$display_type" == "ADA_BONNET" || "$display_type" == "PIM_DHM" ]] || fail "Unsupported display type: ${display_type}"
-  prompt_default web_enabled "Enable web console (1/0)" "${PINOC_WEB_ENABLED:-1}"
   web_host="${PINOC_WEB_HOST:-0.0.0.0}"
   prompt_default web_port "Web console port" "${PINOC_WEB_PORT:-8088}"
   [[ "$web_port" =~ ^[0-9]+$ ]] && ((web_port >= 1 && web_port <= 65535)) || fail "Invalid web port: ${web_port}"
-  # Keep the selected values available to the remainder of this installer as
-  # well as persisting them for the service. Function-local prompt variables
-  # disappear on return, which previously made the completion message abort
-  # under `set -u` and left later checks using stale/default values.
-  PINOC_DISPLAY_ENABLED="$display_enabled"
-  DISPLAY="$display_type"
-  PINOC_WEB_ENABLED="$web_enabled"
   PINOC_WEB_HOST="$web_host"
   PINOC_WEB_PORT="$web_port"
   PINOC_AUTH_ENABLED="$auth_enabled"
-  python3 - "$ENV_FILE" "$display_enabled" "$display_type" "$web_enabled" "$web_host" "$web_port" "$auth_enabled" <<'PY'
+  python3 - "$ENV_FILE" "$web_host" "$web_port" "$auth_enabled" <<'PY'
 import sys
-path, display_enabled, display_type, web_enabled, web_host, web_port, auth_enabled = sys.argv[1:]
-values = {"PINOC_DISPLAY_ENABLED": display_enabled, "DISPLAY": display_type,
-          "PINOC_WEB_ENABLED": web_enabled, "PINOC_WEB_HOST": web_host, "PINOC_WEB_PORT": web_port,
+path, web_host, web_port, auth_enabled = sys.argv[1:]
+values = {"PINOC_WEB_HOST": web_host, "PINOC_WEB_PORT": web_port,
           "PINOC_AUTH_ENABLED": auth_enabled}
 lines = open(path, encoding="utf-8").read().splitlines()
 seen = set()
@@ -116,37 +98,6 @@ install_system_dependencies() {
   apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
 }
 
-# Pillow is built with JPEG2000 (OpenJPEG) support, and a missing libopenjp2
-# runtime library makes `import PIL.Image` fail, which crash-loops pi-noc.service
-# when the display is enabled. The apt package name differs across releases
-# (libopenjp2-7 on Debian bookworm/trixie, libopenjp2-2.3 on bullseye,
-# libopenjp2-7-1/-2 on Ubuntu), so try candidates until the library resolves.
-openjpeg_library_present() {
-  # grep must read the entire stream (no -q/-m1): with `set -o pipefail` an
-  # early grep exit leaves ldconfig -p dying on SIGPIPE (exit 141), which fails
-  # the pipeline even when the library IS in the cache.
-  ldconfig -p 2>/dev/null | grep -c 'libopenjp2\.so' >/dev/null
-}
-
-install_openjpeg() {
-  local package
-  if openjpeg_library_present; then
-    return 0
-  fi
-  for package in libopenjp2-7 libopenjp2-7-1 libopenjp2-7-2 libopenjp2-2.3; do
-    if apt-get install -y --no-install-recommends -- "$package" 2>/dev/null; then
-      ldconfig >/dev/null 2>&1 || true  # defensive: rebuild the cache in case the dpkg trigger did not run
-      if openjpeg_library_present; then
-        return 0
-      fi
-      warn "${package} installed but libopenjp2 is still unresolvable; check 'dpkg -L ${package}' and 'ls -l /usr/lib/*/libopenjp2*'"
-    else
-      log "OpenJPEG package ${package} is not available on this release"
-    fi
-  done
-  fail "Pillow requires the OpenJPEG runtime library (libopenjp2.so); install the libopenjp2 package for your distro"
-}
-
 enable_i2c() {
   log "Enabling I2C"
   if command -v raspi-config >/dev/null 2>&1; then
@@ -164,24 +115,9 @@ enable_i2c() {
   modprobe i2c-dev || warn "Could not load i2c-dev immediately; reboot may be required"
 }
 
-enable_spi() {
-  log "Enabling SPI"
-  if command -v raspi-config >/dev/null 2>&1; then
-    raspi-config nonint do_spi 0 || warn "raspi-config could not enable SPI"
-  else
-    warn "raspi-config not found; adding dtparam=spi=on manually"
-  fi
-
-  local boot_config="/boot/firmware/config.txt"
-  [[ -f /boot/config.txt && ! -f "$boot_config" ]] && boot_config="/boot/config.txt"
-  if [[ -f "$boot_config" ]] && ! grep -Eq '^dtparam=spi=on' "$boot_config"; then
-    printf '\ndtparam=spi=on\n' >> "$boot_config"
-  fi
-}
-
 existing_hardware_groups() {
   local group
-  for group in i2c gpio spi; do
+  for group in i2c; do
     if getent group "$group" >/dev/null; then
       printf '%s\n' "$group"
     else
@@ -191,7 +127,7 @@ existing_hardware_groups() {
 }
 
 setup_user_groups() {
-  log "Adding ${INSTALL_USER} to hardware access groups"
+  log "Adding ${INSTALL_USER} to I2C sensor access groups"
   local groups=() group
   mapfile -t groups < <(existing_hardware_groups)
   for group in "${groups[@]}"; do
@@ -206,31 +142,12 @@ setup_venv() {
   run_as_user "$VENV_DIR/bin/python" -m pip install -r "${REPO_DIR}/requirements.txt"
 }
 
-# pi_noc.py imports Pillow and loads TrueType fonts at startup when the display
-# is enabled; fail the install early with an actionable message instead of
-# letting the service crash-loop.
-verify_python_environment() {
-  if [[ "${PINOC_DISPLAY_ENABLED:-1}" == "0" ]]; then
-    log "Display disabled; skipping Pillow verification"
-    return 0
-  fi
-  if run_as_user "$VENV_DIR/bin/python" -c \
-    "from PIL import Image, ImageFont; ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 10)" \
-    >/dev/null 2>&1; then
-    log "Pillow can load images and TrueType fonts in the venv"
-    return 0
-  fi
-  fail "Pillow cannot load images and fonts in ${VENV_DIR}; verify the FreeType libfreetype.so.6 and OpenJPEG libopenjp2 runtime libraries, then re-run sudo ./install.sh"
-}
-
 install_service() {
   log "Installing systemd service"
-  local tmp_service vpn_service groups=() supplementary_groups
+  local tmp_service vpn_service
   vpn_service="$(json_value vpn_service)"
   vpn_service="${vpn_service:-wg-quick@wg0.service}"
   tmp_service="$(mktemp)"
-  mapfile -t groups < <(existing_hardware_groups)
-  supplementary_groups="${groups[*]}"
 
   sed \
     -e "s#^User=.*#User=${INSTALL_USER}#" \
@@ -241,18 +158,10 @@ install_service() {
     -e "s#^After=.*#After=network-online.target ${vpn_service}#" \
     "$SERVICE_SOURCE" > "$tmp_service"
 
-  if ((${#groups[@]})); then
-    sed -i "s#^SupplementaryGroups=.*#SupplementaryGroups=${supplementary_groups}#" "$tmp_service"
-  else
-    sed -i '/^SupplementaryGroups=/d' "$tmp_service"
-  fi
-
   install -m 0644 "$tmp_service" "$SERVICE_DEST"
   rm -f "$tmp_service"
   systemctl daemon-reload
-  # Start (or restart) the service now in addition to enabling it at boot. This
-  # brings an enabled bonnet to life as part of a successful installation and
-  # applies updated environment settings on upgrades.
+  # Start or restart now so updated web and collection settings take effect.
   systemctl enable "$SERVICE_NAME"
   systemctl restart "$SERVICE_NAME"
 }
@@ -311,15 +220,12 @@ main() {
   [[ -f "$CONFIG_FILE" ]] || fail "Missing ${CONFIG_FILE}"
   [[ -f "$SERVICE_SOURCE" ]] || fail "Missing ${SERVICE_SOURCE}"
   load_env_file
-  configure_frontends
+  configure_web
 
   install_system_dependencies
-  install_openjpeg
   enable_i2c
-  enable_spi
   setup_user_groups
   setup_venv
-  verify_python_environment
   log "Creating persistent history directory (existing databases are preserved)"
   install -d -m 0750 -o "$INSTALL_USER" -g "$INSTALL_USER" "$(dirname "${PINOC_DATABASE_PATH:-$DATA_DIR/pinoc.db}")"
   configure_wireguard_controls
@@ -327,10 +233,8 @@ main() {
   install_service
 
   log "Installation complete"
-  if [[ "$PINOC_WEB_ENABLED" == 1 ]]; then
-    log "Web console: http://$(hostname -I 2>/dev/null | awk '{print $1}'):${PINOC_WEB_PORT}/"
-  fi
-  log "The ${SERVICE_NAME} service is enabled and started; reboot if I2C or new group membership was not already active"
+  log "Web console: http://$(hostname -I 2>/dev/null | awk '{print $1}'):${PINOC_WEB_PORT}/"
+  log "The ${SERVICE_NAME} service is enabled and started; reboot if I2C sensor support or new group membership was not already active"
   if [[ "$PINOC_AUTH_ENABLED" == 1 ]]; then
     log "Create the initial administrator before exposing the web port: sudo -u ${INSTALL_USER} ${VENV_DIR}/bin/python -m pinoc.admin create-user --role administrator USERNAME"
   else

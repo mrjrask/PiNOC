@@ -2,9 +2,6 @@
   "vpn_interface": "wg0",
   "vpn_service": "wg-quick@wg0.service",
   "vpn_stale_seconds": 150,
-  "refresh_seconds": 10,
-  "auto_rotate_seconds": 8,
-  "web_enabled": true,
   "web_host": "0.0.0.0",
   "web_port": 8088,
   "authentication": {
@@ -80,7 +77,6 @@
     }
   ],
   "raid_device": "md0",
-  "display_address": "0x3c",
   "remote_temp_monitor": {
     "enabled": true,
     "endpoint": "http://192.168.1.201:9877/temps",

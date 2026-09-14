@@ -57,6 +57,10 @@ class APIBackendTest(unittest.TestCase):
     def test_required_api_and_health_responses(self):
         self.assertEqual(self.client.get("/health").get_json()["online"], 1)
         self.assertEqual(self.client.get("/api/status").status_code, 200)
+        overview = self.client.get("/api/overview")
+        self.assertEqual(overview.status_code, 200)
+        self.assertEqual(overview.get_json()["summary"]["devices"], 1)
+        self.assertIn("generated_at", overview.get_json())
         self.assertEqual(self.client.get("/api/devices/stable-id").status_code, 200)
         self.assertEqual(self.client.get("/api/devices/stable-id/services").get_json()["services"][0]["state"], "active")
         self.assertEqual(self.client.get("/api/alerts").get_json(), {"alerts": []})
