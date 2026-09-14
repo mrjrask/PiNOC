@@ -69,6 +69,12 @@ class APIBackendTest(unittest.TestCase):
     def test_unknown_device_is_404(self):
         self.assertEqual(self.client.get("/api/devices/missing").status_code, 404)
 
+    def test_shared_pages_initialize_the_connection_indicator(self):
+        template, _, _ = self.client.application.jinja_env.loader.get_source(
+            self.client.application.jinja_env, "base.html"
+        )
+        self.assertIn("PiNOC.connection();", template)
+
     def test_overview_fallback_only_includes_active_alerts(self):
         self.state.set_alerts([
             {"alert_id": 1, "state": "active"},
