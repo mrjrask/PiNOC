@@ -103,6 +103,7 @@
     "wiffyToo"
   ],
   "integration_polling": {
+    "probe_seconds": 30,
     "adsb_seconds": 15,
     "desk_display_seconds": 15,
     "magicmirror_seconds": 15,

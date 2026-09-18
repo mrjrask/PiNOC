@@ -20,8 +20,8 @@ other collection domains.
   retention, graphs, storage forecasts, transition events, and persistent alert
   lifecycles (active, acknowledged, muted, and resolved).
 - **Application integrations:** ADS-B, desk displays, MagicMirror, ICS Modifier,
-  pi-hotspot, WireGuard, Samba, RAID, SMART/NVMe health, packages, Git, and
-  optional passive LAN inventory.
+  pi-hotspot, WireGuard, Samba, RAID, SMART/NVMe health, packages, Git, optional
+  passive LAN inventory, and user-defined HTTP/TCP probes for arbitrary services.
 - **Safe administration:** optional users and API tokens, role/scoped
   authorization, CSRF protection, allowlisted service and power actions,
   maintenance windows, configuration backups, and an audit log.
@@ -261,6 +261,39 @@ duration, sanitized data/errors, and only explicitly available safe actions.
 Application health avoids duplicating conditions already owned by generic
 service monitoring.
 
+#### Probes (user-defined checks)
+
+Any device can declare read-only health checks that run **from the PiNOC host**
+on their own intervals:
+
+```json
+"integrations": {
+  "probe": {
+    "enabled": true,
+    "checks": [
+      {"name": "api", "kind": "http_get",
+       "url": "http://192.168.1.50:8080/health",
+       "timeout_seconds": 5, "interval_seconds": 60,
+       "expected_status": 200, "pattern": "\\\"status\\\":\\\"ok\\\""},
+      {"name": "database", "kind": "tcp",
+       "host": "192.168.1.50", "port": 5432, "critical": true}
+    ]
+  }
+}
+```
+
+Check kinds are `http_get`, `http_head`, and `tcp`. `expected_status` accepts a
+single code or a list, `pattern` is an optional response-body regular expression,
+and `critical` escalates a failing check from a warning alert to a critical one.
+Probes are passive and read-only, run on the collection scheduler (never from a
+web request), honor per-check intervals, and are capped at 20 checks per device.
+Failing checks open a single `probe_failed` alert per device (naming every
+offending check) with the normal acknowledge/mute/resolve lifecycle, and
+latency plus failure counts are sampled into `integration_metrics`.
+
+`integration_polling.probe_seconds` (default 30) is the base scheduler tick;
+individual checks still honor their own `interval_seconds`.
+
 ## Web console and APIs
 
 Primary pages are `/`, `/devices/<id>`, `/integrations`, `/adsb`, `/displays`,
@@ -283,6 +316,7 @@ GET /api/deployments
 GET /api/software
 GET /api/network-inventory
 GET /api/devices/<id>/metrics?range=24h
+GET /api/devices/<id>/integrations/probe
 GET /api/devices/<id>/storage/forecast
 GET /api/alerts[?state=active]
 GET /api/events

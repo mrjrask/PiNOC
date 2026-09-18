@@ -183,6 +183,19 @@ class FleetCollector:
             for name in active_integrations(device.roles,device.integrations):
                 cfg=device.integrations.get(name,{})
                 cfg=cfg if isinstance(cfg,dict) else {}
+                if name=="probe":
+                    # Probes run from the PiNOC host on their own schedule;
+                    # the fleet cycle only seeds the placeholder the probe
+                    # collector then refreshes.
+                    checks=cfg.get("checks",[])
+                    integrations["probe"]=(IntegrationStatus(name="probe",available=bool(checks),
+                        health="unavailable" if checks else "unsupported",
+                        last_attempt=attempted,data_source="probe",
+                        error=None if checks else "no probe checks configured",
+                        data={"checks":[{"name":x.get("name"),"kind":x.get("kind")} for x in checks],
+                              "checks_total":len(checks),"failed_checks":None,"response_latency_ms":None},
+                        critical=bool(cfg.get("critical",False)))).to_dict()
+                    continue
                 candidates={"adsb":["piaware.service","dump1090-fa.service","readsb.service"],"desk_display":["desk-display.service"],"magicmirror":["magicmirror.service"],"ics_modifier":["ics_modifier.service"],"pi_hotspot":["pi-hotspot.service"],"wireguard":["wg-quick@wg0.service"],"samba":["smbd.service","smb.service"]}.get(name,[])
                 found=[find_service(services,x) for x in candidates]; found=[x for x in found if x]
                 available=bool(found) if candidates else False

@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from pinoc.collectors import CollectionScheduler, CollectionTask
 from pinoc.collectors.fleet import FleetCollector
+from pinoc.collectors.probes import ProbeCollector
 from pinoc.device_config import DeviceConfig, load_devices
 from pinoc.health import evaluate
 from pinoc.legacy import normalize_snapshot
@@ -1203,8 +1204,12 @@ class SharedSnapshotCoordinator:
         self.fleet_devices: List[Any] = []
         polling = CONFIG.get("polling", {})
         temp_config = CONFIG.get("remote_temp_monitor", {})
+        integration_polling = CONFIG.get("integration_polling", {})
+        self.probe_collector = ProbeCollector(
+            state, lambda: list(self.fleet_collector.devices), integration_polling)
         self.scheduler = CollectionScheduler([
             CollectionTask("fleet", float(polling.get("fleet_seconds", 10)), self.collect_fleet),
+            CollectionTask("probes", float(integration_polling.get("probe_seconds", 30)), self.probe_collector.collect),
             CollectionTask("local", float(polling.get("local_seconds", 10)), self.collect_local),
             CollectionTask("network", float(polling.get("network_seconds", 10)), self.collect_vpn),
             CollectionTask("remote_health", float(polling.get("remote_health_seconds", 10)), self.collect_remote_health),

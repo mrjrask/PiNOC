@@ -117,10 +117,18 @@ def parse_device(raw: Dict[str, Any], index: int) -> DeviceConfig:
     if not isinstance(repositories, list) or any(not isinstance(x, dict) for x in repositories):
         raise DeviceConfigError(f"device {label}: repositories must be a list of objects")
     for name, value in integrations.items():
-        if name not in {"adsb","desk_display","magicmirror","ics_modifier","pi_hotspot","wireguard","samba","raid","disk_health","packages","git"}:
+        if name not in {"adsb","desk_display","magicmirror","ics_modifier","pi_hotspot","wireguard","samba","raid","disk_health","packages","git","probe"}:
             raise DeviceConfigError(f"device {label}: unknown integration {name}")
         if not isinstance(value, (bool, dict)):
             raise DeviceConfigError(f"device {label}: integration {name} must be a boolean or object")
+        if name == "probe":
+            if isinstance(value, bool):
+                raise DeviceConfigError(f"device {label}: probe must be an object with a checks list")
+            from pinoc.integrations.probe import ProbeConfigError, validate_probes
+            try:
+                integrations[name] = validate_probes(label, value)
+            except ProbeConfigError as exc:
+                raise DeviceConfigError(str(exc)) from None
     return DeviceConfig(device_id, hostname or address, str(raw.get("friendly_name") or hostname or address),
                         address, method, tuple(roles), tuple(tags), str(raw.get("ssh_user", "pi")),
                         ssh_port, bool(raw.get("cockpit_enabled", False)), scheme,
