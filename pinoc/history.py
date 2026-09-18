@@ -96,7 +96,7 @@ class HistoryManager:
         if d.get("online") and self._due(did,"storage",stamp):
             for x in d.get("storage",[]):self.db.execute("INSERT OR IGNORE INTO storage_metrics(timestamp,device_id,device,mount_point,filesystem,total_bytes,used_bytes,available_bytes,percent_used,read_only) VALUES(?,?,?,?,?,?,?,?,?,?)",(stamp,did,x.get("device"),x.get("mount_point") or x.get("path") or "unknown",x.get("filesystem"),x.get("total") or x.get("size"),x.get("used"),x.get("available"),x.get("percent"),int(bool(x.get("read_only")))))
         if d.get("online") and self._due(did,"integration",stamp):
-            allow={"adsb":{"aircraft","aircraft_with_positions","messages_per_second","positions_per_second","maximum_range_nm","strong_signal_percent"},"samba":{"active_sessions","unique_users","open_files"},"pi_hotspot":{"client_count","response_latency_ms"},"magicmirror":{"response_latency_ms","restart_count"},"desk_display":{"response_latency_ms"},"wireguard":{"latest_handshake_seconds","rx_bytes","tx_bytes"}}
+            allow={"adsb":{"aircraft","aircraft_with_positions","messages_per_second","positions_per_second","maximum_range_nm","strong_signal_percent"},"samba":{"active_sessions","unique_users","open_files"},"pi_hotspot":{"client_count","response_latency_ms"},"magicmirror":{"response_latency_ms","restart_count"},"desk_display":{"response_latency_ms"},"wireguard":{"latest_handshake_seconds","rx_bytes","tx_bytes"},"probe":{"response_latency_ms","failed_checks","checks_total"}}
             for name,status in d.get("integrations",{}).items():
                 data=status.get("data",{}) if isinstance(status,dict) else {}
                 for metric in allow.get(name,set()):

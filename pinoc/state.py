@@ -81,6 +81,19 @@ class PiNOCState:
                 device.integrations = copy.deepcopy(integrations)
                 device.applications.update(copy.deepcopy(integrations))
 
+    def set_integration(self, device_id: str, name: str, value: Any) -> None:
+        """Atomically merge one plugin result, preserving sibling integrations."""
+        with self._lock:
+            device = self._devices.get(device_id)
+            if device:
+                device.integrations = copy.deepcopy(device.integrations)
+                device.integrations[name] = copy.deepcopy(value)
+                existing = device.applications.get(name)
+                merged = copy.deepcopy(value)
+                if isinstance(existing, dict) and isinstance(merged, dict):
+                    merged.update(existing)
+                device.applications[name] = merged
+
     def legacy_snapshot(self) -> Any:
         with self._lock:
             return copy.deepcopy(self._legacy_snapshot)

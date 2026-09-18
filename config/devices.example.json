@@ -19,7 +19,22 @@
       ],
       "manageable_services": [
         "desk-display.service"
-      ]
+      ],
+      "integrations": {
+        "probe": {
+          "enabled": true,
+          "checks": [
+            {
+              "name": "console-health",
+              "kind": "http_get",
+              "url": "http://127.0.0.1:8088/health",
+              "timeout_seconds": 5,
+              "interval_seconds": 60,
+              "pattern": "\\\"status\\\":\\\"ok\\\""
+            }
+          ]
+        }
+      }
     },
     {
       "id": "piawaren",
