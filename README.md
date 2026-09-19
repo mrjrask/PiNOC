@@ -339,6 +339,24 @@ corresponding SQLite tables, newest rows first for alerts and events).
 `history.read` and the alerts kind requires `alerts.read` (token scopes
 `read:history` / `read:alerts`).
 
+A Prometheus endpoint is served at `GET /metrics` (text format 0.0.4) with
+fleet totals, per-device health/up/CPU/memory/disk/uptime, failed-service and
+media-error gauges, open alert counts by severity and state, and history
+database state. When authentication is enabled, create a read-only token and
+scrape with its Bearer credential:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: pinoc
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["pinoc.example:8401"]
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/pinoc-token
+```
+
 Management endpoints include alert acknowledgement/mute, cached refresh,
 allowlisted service operations, administrator-only reboot/shutdown, integration
 actions, maintenance/expected-offline state, settings, users, tokens, action
