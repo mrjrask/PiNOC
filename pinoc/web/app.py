@@ -111,6 +111,23 @@ def collect_prometheus_samples(state: PiNOCState, history: Any, include_alerts: 
     return samples
 
 
+def csv_safe(value: Any) -> Any:
+    """Neutralize spreadsheet formula evaluation for a single exported cell.
+
+    ``csv.writer`` quotes cells containing commas and quotes, but the viewing
+    application still evaluates text that begins with ``=``, ``+``, ``-``, or
+    ``@`` (CSV injection). A leading apostrophe forces the cell to be stored
+    as text. Numeric values pass through untouched so exported metrics keep
+    their natural representation.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    text = str(value)
+    return "'" + text if text[:1] in {"=", "+", "-", "@"} else text
+
+
 def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(config or {})
@@ -660,7 +677,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         def generate():
             buffer=io.StringIO();csv.writer(buffer).writerow(columns);yield buffer.getvalue()
             for row in rows:
-                buffer=io.StringIO();csv.writer(buffer).writerow(["" if row.get(c) is None else str(row.get(c)) for c in columns]);yield buffer.getvalue()
+                buffer=io.StringIO();csv.writer(buffer).writerow([csv_safe(row.get(c)) for c in columns]);yield buffer.getvalue()
         return Response(generate(),mimetype="text/csv",headers={"Content-Disposition":f'attachment; filename="pinoc-{kind}-{name}.csv"'})
 
     @app.get("/api/database/status")

@@ -1,4 +1,6 @@
 """Coverage for the history export API (/api/export/<kind>)."""
+import csv
+import io
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -99,6 +101,32 @@ class ExportApiTest(unittest.TestCase):
         self.assertEqual(self.client.get("/api/export/metrics?range=2w").status_code, 400)
         self.assertEqual(self.client.get("/api/export/metrics?format=xml").status_code, 400)
         self.assertEqual(self.client.get("/api/export/metrics?limit=abc").status_code, 400)
+
+    def test_csv_neutralizes_formula_prefixed_text(self):
+        hostile = ['=HYPERLINK("https://evil.example")', "+cmd|calc", "-cmd|'A!A'", "@SUM(A1)"]
+        for message in hostile:
+            self.db.execute("INSERT INTO events(timestamp,device_id,event_type,severity,message,metadata_json) VALUES(?,?,?,?,?,?)",
+                            (iso(120), "pi", "device_online", "info", message, "{}"))
+        text = self.client.get("/api/export/events?format=csv&range=24h").get_data(as_text=True)
+        rows = list(csv.reader(io.StringIO(text)))
+        messages = [row[rows[0].index("message")] for row in rows[1:]]
+        # Every formula-prefixed text cell is apostrophe-prefixed so a
+        # spreadsheet viewer stores it as text; ordinary text is untouched.
+        self.assertEqual(set(messages), {"'" + m for m in hostile} | {"Device returned online"})
+        # JSON exports return the raw values (formula evaluation is a
+        # spreadsheet-only concern).
+        payload = self.client.get("/api/export/events?format=json&range=24h").get_json()
+        self.assertIn('=HYPERLINK("https://evil.example")', [r["message"] for r in payload["rows"]])
+
+    def test_csv_keeps_numeric_cells_unmodified(self):
+        self.db.execute("INSERT INTO device_metrics(timestamp,device_id,cpu_percent) VALUES(?,?,?)",
+                        (iso(120), "pi", -5.5))
+        text = self.client.get("/api/export/metrics?format=csv&range=1h").get_data(as_text=True)
+        rows = list(csv.reader(io.StringIO(text)))
+        cpu = [row[rows[0].index("cpu_percent")] for row in rows[1:]]
+        # Negative numbers keep their natural representation: no apostrophe.
+        self.assertIn("-5.5", cpu)
+        self.assertNotIn([cell for cell in cpu if cell.startswith("'")], cpu)
 
     def test_unauthenticated_token_gets_401(self):
         with tempfile.TemporaryDirectory() as folder:
