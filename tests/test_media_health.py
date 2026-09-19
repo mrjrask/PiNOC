@@ -254,6 +254,21 @@ class HistoryTest(unittest.TestCase):
             self.assertEqual(db.scalar(
                 "SELECT COUNT(*) FROM alerts WHERE alert_type='media_io_errors' AND resolved_at IS NULL"), 1)
 
+    def test_unavailable_observability_with_empty_inventory_preserves_open_alert(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = Database(f"{folder}/db.sqlite")
+            self.assertTrue(db.initialize())
+            history = HistoryManager(db, {})
+            stamp = "2026-01-01T00:00:00+00:00"
+            history._alerts(self._device(stamp), stamp)
+            unavailable = self._device("2026-01-01T00:01:00+00:00")
+            unavailable["media"] = []
+            unavailable["collector_status"] = {
+                "media_errors": {"status": "unavailable"}}
+            history._alerts(unavailable, "2026-01-01T00:01:00+00:00")
+            self.assertEqual(db.scalar(
+                "SELECT COUNT(*) FROM alerts WHERE alert_type='media_io_errors' AND resolved_at IS NULL"), 1)
+
     def test_retention_removes_old_media_samples(self):
         with tempfile.TemporaryDirectory() as folder:
             db = Database(f"{folder}/db.sqlite")

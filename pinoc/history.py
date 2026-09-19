@@ -148,6 +148,11 @@ class HistoryManager:
         raid=d.get("applications",{}).get("raid",{}).get("status")
         if raid in ("DEGRADED","INACTIVE","MISSING"):active["raid_degraded"]=("critical",f"RAID is {raid.lower()}","raid")
         preserve=set()
+        media_observability=d.get("collector_status",{}).get("media_errors",{}).get("status")
+        if media_observability == "unavailable":
+            preserve.update(x["fingerprint"] for x in self.db.rows(
+                "SELECT fingerprint FROM alerts WHERE device_id=? AND alert_type='media_io_errors' AND resolved_at IS NULL",
+                (did,)))
         for medium in d.get("media",[]):
             if medium.get("media_errors"):active[f"media_io_errors:{medium.get('device')}"]=("critical",f"Storage media {medium.get('device')} is reporting I/O errors ({medium.get('io_errors')} logged)",medium.get("device"))
             elif medium.get("io_error_status") == "unknown":preserve.add(f"{did}:media_io_errors:{medium.get('device')}")
