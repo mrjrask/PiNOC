@@ -1,9 +1,9 @@
 """Flask application backed exclusively by the shared state cache."""
 from __future__ import annotations
 
-import csv, io, logging, os, secrets
+import csv, io, logging, os, secrets, time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from flask import Flask, Response, abort, jsonify, render_template, request, session, redirect, url_for, g, send_file
 
@@ -14,6 +14,91 @@ from pinoc.security import SecurityManager, install_security, redact, restore_re
 from pinoc.actions import ActionDispatcher, ActionError
 from pinoc.development import DevelopmentGateway, DevError, PROTOCOL_VERSION
 from pinoc.config_store import atomic_save, validate_config
+
+PROMETHEUS_HEALTH = {"healthy": 0, "maintenance": 0, "warning": 1, "degraded": 2, "critical": 3, "offline": 4}
+
+PROMETHEUS_HELP = {
+    "pinoc_fleet_devices_total": "Number of devices known to the fleet.",
+    "pinoc_fleet_devices_online": "Number of fleet devices with current telemetry.",
+    "pinoc_last_collection_timestamp_seconds": "Unix time of the last successful fleet collection.",
+    "pinoc_uptime_seconds": "PiNOC process uptime in seconds.",
+    "pinoc_device_up": "1 when the device is online, 0 otherwise.",
+    "pinoc_device_health": "Device health: 0 healthy, 1 warning, 2 degraded, 3 critical, 4 offline (maintenance is reported as healthy).",
+    "pinoc_device_cpu_utilization_percent": "Current CPU utilization in percent.",
+    "pinoc_device_cpu_temperature_celsius": "Current CPU temperature in Celsius.",
+    "pinoc_device_memory_percent": "Memory utilization in percent.",
+    "pinoc_device_uptime_seconds": "Device uptime in seconds.",
+    "pinoc_device_last_collection_timestamp_seconds": "Unix time of the device's last successful collection.",
+    "pinoc_device_services_failed": "Number of monitored services not running on the device.",
+    "pinoc_device_disk_used_percent": "Filesystem usage in percent per mount point.",
+    "pinoc_device_media_errors": "1 when storage media is reporting kernel I/O errors.",
+    "pinoc_alerts_total": "Open (unresolved) alerts by severity and state.",
+    "pinoc_database_state": "History database state: 1 for the current state among ok, unavailable, disabled.",
+}
+
+
+def escape_label(value: Any) -> str:
+    """Escape a label value for the Prometheus text exposition format."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def render_prometheus(samples: List[tuple]) -> str:
+    """Render (name, labels, value) tuples as Prometheus text format 0.0.4."""
+    lines: List[str] = []
+    typed: Set[str] = set()
+    for name, labels, value in samples:
+        if value is None or isinstance(value, bool):
+            continue
+        if name not in typed:
+            typed.add(name)
+            lines.append(f"# HELP {name} {PROMETHEUS_HELP.get(name, 'PiNOC metric.')}")
+            lines.append(f"# TYPE {name} gauge")
+        number = f"{value:g}" if isinstance(value, float) else str(value)
+        labels = "{" + ",".join(f'{key}="{escape_label(item)}"' for key, item in labels.items()) + "}" if labels else ""
+        lines.append(f"{name}{labels} {number}")
+    return "\n".join(lines)
+
+
+def collect_prometheus_samples(state: PiNOCState, history: Any) -> List[tuple]:
+    """Gauge samples for the /metrics endpoint from the shared state cache."""
+    samples: List[tuple] = []
+    summary = state.summary()
+    samples.append(("pinoc_fleet_devices_total", {}, float(summary["devices"])))
+    samples.append(("pinoc_fleet_devices_online", {}, float(summary["online"])))
+    if summary.get("started_at"):
+        samples.append(("pinoc_uptime_seconds", {}, max(0, int(time.time() - datetime.fromisoformat(summary["started_at"]).timestamp()))))
+    if summary.get("last_collection"):
+        samples.append(("pinoc_last_collection_timestamp_seconds", {}, int(datetime.fromisoformat(summary["last_collection"]).timestamp())))
+    for device in state.devices():
+        labels = {"device": device.get("id") or device.get("hostname") or "unknown"}
+        samples.append(("pinoc_device_up", labels, 1.0 if device.get("online") else 0.0))
+        samples.append(("pinoc_device_health", labels, float(PROMETHEUS_HEALTH.get(device.get("health"), 4))))
+        cpu = device.get("cpu") or {}
+        samples.append(("pinoc_device_cpu_utilization_percent", labels, cpu.get("utilization_percent")))
+        samples.append(("pinoc_device_cpu_temperature_celsius", labels, cpu.get("temperature_c")))
+        samples.append(("pinoc_device_memory_percent", labels, (device.get("memory") or {}).get("percent")))
+        samples.append(("pinoc_device_uptime_seconds", labels, device.get("uptime_seconds")))
+        if device.get("last_successful_collection"):
+            samples.append(("pinoc_device_last_collection_timestamp_seconds", labels, int(datetime.fromisoformat(device["last_successful_collection"]).timestamp())))
+        samples.append(("pinoc_device_services_failed", labels, float(
+            sum(1 for service in device.get("services", []) if service.get("state") in ("failed", "inactive", "stopped")))))
+        for disk in device.get("storage", []):
+            mount = disk.get("mount_point") or disk.get("path")
+            if mount and disk.get("percent") is not None:
+                samples.append(("pinoc_device_disk_used_percent", {**labels, "mount": mount}, float(disk["percent"])))
+        for medium in device.get("media", []):
+            samples.append(("pinoc_device_media_errors", {**labels, "medium": medium.get("device") or "unknown"},
+                            1.0 if medium.get("media_errors") else 0.0))
+    alert_counts: Dict[tuple, int] = {}
+    for alert in state.alerts():
+        key = (str(alert.get("severity") or "info"), str(alert.get("state") or "active"))
+        alert_counts[key] = alert_counts.get(key, 0) + 1
+    for (severity, alert_state), count in sorted(alert_counts.items()):
+        samples.append(("pinoc_alerts_total", {"severity": severity, "state": alert_state}, float(count)))
+    database_state = history.db.status()["status"] if history else "disabled"
+    for candidate in ("ok", "unavailable", "disabled"):
+        samples.append(("pinoc_database_state", {"state": candidate}, 1.0 if database_state == candidate else 0.0))
+    return samples
 
 
 def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None) -> Flask:
@@ -35,7 +120,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     artifact_total=int(app.config.get("DEV_CONFIG",{}).get("artifact_total_limit_bytes",25*1024*1024))
     app.config["MAX_CONTENT_LENGTH"]=int(app.config.get("DEV_AGENT_MAX_REQUEST_BYTES",artifact_total*4//3+1024*1024))
     app.config["TOKEN_SCOPE_PERMISSIONS"]={
-        "api_session":"view",
+        "api_session":"view","prometheus_metrics":"view",
         "api_status":"view","api_overview":"view","api_devices":"view","api_device":"view","api_integrations":"view",
         "api_device_integrations":"view","api_device_integration":"view","api_adsb":"view","api_displays":"view",
         "api_deployments":"view","api_software":"view","api_network_inventory":"view","api_services":"view",
@@ -287,6 +372,13 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
                         "warnings": summary["warnings"], "degraded": summary["degraded"],
                         "critical": summary["critical"], "offline": summary["offline"],
                         "collectors": "ok" if summary["last_collection"] else "starting","database":database}), response_code
+
+    @app.get("/metrics")
+    def prometheus_metrics():
+        if security is not None and not security.allowed(g.identity, "view"):
+            return Response("permission denied", status=403, content_type="text/plain; charset=utf-8")
+        body = render_prometheus(collect_prometheus_samples(state, history)) + "\n"
+        return Response(body, content_type="text/plain; version=0.0.4; charset=utf-8")
 
     @app.get("/api/status")
     def api_status():
