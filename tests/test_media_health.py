@@ -1,10 +1,12 @@
 """Coverage for storage-media (SD card / eMMC / disk) wear and I/O-error health."""
+import os
 import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from pinoc.collectors.fleet import FleetCollector, parse_media
+from pinoc.collectors.fleet import SCRIPT, FleetCollector, parse_media, sections
 from pinoc.database import Database
 from pinoc.device_config import DeviceConfig
 from pinoc.health import evaluate
@@ -134,6 +136,29 @@ __SERVICES__
 __UNITS__
 ssh.service enabled
 """
+
+    def test_journal_success_with_privilege_diagnostic_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            commands = Path(folder)
+            dmesg = commands / "dmesg"
+            dmesg.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            journalctl = commands / "journalctl"
+            journalctl.write_text(
+                "#!/bin/sh\n"
+                "echo 'Hint: You are currently not seeing messages from other users.' >&2\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            dmesg.chmod(0o755)
+            journalctl.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{commands}:{env['PATH']}"
+
+            result = subprocess.run(
+                ["sh"], input=SCRIPT, text=True, capture_output=True, env=env, check=True
+            )
+
+        self.assertEqual(sections(result.stdout)["IOERRORSTATUS"], "unavailable")
 
     def test_media_is_collected_and_health_degrades(self):
         device = DeviceConfig(id="pi", hostname="pi", friendly_name="Pi",

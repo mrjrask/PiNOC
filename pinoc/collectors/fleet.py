@@ -33,7 +33,18 @@ echo __MOUNTS__; cat /proc/mounts
 echo __DISKSTATS__; cat /proc/diskstats 2>/dev/null
 echo __IOERRORS__
 kernel_log=$(dmesg 2>/dev/null); kernel_log_status=$?
-if [ "$kernel_log_status" -ne 0 ]; then kernel_log=$(journalctl -k --no-pager -n 500 2>/dev/null); kernel_log_status=$?; fi
+if [ "$kernel_log_status" -ne 0 ]; then
+    journal_stderr=$(mktemp "${TMPDIR:-/tmp}/pinoc-journal.XXXXXX" 2>/dev/null)
+    if [ -n "$journal_stderr" ]; then
+        kernel_log=$(journalctl -k --no-pager -n 500 2>"$journal_stderr"); kernel_log_status=$?
+        # journalctl may return success while only reporting a privilege or
+        # no-journal diagnostic.  Any diagnostic makes a clean result unsafe.
+        [ -s "$journal_stderr" ] && kernel_log_status=1
+        rm -f "$journal_stderr"
+    else
+        kernel_log_status=1
+    fi
+fi
 if [ "$kernel_log_status" -eq 0 ]; then printf '%s\n' "$kernel_log" | grep -iE "i/o error|blk_update_request|EXT4-fs error|sdhci|mmcblk.*error|bad block" | tail -20; fi
 echo __IOERRORSTATUS__; if [ "$kernel_log_status" -eq 0 ]; then echo available; else echo unavailable; fi
 echo __ROUTE__; ip -j route show default 2>/dev/null; echo __ADDR__; ip -j address show 2>/dev/null
