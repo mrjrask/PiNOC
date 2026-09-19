@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from pinoc.collectors.fleet import SCRIPT, FleetCollector, parse_media, sections
+from pinoc.collectors.fleet import SCRIPT, FleetCollector, parse_devresolve, parse_media, sections
 from pinoc.database import Database
 from pinoc.device_config import DeviceConfig
 from pinoc.health import evaluate
@@ -70,6 +70,36 @@ class ParseMediaTest(unittest.TestCase):
     def test_pseudo_filesystems_are_ignored(self):
         storage = [{"device": "tmpfs", "mount_point": "/run"}]
         self.assertEqual(parse_media(DISKSTATS, "", storage), [])
+
+    def test_root_alias_is_dropped_without_resolution(self):
+        storage = [{"device": "/dev/root", "mount_point": "/", "filesystem": "ext4"}]
+        # Without the resolved backing device, "root" matches no diskstats row.
+        self.assertEqual(parse_media(DISKSTATS, "", storage), [])
+
+    def test_resolves_root_alias_to_backing_partition(self):
+        storage = [{"device": "/dev/root", "mount_point": "/", "filesystem": "ext4"}]
+        media = parse_media(DISKSTATS, "", storage, devresolve={"/dev/root": "/dev/mmcblk0p1"})
+        self.assertEqual([x["device"] for x in media], ["mmcblk0"])
+        self.assertEqual(media[0]["mount_points"], ["/"])
+
+    def test_resolves_mapper_alias_to_dm_device(self):
+        diskstats = " 253       0 dm-0 10 0 5000 100 20 0 8000 200 0 500 0\n"
+        storage = [{"device": "/dev/mapper/vg-root", "mount_point": "/", "filesystem": "ext4"}]
+        self.assertEqual(parse_media(diskstats, "", storage), [])
+        media = parse_media(diskstats, "", storage, devresolve={"/dev/mapper/vg-root": "/dev/dm-0"})
+        self.assertEqual([x["device"] for x in media], ["dm-0"])
+        self.assertEqual(media[0]["mount_points"], ["/"])
+
+    def test_resolution_is_ignored_outside_dev(self):
+        storage = [{"device": "/dev/sda1", "mount_point": "/data", "filesystem": "ext4"}]
+        media = parse_media(DISKSTATS, "", storage, devresolve={"/dev/sda1": "/mnt/weird"})
+        self.assertEqual([x["device"] for x in media], ["sda"])
+
+    def test_parse_devresolve_maps_sources(self):
+        text = "/dev/root /dev/mmcblk0p1\n/dev/mapper/vg-root /dev/dm-0\n"
+        self.assertEqual(parse_devresolve(text),
+                         {"/dev/root": "/dev/mmcblk0p1", "/dev/mapper/vg-root": "/dev/dm-0"})
+        self.assertEqual(parse_devresolve(""), {})
 
 
 class HealthTest(unittest.TestCase):
@@ -203,6 +233,26 @@ ssh.service enabled
         self.assertEqual(snapshot.media[0]["io_error_status"], "unknown")
         self.assertEqual(snapshot.collector_status["media_errors"]["status"], "unavailable")
         self.assertEqual(snapshot.health, "warning")
+
+    def test_script_resolves_mount_source_aliases(self):
+        self.assertIn("echo __DEVRESOLVE__", SCRIPT)
+        # Raspberry Pi OS reports the root filesystem as /dev/root; the
+        # resolver maps it to the real partition so diskstats still match.
+        output = (self.SCRIPT_OUTPUT
+                  .replace("/dev/mmcblk0p2 ext4 100000 50000 50000 50% /",
+                           "/dev/root ext4 100000 50000 50000 50% /")
+                  .replace("/dev/mmcblk0p2 / ext4 rw 0 0", "/dev/root / ext4 rw 0 0")
+                  .replace("__IOERRORS__\n", "__DEVRESOLVE__\n/dev/root /dev/mmcblk0p2\n__IOERRORS__\n"))
+        device = DeviceConfig(id="pi", hostname="pi", friendly_name="Pi",
+                              address="192.168.1.10", collection_method="ssh")
+
+        def runner(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, output, "")
+
+        snapshot = FleetCollector([device], runner=runner, timeout=1).collect_device(device)
+        self.assertTrue(snapshot.media)
+        self.assertEqual(snapshot.media[0]["device"], "mmcblk0")
+        self.assertEqual(snapshot.media[0]["mount_points"], ["/"])
 
 
 class HistoryTest(unittest.TestCase):

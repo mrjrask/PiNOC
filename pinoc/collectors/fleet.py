@@ -29,6 +29,8 @@ echo __TEMP__; for f in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/h
 echo __THROTTLED__; command -v vcgencmd >/dev/null && vcgencmd get_throttled
 echo __MEM__; cat /proc/meminfo
 echo __DF__; df -PT -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null
+echo __DEVRESOLVE__
+df -PT -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null | awk 'NR>1 && $1 ~ /^\/dev\//{print $1}' | sort -u | while IFS= read -r src; do printf '%s %s\n' "$src" "$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")"; done
 echo __MOUNTS__; cat /proc/mounts
 echo __DISKSTATS__; cat /proc/diskstats 2>/dev/null
 echo __IOERRORS__
@@ -127,13 +129,34 @@ def _whole_disk(name: str) -> List[str]:
     return []
 
 
+def parse_devresolve(text: str) -> Dict[str, str]:
+    """Map df filesystem sources to their resolved backing device paths.
+
+    df reports mount sources verbatim, but some sources are aliases that
+    /proc/diskstats does not use: /dev/root on Raspberry Pi OS points at the
+    root partition, and /dev/mapper/* points at /dev/dm-N.  The collection
+    script resolves each /dev/* source on the device, so media counters can
+    be matched against the real block device name.
+    """
+    result: Dict[str, str] = {}
+    for line in text.splitlines():
+        bits = line.split()
+        if len(bits) >= 2:
+            result[bits[0]] = bits[-1]
+    return result
+
+
 def parse_media(diskstats: str, io_errors: str, storage: List[Dict[str, Any]],
-                io_errors_available: bool = True) -> List[Dict[str, Any]]:
+                io_errors_available: bool = True,
+                devresolve: Dict[str, str] = {}) -> List[Dict[str, Any]]:
     """Per-medium media wear/I-O-error status for block-backed filesystems.
 
     Best effort by design: non-root collectors (the normal case) may not read
     kernel logs, and unusual systems may lack matching /proc/diskstats rows;
     either way the capability degrades to an empty list instead of an error.
+    Mount sources that df reports as aliases (/dev/root, /dev/mapper/*) are
+    resolved to their backing block devices via ``devresolve`` before the
+    diskstats lookup so aliased media still produce telemetry.
     """
     counters: Dict[str, Dict[str, int]] = {}
     for line in diskstats.splitlines():
@@ -153,6 +176,12 @@ def parse_media(diskstats: str, io_errors: str, storage: List[Dict[str, Any]],
         if not device or not mount or device.startswith(("tmpfs", "devtmpfs", "overlay", "squashfs")):
             continue
         base = device.rsplit("/", 1)[-1]
+        # df may report a mount-source alias that /proc/diskstats does not
+        # name (e.g. /dev/root on Raspberry Pi OS, /dev/mapper/*).  Use the
+        # resolved backing block device so its counters still match.
+        resolved = devresolve.get(device)
+        if resolved and resolved.startswith("/dev/"):
+            base = resolved.rsplit("/", 1)[-1]
         # Also track the whole-disk parent (e.g. mmcblk0p2 -> mmcblk0) so wear
         # is reported once per physical medium.
         names = [base, *_whole_disk(base)]
@@ -267,7 +296,8 @@ class FleetCollector:
             if network.get("rx_bytes") is not None: self.previous_net[device.id]=(stamp,network["rx_bytes"],network["tx_bytes"])
             storage=parse_storage(data.get("DF",""),data.get("MOUNTS",""))
             io_errors_available=data.get("IOERRORSTATUS") == "available"
-            media=parse_media(data.get("DISKSTATS",""),data.get("IOERRORS",""),storage,io_errors_available)
+            media=parse_media(data.get("DISKSTATS",""),data.get("IOERRORS",""),storage,io_errors_available,
+                              parse_devresolve(data.get("DEVRESOLVE","")))
             raw={"id":device.id,"hostname":device.hostname,"friendly_name":device.friendly_name,"address":device.address,
                  "roles":list(device.roles),"tags":list(device.tags),"collection_method":device.collection_method,"notes":device.notes,
                  "ssh_user":device.ssh_user,"ssh_port":device.ssh_port,"monitored_services":list(device.monitored_services),
