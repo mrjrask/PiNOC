@@ -61,8 +61,13 @@ def render_prometheus(samples: List[tuple]) -> str:
     return "\n".join(lines)
 
 
-def collect_prometheus_samples(state: PiNOCState, history: Any) -> List[tuple]:
-    """Gauge samples for the /metrics endpoint from the shared state cache."""
+def collect_prometheus_samples(state: PiNOCState, history: Any, include_alerts: bool = True) -> List[tuple]:
+    """Gauge samples for the /metrics endpoint from the shared state cache.
+
+    ``include_alerts`` mirrors the ``alerts.read`` permission: a token that
+    only reads the fleet must not export the alert series, matching the scope
+    boundary enforced by ``/api/alerts`` and ``/api/overview``.
+    """
     samples: List[tuple] = []
     summary = state.summary()
     samples.append(("pinoc_fleet_devices_total", {}, float(summary["devices"])))
@@ -82,8 +87,10 @@ def collect_prometheus_samples(state: PiNOCState, history: Any) -> List[tuple]:
         samples.append(("pinoc_device_uptime_seconds", labels, device.get("uptime_seconds")))
         if device.get("last_successful_collection"):
             samples.append(("pinoc_device_last_collection_timestamp_seconds", labels, int(datetime.fromisoformat(device["last_successful_collection"]).timestamp())))
+        # The health evaluator and alert logic treat every state except
+        # running/activating as failed (deactivating, unknown, ...).
         samples.append(("pinoc_device_services_failed", labels, float(
-            sum(1 for service in device.get("services", []) if service.get("state") in ("failed", "inactive", "stopped")))))
+            sum(1 for service in device.get("services", []) if service.get("state") not in ("running", "activating")))))
         for disk in device.get("storage", []):
             mount = disk.get("mount_point") or disk.get("path")
             if mount and disk.get("percent") is not None:
@@ -91,12 +98,13 @@ def collect_prometheus_samples(state: PiNOCState, history: Any) -> List[tuple]:
         for medium in device.get("media", []):
             samples.append(("pinoc_device_media_errors", {**labels, "medium": medium.get("device") or "unknown"},
                             1.0 if medium.get("media_errors") else 0.0))
-    alert_counts: Dict[tuple, int] = {}
-    for alert in state.alerts():
-        key = (str(alert.get("severity") or "info"), str(alert.get("state") or "active"))
-        alert_counts[key] = alert_counts.get(key, 0) + 1
-    for (severity, alert_state), count in sorted(alert_counts.items()):
-        samples.append(("pinoc_alerts_total", {"severity": severity, "state": alert_state}, float(count)))
+    if include_alerts:
+        alert_counts: Dict[tuple, int] = {}
+        for alert in state.alerts():
+            key = (str(alert.get("severity") or "info"), str(alert.get("state") or "active"))
+            alert_counts[key] = alert_counts.get(key, 0) + 1
+        for (severity, alert_state), count in sorted(alert_counts.items()):
+            samples.append(("pinoc_alerts_total", {"severity": severity, "state": alert_state}, float(count)))
     database_state = history.db.status()["status"] if history else "disabled"
     for candidate in ("ok", "unavailable", "disabled"):
         samples.append(("pinoc_database_state", {"state": candidate}, 1.0 if database_state == candidate else 0.0))
@@ -387,7 +395,8 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def prometheus_metrics():
         if security is not None and not security.allowed(g.identity, "view"):
             return Response("permission denied", status=403, content_type="text/plain; charset=utf-8")
-        body = render_prometheus(collect_prometheus_samples(state, history)) + "\n"
+        include_alerts = security is None or security.allowed(g.identity, "alerts.read")
+        body = render_prometheus(collect_prometheus_samples(state, history, include_alerts)) + "\n"
         return Response(body, content_type="text/plain; version=0.0.4; charset=utf-8")
 
     @app.get("/api/status")
