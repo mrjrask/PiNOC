@@ -77,6 +77,18 @@ class PlaybookValidationTest(unittest.TestCase):
         validate_config({"polling": {"fleet_seconds": 10}, "devices": [], "playbooks": [sample_playbook()]}, Path("."))
 
 
+class ShippedConfigRunbookTest(unittest.TestCase):
+    def test_offline_runbook_offers_only_actions_valid_while_offline(self):
+        root = Path(__file__).resolve().parents[1]
+        config = json.loads((root / "config.json").read_text(encoding="utf-8"))
+        offline = [p for p in load_playbooks(config) if p["alert_type"] == "device_offline"]
+        self.assertEqual([p["id"] for p in offline], ["device-offline"])
+        # ActionDispatcher.validate() rejects every action except
+        # device.refresh while the device is offline, so the runbook must not
+        # offer any other (a reboot button would always fail).
+        self.assertEqual(offline[0]["actions"], ["device.refresh"])
+
+
 class PlaybookApiTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -172,6 +184,34 @@ process.exit(fail?1:0);
         result = subprocess.run(["node", "-e", probe, json.dumps(cases)], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.count("SAFE"), len(cases))
+
+
+class RunbookGateTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "node not available")
+    def test_strong_actions_require_confirmation(self):
+        js_path = Path(__file__).resolve().parents[1] / "pinoc" / "web" / "static" / "app.js"
+        probe = r"""const fs=require('fs');
+eval(fs.readFileSync(PROBE_PATH,'utf8')+';globalThis.__P=PiNOC;');
+const g=globalThis.__P.runbookGate;
+let fail=0;
+const expect=(action,deviceId,resource,expected)=>{
+ const got=g(action,deviceId,resource);
+ const ok=expected===null?got===null:(got&&got.type===expected.type&&(!expected.match||got.match===expected.match));
+ console.log(ok?'OK':'GATE',action,JSON.stringify(got));
+ if(!ok)fail++;
+};
+expect('service.stop','pi','demo.service',{type:'prompt',match:'demo.service'});
+expect('device.reboot','pi','',{type:'confirm'});
+expect('device.shutdown','pi','',{type:'prompt',match:'pi'});
+expect('service.start','pi','demo.service',null);
+expect('service.restart','pi','demo.service',null);
+expect('device.refresh','pi','',null);
+expect('package.check','pi','',null);
+process.exit(fail?1:0);
+""".replace("PROBE_PATH", repr(str(js_path)))
+        result = subprocess.run(["node", "-e", probe], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("OK"), 7)
 
 
 if __name__ == "__main__":
