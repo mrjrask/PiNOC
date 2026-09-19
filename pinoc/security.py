@@ -65,6 +65,26 @@ class SlidingWindow:
             return len(times)
     def clear(self,key):
         with self.lock:self.entries.pop(key,None)
+    def allow(self,key,limit)->bool:
+        """Atomically count-and-record one request.
+
+        Returns True (recording the request) while it is within ``limit`` for
+        the window.  The decision and the increment happen in a single locked
+        operation, so concurrent requests from one key can never all observe
+        a stale count and pass the limit.
+        """
+        now=time.monotonic()
+        with self.lock:
+            times=[t for t in self.entries.get(key,()) if now-t<self.window]
+            if len(times)>=int(limit):
+                if times:self.entries[key]=times
+                else:self.entries.pop(key,None)
+                return False
+            times.append(now)
+            if key not in self.entries and len(self.entries)>=self.max_keys:
+                self.entries.pop(min(self.entries,key=lambda entry:self.entries[entry][0]),None)
+            self.entries[key]=times
+            return True
 
 class SecurityManager:
     def __init__(self,db,enabled=False,rate_limit=None):
@@ -76,11 +96,24 @@ class SecurityManager:
         self.lockout_seconds=float(limit["lockout_seconds"])
         self.login_attempts=SlidingWindow(self.login_window)
         self.login_lockouts={}
+        self.max_lockout_keys=10000
         self.login_source_attempts=SlidingWindow(self.login_window)
         self.login_source_lockouts={}
         self.api_window=float(limit["api_window_seconds"])
         self.api_max_unauthenticated=int(limit["api_max_unauthenticated"])
         self.api_requests=SlidingWindow(self.api_window)
+    def _set_login_lockout(self,lockouts,key,now):
+        """Record a lockout while keeping the map bounded.
+
+        Expired entries are pruned first and, once the key cap is reached, the
+        entry with the earliest deadline (expired entries first) is evicted, so
+        a hostile client using many distinct keys cannot grow process state
+        without bound.
+        """
+        if len(lockouts)>=self.max_lockout_keys:
+            for expired in [k for k,deadline in lockouts.items() if deadline<now]:lockouts.pop(expired,None)
+            if len(lockouts)>=self.max_lockout_keys:lockouts.pop(min(lockouts,key=lockouts.get),None)
+        lockouts[key]=now+self.lockout_seconds
     def create_user(self,username,password,role="viewer"):
         username=username.strip()
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",username) or role not in ROLES or len(password)<10: raise ValueError("invalid username, role, or password (minimum 10 characters)")
@@ -108,9 +141,9 @@ class SecurityManager:
                 attempts=self.login_attempts.record(key)
                 source_attempts=self.login_source_attempts.record(ip)
                 if attempts>=self.login_max_failed and now>=self.login_lockouts.get(key,0.0):
-                    self.login_lockouts[key]=now+self.lockout_seconds;locked=True;lockout_scope="account"
+                    self._set_login_lockout(self.login_lockouts,key,now);locked=True;lockout_scope="account"
                 if source_attempts>=self.login_max_failed_per_source and now>=self.login_source_lockouts.get(ip,0.0):
-                    self.login_source_lockouts[ip]=now+self.lockout_seconds;locked=True;lockout_scope="source"
+                    self._set_login_lockout(self.login_source_lockouts,ip,now);locked=True;lockout_scope="source"
             if locked:
                 max_failed=self.login_max_failed_per_source if lockout_scope=="source" else self.login_max_failed
                 self.db.execute("INSERT INTO audit_records(timestamp,user,role,source_ip,device_id,action,target,parameters_json,authorization_result,execution_result,exit_code,duration_ms,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(utcnow(),username,"viewer",ip,None,"auth.lockout",None,json.dumps({"scope":lockout_scope,"window_seconds":self.login_window,"max_failed":max_failed,"lockout_seconds":self.lockout_seconds},sort_keys=True),"denied","failed",None,None,"login rate limit exceeded"))
@@ -166,12 +199,14 @@ def install_security(app,manager):
         if manager.enabled and not g.identity and not public:
             if request.path.startswith("/api/"):
                 ip=request.remote_addr or "unknown"
-                if manager.api_requests.count(ip)>=manager.api_max_unauthenticated:
-                    response=jsonify({"error":"rate limit exceeded"});response.status_code=429
-                    response.headers["Retry-After"]=str(max(1,int(manager.api_window)))
-                    return response
-                manager.api_requests.record(ip)
-                return jsonify({"error":"authentication required"}),401
+                # The decision and the increment are one atomic operation so
+                # concurrent requests from one address cannot all read a stale
+                # count and pass the limit.
+                if manager.api_requests.allow(ip,manager.api_max_unauthenticated):
+                    return jsonify({"error":"authentication required"}),401
+                response=jsonify({"error":"rate limit exceeded"});response.status_code=429
+                response.headers["Retry-After"]=str(max(1,int(manager.api_window)))
+                return response
             return redirect(url_for("login",next=request.full_path))
         permission=app.config.get("TOKEN_SCOPE_PERMISSIONS",{}).get(request.endpoint)
         if permission and g.identity and g.identity.get("token") and not manager.allowed(g.identity,permission):
