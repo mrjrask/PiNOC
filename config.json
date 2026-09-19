@@ -12,6 +12,7 @@
     "rate_limit": {
       "login_window_seconds": 300,
       "login_max_failed": 5,
+      "login_max_failed_per_source": 20,
       "lockout_seconds": 900,
       "api_window_seconds": 60,
       "api_max_unauthenticated": 120

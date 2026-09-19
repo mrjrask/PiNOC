@@ -37,7 +37,7 @@ def restore_redacted(value:Any,current:Any,secret:bool=False)->Any:
 
 def hash_token(secret:str)->str:return hashlib.sha256(secret.encode()).hexdigest()
 
-DEFAULT_RATE_LIMIT={"login_window_seconds":300,"login_max_failed":5,"lockout_seconds":900,"api_window_seconds":60,"api_max_unauthenticated":120}
+DEFAULT_RATE_LIMIT={"login_window_seconds":300,"login_max_failed":5,"login_max_failed_per_source":20,"lockout_seconds":900,"api_window_seconds":60,"api_max_unauthenticated":120}
 
 class SlidingWindow:
     """Bounded per-key sliding-window counter.
@@ -72,9 +72,12 @@ class SecurityManager:
         limit={**DEFAULT_RATE_LIMIT,**(rate_limit or {})}
         self.login_window=float(limit["login_window_seconds"])
         self.login_max_failed=int(limit["login_max_failed"])
+        self.login_max_failed_per_source=int(limit["login_max_failed_per_source"])
         self.lockout_seconds=float(limit["lockout_seconds"])
         self.login_attempts=SlidingWindow(self.login_window)
         self.login_lockouts={}
+        self.login_source_attempts=SlidingWindow(self.login_window)
+        self.login_source_lockouts={}
         self.api_window=float(limit["api_window_seconds"])
         self.api_max_unauthenticated=int(limit["api_max_unauthenticated"])
         self.api_requests=SlidingWindow(self.api_window)
@@ -85,26 +88,32 @@ class SecurityManager:
     def authenticate(self,username,password,ip):
         """Return ``(user_row, error, locked)``.
 
-        ``locked`` is true while the ``(ip, username)`` pair is inside a
-        lockout, including the failed attempt that triggered it; a successful
-        login clears both the failure window and any pending lockout.
+        ``locked`` is true while either the ``(ip, username)`` pair or source
+        address is inside a lockout, including the failed attempt that
+        triggered it. A successful login clears the per-account state; source
+        failures remain bounded across usernames to prevent username rotation.
         """
         username=(username or "").strip();ip=ip or "unknown"
         key=(ip,username.lower());now=time.monotonic()
         with self.lock:
-            if now<self.login_lockouts.get(key,0.0):return None,"Too many login attempts; try again later.",True
+            if now<self.login_lockouts.get(key,0.0) or now<self.login_source_lockouts.get(ip,0.0):return None,"Too many login attempts; try again later.",True
         rows=self.db.rows("SELECT * FROM users WHERE username=? AND enabled=1",(username,)); row=rows[0] if rows else None
         valid=bool(row and check_password_hash(row["password_hash"],password))
         if not valid:
             # Perform equivalent hash work and return one generic message.
             if not row: check_password_hash(generate_password_hash("not-the-password"),password)
             locked=False
+            lockout_scope=None
             with self.lock:
                 attempts=self.login_attempts.record(key)
+                source_attempts=self.login_source_attempts.record(ip)
                 if attempts>=self.login_max_failed and now>=self.login_lockouts.get(key,0.0):
-                    self.login_lockouts[key]=now+self.lockout_seconds;locked=True
+                    self.login_lockouts[key]=now+self.lockout_seconds;locked=True;lockout_scope="account"
+                if source_attempts>=self.login_max_failed_per_source and now>=self.login_source_lockouts.get(ip,0.0):
+                    self.login_source_lockouts[ip]=now+self.lockout_seconds;locked=True;lockout_scope="source"
             if locked:
-                self.db.execute("INSERT INTO audit_records(timestamp,user,role,source_ip,device_id,action,target,parameters_json,authorization_result,execution_result,exit_code,duration_ms,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(utcnow(),username,"viewer",ip,None,"auth.lockout",None,json.dumps({"window_seconds":self.login_window,"max_failed":self.login_max_failed,"lockout_seconds":self.lockout_seconds},sort_keys=True),"denied","failed",None,None,"login rate limit exceeded"))
+                max_failed=self.login_max_failed_per_source if lockout_scope=="source" else self.login_max_failed
+                self.db.execute("INSERT INTO audit_records(timestamp,user,role,source_ip,device_id,action,target,parameters_json,authorization_result,execution_result,exit_code,duration_ms,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(utcnow(),username,"viewer",ip,None,"auth.lockout",None,json.dumps({"scope":lockout_scope,"window_seconds":self.login_window,"max_failed":max_failed,"lockout_seconds":self.lockout_seconds},sort_keys=True),"denied","failed",None,None,"login rate limit exceeded"))
                 return None,"Too many login attempts; try again later.",True
             return None,"Invalid username or password.",False
         with self.lock:

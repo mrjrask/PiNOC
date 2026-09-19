@@ -4,7 +4,7 @@ from pathlib import Path
 from pinoc.device_config import load_devices
 from pinoc.playbooks import validate_playbooks
 
-RATE_LIMIT_RULES={"login_window_seconds":(1,86400),"login_max_failed":(1,100),"lockout_seconds":(1,86400),"api_window_seconds":(1,86400),"api_max_unauthenticated":(1,10000)}
+RATE_LIMIT_RULES={"login_window_seconds":(1,86400),"login_max_failed":(1,100),"login_max_failed_per_source":(1,10000),"lockout_seconds":(1,86400),"api_window_seconds":(1,86400),"api_max_unauthenticated":(1,10000)}
 
 def validate_security(value):
     security=value.get("security",{})

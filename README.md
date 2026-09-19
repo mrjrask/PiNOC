@@ -412,11 +412,14 @@ development tokens. Browser sessions use HTTP-only, SameSite cookies; enable
 `PINOC_SECURE_COOKIE=1` only when HTTPS is actually in use.
 
 Failed logins are rate limited per source address and username: after
-`security.rate_limit.login_max_failed` failures within `login_window_seconds`,
-the pair is locked for `lockout_seconds` and the login endpoint answers `429`
-instead of rendering the form. The lockout transition writes a single
-`auth.lockout` audit record, and a successful login clears the failure window
-and any pending lockout. When authentication is enabled, unauthenticated
+`security.rate_limit.login_max_failed` failures for one address and username, or
+`login_max_failed_per_source` failures from one address across all usernames,
+within `login_window_seconds`, the matching account key or source is locked for
+`lockout_seconds` and the login endpoint answers `429` instead of rendering the
+form. The lockout transition writes a single `auth.lockout` audit record. A
+successful login clears its per-account failure window and lockout; source-wide
+failures remain in their sliding window so rotating usernames cannot bypass the
+CPU safeguard. When authentication is enabled, unauthenticated
 `/api/*` requests are limited to `api_max_unauthenticated` per
 `api_window_seconds` per address and then receive `429` with a `Retry-After`
 header before the usual `401`; token and session requests are not counted
