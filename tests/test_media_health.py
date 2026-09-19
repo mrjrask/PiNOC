@@ -122,6 +122,8 @@ __DISKSTATS__
 {DISKSTATS}
 __IOERRORS__
 {IO_ERRORS}
+__IOERRORSTATUS__
+available
 __ROUTE__
 __ADDR__
 __NET__
@@ -161,6 +163,22 @@ ssh.service enabled
         self.assertEqual(snapshot.media, [])
         self.assertEqual(snapshot.health, "healthy")
 
+    def test_unreadable_kernel_logs_are_unknown(self):
+        output = self.SCRIPT_OUTPUT.replace(IO_ERRORS, "").replace(
+            "__IOERRORSTATUS__\navailable", "__IOERRORSTATUS__\nunavailable")
+        device = DeviceConfig(id="pi", hostname="pi", friendly_name="Pi",
+                              address="192.168.1.10", collection_method="ssh")
+
+        def runner(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, output, "")
+
+        snapshot = FleetCollector([device], runner=runner, timeout=1).collect_device(device)
+        self.assertIsNone(snapshot.media[0]["media_errors"])
+        self.assertIsNone(snapshot.media[0]["io_errors"])
+        self.assertEqual(snapshot.media[0]["io_error_status"], "unknown")
+        self.assertEqual(snapshot.collector_status["media_errors"]["status"], "unavailable")
+        self.assertEqual(snapshot.health, "warning")
+
 
 class HistoryTest(unittest.TestCase):
     def _device(self, stamp):
@@ -192,6 +210,24 @@ class HistoryTest(unittest.TestCase):
             history._alerts(recovered, "2026-01-01T00:01:00+00:00")
             self.assertEqual(db.scalar(
                 "SELECT COUNT(*) FROM alerts WHERE resolved_at IS NULL"), 0)
+
+    def test_unknown_observability_does_not_resolve_open_alert(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = Database(f"{folder}/db.sqlite")
+            self.assertTrue(db.initialize())
+            history = HistoryManager(db, {})
+            stamp = "2026-01-01T00:00:00+00:00"
+            history._alerts(self._device(stamp), stamp)
+            unknown = self._device("2026-01-01T00:01:00+00:00")
+            unknown["media"] = [{"device": "mmcblk0", "io_errors": None,
+                                 "media_errors": None, "io_error_status": "unknown"}]
+            history._sample(unknown, "2026-01-01T00:01:00+00:00")
+            history._alerts(unknown, "2026-01-01T00:01:00+00:00")
+            sample = db.rows("SELECT * FROM media_metrics")[0]
+            self.assertIsNone(sample["io_errors"])
+            self.assertIsNone(sample["media_errors"])
+            self.assertEqual(db.scalar(
+                "SELECT COUNT(*) FROM alerts WHERE alert_type='media_io_errors' AND resolved_at IS NULL"), 1)
 
     def test_retention_removes_old_media_samples(self):
         with tempfile.TemporaryDirectory() as folder:

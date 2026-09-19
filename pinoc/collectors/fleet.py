@@ -31,7 +31,11 @@ echo __MEM__; cat /proc/meminfo
 echo __DF__; df -PT -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null
 echo __MOUNTS__; cat /proc/mounts
 echo __DISKSTATS__; cat /proc/diskstats 2>/dev/null
-echo __IOERRORS__; (dmesg 2>/dev/null || journalctl -k --no-pager -n 500 2>/dev/null) | grep -iE "i/o error|blk_update_request|EXT4-fs error|sdhci|mmcblk.*error|bad block" | tail -20
+echo __IOERRORS__
+kernel_log=$(dmesg 2>/dev/null); kernel_log_status=$?
+if [ "$kernel_log_status" -ne 0 ]; then kernel_log=$(journalctl -k --no-pager -n 500 2>/dev/null); kernel_log_status=$?; fi
+if [ "$kernel_log_status" -eq 0 ]; then printf '%s\n' "$kernel_log" | grep -iE "i/o error|blk_update_request|EXT4-fs error|sdhci|mmcblk.*error|bad block" | tail -20; fi
+echo __IOERRORSTATUS__; if [ "$kernel_log_status" -eq 0 ]; then echo available; else echo unavailable; fi
 echo __ROUTE__; ip -j route show default 2>/dev/null; echo __ADDR__; ip -j address show 2>/dev/null
 echo __NET__; cat /proc/net/dev
 echo __IW__; command -v iw >/dev/null && iw dev 2>/dev/null; command -v iw >/dev/null && iw dev $(iw dev 2>/dev/null | awk '$1=="Interface"{print $2;exit}') link 2>/dev/null
@@ -112,7 +116,8 @@ def _whole_disk(name: str) -> List[str]:
     return []
 
 
-def parse_media(diskstats: str, io_errors: str, storage: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def parse_media(diskstats: str, io_errors: str, storage: List[Dict[str, Any]],
+                io_errors_available: bool = True) -> List[Dict[str, Any]]:
     """Per-medium media wear/I-O-error status for block-backed filesystems.
 
     Best effort by design: non-root collectors (the normal case) may not read
@@ -177,8 +182,9 @@ def parse_media(diskstats: str, io_errors: str, storage: List[Dict[str, Any]]) -
             "mount_points": mounts,
             "read_bytes": row["read_sectors"] * 512,
             "written_bytes": row["written_sectors"] * 512,
-            "io_errors": len(errors),
-            "media_errors": bool(errors),
+            "io_errors": len(errors) if io_errors_available else None,
+            "media_errors": bool(errors) if io_errors_available else None,
+            "io_error_status": "available" if io_errors_available else "unknown",
             "last_error": errors[-1][:200] if errors else None,
         })
     return result
@@ -249,7 +255,8 @@ class FleetCollector:
                 elapsed=max(.001,stamp-prior[0]); network["rx_rate"]=max(0,(network["rx_bytes"]-prior[1])/elapsed); network["tx_rate"]=max(0,(network["tx_bytes"]-prior[2])/elapsed)
             if network.get("rx_bytes") is not None: self.previous_net[device.id]=(stamp,network["rx_bytes"],network["tx_bytes"])
             storage=parse_storage(data.get("DF",""),data.get("MOUNTS",""))
-            media=parse_media(data.get("DISKSTATS",""),data.get("IOERRORS",""),storage)
+            io_errors_available=data.get("IOERRORSTATUS") == "available"
+            media=parse_media(data.get("DISKSTATS",""),data.get("IOERRORS",""),storage,io_errors_available)
             raw={"id":device.id,"hostname":device.hostname,"friendly_name":device.friendly_name,"address":device.address,
                  "roles":list(device.roles),"tags":list(device.tags),"collection_method":device.collection_method,"notes":device.notes,
                  "ssh_user":device.ssh_user,"ssh_port":device.ssh_port,"monitored_services":list(device.monitored_services),
@@ -264,7 +271,10 @@ class FleetCollector:
                  "storage":storage,"media":media,"network":network,
                  "important_paths":list(device.important_paths),
                  "services":services,"critical_services":list(device.critical_services),
-                 "collector_status":{"system":{"status":"ok"},"storage":{"status":"ok"},"network":{"status":"ok"},"services":{"status":"ok"}}}
+                 "collector_status":{"system":{"status":"ok"},"storage":{"status":"ok"},
+                                     "media_errors":{"status":"ok" if io_errors_available else "unavailable",
+                                                     "error":None if io_errors_available else "kernel logs are not readable"},
+                                     "network":{"status":"ok"},"services":{"status":"ok"}}}
             integrations={}
             for name in active_integrations(device.roles,device.integrations):
                 cfg=device.integrations.get(name,{})

@@ -44,6 +44,8 @@ def evaluate(device: Dict[str, Any], thresholds: Dict[str, float] | None = None,
     for medium in device.get("media", []):
         if medium.get("media_errors"):
             critical.append(f"storage media {medium.get('device')} is reporting I/O errors")
+        elif medium.get("io_error_status") == "unknown":
+            warnings.append(f"storage media {medium.get('device')} I/O-error status is unknown")
     if hw.get("undervoltage_now") or hw.get("throttled_now"): critical.append("current Pi power/throttle condition")
     elif hw.get("undervoltage_occurred") or hw.get("throttled_occurred"): warnings.append("historical Pi power/throttle condition")
     critical_names = set(device.get("critical_services", []))

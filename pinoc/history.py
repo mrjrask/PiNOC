@@ -95,7 +95,7 @@ class HistoryManager:
             self.db.execute("INSERT OR IGNORE INTO network_metrics(timestamp,device_id,interface,ip_address,rx_rate_bps,tx_rate_bps,rx_total_bytes,tx_total_bytes,wifi_signal_dbm,wifi_quality_percent) VALUES(?,?,?,?,?,?,?,?,?,?)",(stamp,did,interface,n.get("ip"),n.get("rx_rate"),n.get("tx_rate"),n.get("rx_bytes"),n.get("tx_bytes"),n.get("signal_dbm"),n.get("signal_quality_percent")))
         if d.get("online") and self._due(did,"storage",stamp):
             for x in d.get("storage",[]):self.db.execute("INSERT OR IGNORE INTO storage_metrics(timestamp,device_id,device,mount_point,filesystem,total_bytes,used_bytes,available_bytes,percent_used,read_only) VALUES(?,?,?,?,?,?,?,?,?,?)",(stamp,did,x.get("device"),x.get("mount_point") or x.get("path") or "unknown",x.get("filesystem"),x.get("total") or x.get("size"),x.get("used"),x.get("available"),x.get("percent"),int(bool(x.get("read_only")))))
-            for x in d.get("media",[]):self.db.execute("INSERT OR IGNORE INTO media_metrics(timestamp,device_id,block_device,read_bytes,written_bytes,io_errors,media_errors) VALUES(?,?,?,?,?,?,?)",(stamp,did,x.get("device"),x.get("read_bytes"),x.get("written_bytes"),x.get("io_errors"),int(bool(x.get("media_errors")))))
+            for x in d.get("media",[]):self.db.execute("INSERT OR IGNORE INTO media_metrics(timestamp,device_id,block_device,read_bytes,written_bytes,io_errors,media_errors) VALUES(?,?,?,?,?,?,?)",(stamp,did,x.get("device"),x.get("read_bytes"),x.get("written_bytes"),x.get("io_errors"),None if x.get("media_errors") is None else int(bool(x.get("media_errors")))))
         if d.get("online") and self._due(did,"integration",stamp):
             allow={"adsb":{"aircraft","aircraft_with_positions","messages_per_second","positions_per_second","maximum_range_nm","strong_signal_percent"},"samba":{"active_sessions","unique_users","open_files"},"pi_hotspot":{"client_count","response_latency_ms"},"magicmirror":{"response_latency_ms","restart_count"},"desk_display":{"response_latency_ms"},"wireguard":{"latest_handshake_seconds","rx_bytes","tx_bytes"},"probe":{"response_latency_ms","failed_checks","checks_total"}}
             for name,status in d.get("integrations",{}).items():
@@ -147,8 +147,10 @@ class HistoryManager:
                 typ="critical_service_failed" if s.get("critical") else "service_failed";active[f"{typ}:{s.get('name')}"]=("critical" if s.get("critical") else "warning",f"{s.get('name')} is {s.get('state')}",s.get("name"))
         raid=d.get("applications",{}).get("raid",{}).get("status")
         if raid in ("DEGRADED","INACTIVE","MISSING"):active["raid_degraded"]=("critical",f"RAID is {raid.lower()}","raid")
+        preserve=set()
         for medium in d.get("media",[]):
             if medium.get("media_errors"):active[f"media_io_errors:{medium.get('device')}"]=("critical",f"Storage media {medium.get('device')} is reporting I/O errors ({medium.get('io_errors')} logged)",medium.get("device"))
+            elif medium.get("io_error_status") == "unknown":preserve.add(f"{did}:media_io_errors:{medium.get('device')}")
         for name,status in d.get("integrations",{}).items():
             if not isinstance(status,dict) or not status.get("enabled",True):continue
             # Service failures remain owned by the generic service fingerprint.
@@ -157,8 +159,9 @@ class HistoryManager:
                 if condition.get("service"):continue
                 key=str(condition.get("type") or f"{name}_unhealthy")
                 active[f"{key}:{name}"]=(condition.get("severity","warning"),condition.get("message",f"{name} is unhealthy"),name)
-        self._reconcile(did,active,stamp)
-    def _reconcile(self,did,active,stamp):
+        self._reconcile(did,active,stamp,preserve)
+    def _reconcile(self,did,active,stamp,preserve=None):
+        preserve=preserve or set()
         existing={x["fingerprint"]:x for x in self.db.rows("SELECT * FROM alerts WHERE device_id=? AND resolved_at IS NULL",(did,))}
         seen=set()
         for key,(sev,msg,resource) in active.items():
@@ -172,7 +175,7 @@ class HistoryManager:
                 else:self.db.execute("UPDATE alerts SET last_seen_at=?,severity=?,message=? WHERE alert_id=?",(stamp,sev,msg,row["alert_id"]))
             else:self.db.execute("INSERT INTO alerts(device_id,alert_type,severity,message,fingerprint,opened_at,last_seen_at,state,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)",(did,typ,sev,msg,fp,stamp,stamp,"active",json.dumps({"resource":resource})))
         for fp,row in existing.items():
-            if fp not in seen:
+            if fp not in seen and fp not in preserve:
                 self.db.execute("UPDATE alerts SET resolved_at=?,state='resolved' WHERE alert_id=?",(stamp,row["alert_id"]));self._write_event(did,"alert_resolved","info",f"Recovered: {row['message']}",{"alert_id":row["alert_id"]},stamp)
     def _write_event(self,did,typ,sev,msg,metadata,stamp):self.db.execute("INSERT INTO events(timestamp,device_id,event_type,severity,message,metadata_json) VALUES(?,?,?,?,?,?)",(stamp,did,typ,sev,msg,json.dumps(metadata)))
     def _refresh_cache(self):
