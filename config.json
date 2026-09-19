@@ -92,8 +92,7 @@
       "title": "Device offline",
       "markdown": "## Triage\n- Ping the device and check its switch port or Wi-Fi association.\n- If reachable, request a refresh; otherwise power-cycle it (Cockpit or physically).\n- Repeated offline periods plus media I/O errors usually mean storage wear.",
       "actions": [
-        "device.refresh",
-        "device.reboot"
+        "device.refresh"
       ],
       "links": []
     },

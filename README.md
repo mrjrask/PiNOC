@@ -242,7 +242,9 @@ prefix such as `critical_`), a `title`, and a markdown `markdown` body (up to
 registry) and `links` (up to 10, http(s) or relative URLs) are optional, and
 at most 50 playbooks are loaded. A `Runbook` button appears on matching alert
 rows in the web console, rendering the markdown, links, and one-click safe
-actions (service actions target the resource recorded on the alert). Invalid
+actions (service actions target the resource recorded on the alert; actions
+the registry marks `strong` — reboot, shutdown, service stop — require
+typing the target to confirm before they are queued). Invalid
 entries fail `validate_config`; the runtime loader drops them so a bad entry
 cannot break the console. `GET /api/playbooks` returns the loaded list.
 
