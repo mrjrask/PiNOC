@@ -41,11 +41,17 @@ def evaluate(device: Dict[str, Any], thresholds: Dict[str, float] | None = None,
         if disk.get("read_only") and important: critical.append(f"{mount_point} is read-only")
         if pct is not None and pct > t["disk_critical"]: critical.append("filesystem nearly full")
         elif pct is not None and pct > t["disk_warning"]: warnings.append("filesystem usage high")
-    for medium in device.get("media", []):
+    media = device.get("media", [])
+    for medium in media:
         if medium.get("media_errors"):
             critical.append(f"storage media {medium.get('device')} is reporting I/O errors")
         elif medium.get("io_error_status") == "unknown":
             warnings.append(f"storage media {medium.get('device')} I/O-error status is unknown")
+    # With no mapped media the per-medium loop adds nothing, so also surface
+    # collector-level loss of I/O-error observability (e.g. kernel logs not
+    # readable) instead of letting the device read healthy.
+    if not media and device.get("collector_status", {}).get("media_errors", {}).get("status") == "unavailable":
+        warnings.append("storage media I/O-error telemetry is unavailable")
     if hw.get("undervoltage_now") or hw.get("throttled_now"): critical.append("current Pi power/throttle condition")
     elif hw.get("undervoltage_occurred") or hw.get("throttled_occurred"): warnings.append("historical Pi power/throttle condition")
     critical_names = set(device.get("critical_services", []))

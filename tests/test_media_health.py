@@ -89,6 +89,35 @@ class HealthTest(unittest.TestCase):
         device["media"] = [{"device": "mmcblk0", "media_errors": False, "io_errors": 0}]
         self.assertEqual(evaluate(device)[0], "healthy")
 
+    def test_unavailable_media_observability_without_inventory_warns(self):
+        device = self.base()
+        device["media"] = []
+        device["collector_status"] = {"media_errors": {"status": "unavailable",
+                                                       "error": "kernel logs are not readable"}}
+        health, reasons, _ = evaluate(device)
+        self.assertEqual(health, "warning")
+        self.assertTrue(any("telemetry is unavailable" in reason for reason in reasons))
+
+    def test_ok_media_observability_without_inventory_stays_healthy(self):
+        device = self.base()
+        device["media"] = []
+        device["collector_status"] = {"media_errors": {"status": "ok", "error": None}}
+        self.assertEqual(evaluate(device)[0], "healthy")
+
+    def test_missing_collector_status_stays_healthy(self):
+        device = self.base()
+        device["media"] = []
+        self.assertEqual(evaluate(device)[0], "healthy")
+
+    def test_collector_warning_is_not_duplicated_when_media_present(self):
+        device = self.base()
+        device["media"] = [{"device": "mmcblk0", "io_errors": None,
+                            "media_errors": None, "io_error_status": "unknown"}]
+        device["collector_status"] = {"media_errors": {"status": "unavailable"}}
+        health, reasons, _ = evaluate(device)
+        self.assertEqual(health, "warning")
+        self.assertEqual(reasons, ["storage media mmcblk0 I/O-error status is unknown"])
+
 
 class FleetCollectionTest(unittest.TestCase):
     # The collection shell prints each marker on its own line, so tests must
