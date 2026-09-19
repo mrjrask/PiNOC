@@ -95,7 +95,11 @@ sudo -u pi .venv/bin/python -m pinoc.admin create-user \
 
 Replace `pi` with the installation user. Open
 `http://<pinoc-host>:8088/` (or the configured port). PiNOC serves plain HTTP by
-default; use a TLS reverse proxy before exposing it beyond a trusted LAN.
+default; use a TLS reverse proxy before exposing it beyond a trusted LAN. When
+using a reverse proxy, set `authentication.trusted_proxy_count` to the exact
+number of proxies in front of PiNOC and prevent clients from reaching PiNOC
+directly. Leave it at `0` for direct connections; forwarded client-address
+headers are then ignored.
 
 ### Upgrade
 
@@ -163,7 +167,11 @@ secret when every discovered device shares that password. Devices already
 declared in `config/devices.json` retain their explicit SSH settings and are
 merged with matching temperature records by address or hostname.
 
-Run the validator after every manual configuration change:
+Run the validator after every manual configuration change. It applies the same
+full rules the web settings editor uses, checking every group the service
+parses at startup — polling intervals, `authentication` (including
+`trusted_proxy_count`), `security.rate_limit`, playbooks, and fleet devices —
+so an invalid value cannot pass the preflight check and still fail startup:
 
 ```sh
 python3 -m pinoc.validate_config
@@ -412,15 +420,21 @@ development tokens. Browser sessions use HTTP-only, SameSite cookies; enable
 `PINOC_SECURE_COOKIE=1` only when HTTPS is actually in use.
 
 Failed logins are rate limited per source address and username: after
-`security.rate_limit.login_max_failed` failures within `login_window_seconds`,
-the pair is locked for `lockout_seconds` and the login endpoint answers `429`
-instead of rendering the form. The lockout transition writes a single
-`auth.lockout` audit record, and a successful login clears the failure window
-and any pending lockout. When authentication is enabled, unauthenticated
+`security.rate_limit.login_max_failed` failures for one address and username, or
+`login_max_failed_per_source` failures from one address across all usernames,
+within `login_window_seconds`, the matching account key or source is locked for
+`lockout_seconds` and the login endpoint answers `429` instead of rendering the
+form. The lockout transition writes a single `auth.lockout` audit record. A
+successful login clears its per-account failure window and lockout; source-wide
+failures remain in their sliding window so rotating usernames cannot bypass the
+CPU safeguard. When authentication is enabled, unauthenticated
 `/api/*` requests are limited to `api_max_unauthenticated` per
 `api_window_seconds` per address and then receive `429` with a `Retry-After`
 header before the usual `401`; token and session requests are not counted
-against this limit.
+against this limit. Behind a reverse proxy these address-based controls require
+an accurately configured `authentication.trusted_proxy_count`; only enable it
+when direct access to PiNOC is blocked, since trusting forwarded headers from
+untrusted clients permits address spoofing.
 
 Actions accept structured identifiers only, use fixed argv arrays without a
 shell, and enforce configured service/integration allowlists. Device power is

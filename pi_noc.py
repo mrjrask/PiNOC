@@ -1418,6 +1418,7 @@ def main() -> None:
         "AUTH_ENABLED":auth_enabled,"SECRET_KEY":read_env_value("PINOC_SECRET_KEY"),
         "SESSION_COOKIE_SECURE":(read_env_value("PINOC_SECURE_COOKIE") or "0").lower() in ("1","true","yes"),
         "SESSION_TIMEOUT_SECONDS":CONFIG.get("authentication",{}).get("session_timeout_seconds",3600),
+        "TRUSTED_PROXY_COUNT":CONFIG.get("authentication",{}).get("trusted_proxy_count",0),
         "RATE_LIMIT":CONFIG.get("security",{}).get("rate_limit",{}),
         "DEV_CONFIG":CONFIG.get("development_gateway",{}),
         "DEV_ARTIFACT_ROOT":str(APP_DIR/CONFIG.get("development_gateway",{}).get("artifact_root","data/jobs")),

@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -18,7 +19,7 @@ class Coordinator:
     def refresh(self):
         self.refreshed.append("all")
 
-def fixture(tmp_path, rate_limit=None, auth_enabled=True):
+def fixture(tmp_path, rate_limit=None, auth_enabled=True, trusted_proxy_count=0):
     db = Database(str(tmp_path / "db.sqlite"))
     assert db.initialize()
     history = HistoryManager(db, {})
@@ -26,7 +27,8 @@ def fixture(tmp_path, rate_limit=None, auth_enabled=True):
     security.create_user("person", "correct horse battery", "administrator")
     state = PiNOCState()
     state.publish([DeviceState("pi", "pi", "Pi", online=True, address="host", collection_method="ssh", manageable_services=["demo.service"])])
-    config = {"TESTING": True, "AUTH_ENABLED": auth_enabled, "SECRET_KEY": "test-secret", "DATABASE": db}
+    config = {"TESTING": True, "AUTH_ENABLED": auth_enabled, "SECRET_KEY": "test-secret", "DATABASE": db,
+              "TRUSTED_PROXY_COUNT": trusted_proxy_count}
     if rate_limit is not None:
         config["RATE_LIMIT"] = rate_limit
     app = create_app(state, config, history, Coordinator())
@@ -92,6 +94,28 @@ def test_authenticate_lockout_semantics(tmp_path):
     row, error, locked = security.authenticate("person", "correct horse battery", "10.0.0.1")
     assert row is not None and error is None and locked is False
 
+def test_login_source_lockout_cannot_be_bypassed_by_rotating_usernames(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    assert db.initialize()
+    security = SecurityManager(db, True, {
+        "login_window_seconds": 300,
+        "login_max_failed": 5,
+        "login_max_failed_per_source": 3,
+        "lockout_seconds": 900,
+    })
+    security.create_user("person", "correct horse battery", "viewer")
+    for username in ("unknown-one", "unknown-two"):
+        assert security.authenticate(username, "wrong", "10.0.0.1")[2] is False
+    assert security.authenticate("unknown-three", "wrong", "10.0.0.1")[2] is True
+    # The source ceiling also blocks a valid account and does not affect a
+    # different source address.
+    assert security.authenticate("person", "correct horse battery", "10.0.0.1")[2] is True
+    row, error, locked = security.authenticate("person", "correct horse battery", "10.0.0.2")
+    assert row is not None and error is None and locked is False
+    audit = db.rows("SELECT parameters_json FROM audit_records WHERE action='auth.lockout'")
+    assert len(audit) == 1
+    assert '"scope": "source"' in audit[0]["parameters_json"]
+
 def test_unauthenticated_api_requests_are_rate_limited(tmp_path):
     app, db = fixture(tmp_path, rate_limit={"api_window_seconds": 60, "api_max_unauthenticated": 3})
     c = app.test_client()
@@ -122,8 +146,28 @@ def test_disabled_auth_is_not_rate_limited(tmp_path):
         assert c.get("/api/devices").status_code == 200
     app.extensions["pinoc_actions"].stop()
 
+def test_forwarded_login_sources_require_explicit_trusted_proxy(tmp_path):
+    app, db = fixture(tmp_path, rate_limit={"login_max_failed_per_source": 2})
+    client = app.test_client()
+    assert login(client).status_code == 200
+    # Forwarded headers are untrusted by default, so changing one cannot evade
+    # the source-wide limit applied to the direct peer address.
+    client.environ_base["HTTP_X_FORWARDED_FOR"] = "198.51.100.1"
+    assert login(client).status_code == 429
+    app.extensions["pinoc_actions"].stop()
+
+def test_trusted_proxy_preserves_client_source_for_login_limits(tmp_path):
+    app, db = fixture(tmp_path, rate_limit={"login_max_failed_per_source": 2}, trusted_proxy_count=1)
+    client = app.test_client()
+    for address in ("198.51.100.1", "198.51.100.2"):
+        client.environ_base["HTTP_X_FORWARDED_FOR"] = address
+        assert login(client).status_code == 200
+    client.environ_base["HTTP_X_FORWARDED_FOR"] = "198.51.100.1"
+    assert login(client).status_code == 429
+    app.extensions["pinoc_actions"].stop()
+
 def test_defaults_are_sensible():
-    assert DEFAULT_RATE_LIMIT == {"login_window_seconds": 300, "login_max_failed": 5, "lockout_seconds": 900, "api_window_seconds": 60, "api_max_unauthenticated": 120}
+    assert DEFAULT_RATE_LIMIT == {"login_window_seconds": 300, "login_max_failed": 5, "login_max_failed_per_source": 20, "lockout_seconds": 900, "api_window_seconds": 60, "api_max_unauthenticated": 120}
 
 def test_validate_config_security_rate_limit(tmp_path):
     base = {"devices": [], "polling": {"fleet_seconds": 10}}
@@ -135,6 +179,7 @@ def test_validate_config_security_rate_limit(tmp_path):
         {"login_max_failed": -1},
         {"login_max_failed": "five"},
         {"login_max_failed": True},
+        {"login_max_failed_per_source": 0},
         {"unknown_setting": 1},
         {"api_max_unauthenticated": 100000},
     )
@@ -145,3 +190,26 @@ def test_validate_config_security_rate_limit(tmp_path):
         validate_config({**base, "security": "nope"}, tmp_path)
     with pytest.raises(ValueError):
         validate_config({**base, "security": {"rate_limit": "nope"}}, tmp_path)
+
+def test_validate_trusted_proxy_count(tmp_path):
+    base = {"devices": [], "polling": {"fleet_seconds": 10}}
+    assert validate_config({**base, "authentication": {"trusted_proxy_count": 1}}, tmp_path)
+    for invalid in (True, -1, 11, 1.5, "1"):
+        with pytest.raises(ValueError):
+            validate_config({**base, "authentication": {"trusted_proxy_count": invalid}}, tmp_path)
+
+def test_cli_validator_runs_full_configuration_validation(tmp_path, monkeypatch):
+    from pinoc.validate_config import main
+    monkeypatch.chdir(tmp_path)
+    invalid = {"devices": [], "polling": {"fleet_seconds": 10},
+               "authentication": {"trusted_proxy_count": "one"}}
+    (tmp_path / "config.json").write_text(json.dumps(invalid))
+    assert main() == 1
+    (tmp_path / "config.json").write_text(json.dumps({**invalid, "authentication": {"trusted_proxy_count": 0},
+                                                      "security": {"rate_limit": {"login_max_failed": 0}}}))
+    assert main() == 1
+    valid = {"devices": [], "polling": {"fleet_seconds": 10},
+             "authentication": {"trusted_proxy_count": 1},
+             "security": {"rate_limit": {"login_max_failed": 3}}}
+    (tmp_path / "config.json").write_text(json.dumps(valid))
+    assert main() == 0
