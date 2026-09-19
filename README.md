@@ -323,12 +323,21 @@ GET /api/devices/<id>/integrations/probe
 GET /api/devices/<id>/storage/forecast
 GET /api/alerts[?state=active]
 GET /api/events
+GET /api/export/<kind>?device=&range=24h&format=csv&limit=10000
 GET /api/database/status
 ```
 
 Fleet queries accept `health`, `role`, and `tag` filters. Event and alert APIs
 support bounded pagination and relevant device/type/severity/state filters.
 Allowed metric ranges are `1h`, `6h`, `24h`, `7d`, and `30d`.
+
+The export API returns a whole history table as a CSV download (the default)
+or a JSON object with the same range and device filters. Kinds are `metrics`,
+`storage`, `network`, `services`, `integrations`, `alerts`, and `events` (the
+corresponding SQLite tables, newest rows first for alerts and events).
+`limit` defaults to 10000 rows and is capped at 50000; metric kinds require
+`history.read` and the alerts kind requires `alerts.read` (token scopes
+`read:history` / `read:alerts`).
 
 Management endpoints include alert acknowledgement/mute, cached refresh,
 allowlisted service operations, administrator-only reboot/shutdown, integration
