@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -50,6 +50,8 @@ CREATE TABLE job_artifacts(artifact_id TEXT PRIMARY KEY,job_id TEXT NOT NULL,nam
 CREATE INDEX job_artifacts_job ON job_artifacts(job_id);
 CREATE TABLE job_approvals(approval_id TEXT PRIMARY KEY,job_id TEXT NOT NULL,status TEXT NOT NULL,risk TEXT NOT NULL,requested_at TEXT NOT NULL,decided_at TEXT,decided_by TEXT,reason TEXT,FOREIGN KEY(job_id) REFERENCES development_jobs(job_id));
 CREATE TABLE agent_request_nonces(agent_id TEXT NOT NULL,nonce TEXT NOT NULL,used_at TEXT NOT NULL,PRIMARY KEY(agent_id,nonce));""",
+"""CREATE TABLE media_metrics(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,device_id TEXT NOT NULL,block_device TEXT NOT NULL,read_bytes INTEGER,written_bytes INTEGER,io_errors INTEGER,media_errors INTEGER,UNIQUE(device_id,block_device,timestamp));
+CREATE INDEX media_device_time ON media_metrics(device_id,timestamp);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()
