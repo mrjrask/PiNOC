@@ -1,10 +1,12 @@
 """Coverage for storage-media (SD card / eMMC / disk) wear and I/O-error health."""
+import os
 import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from pinoc.collectors.fleet import FleetCollector, parse_media
+from pinoc.collectors.fleet import SCRIPT, FleetCollector, parse_media, sections
 from pinoc.database import Database
 from pinoc.device_config import DeviceConfig
 from pinoc.health import evaluate
@@ -122,6 +124,8 @@ __DISKSTATS__
 {DISKSTATS}
 __IOERRORS__
 {IO_ERRORS}
+__IOERRORSTATUS__
+available
 __ROUTE__
 __ADDR__
 __NET__
@@ -132,6 +136,29 @@ __SERVICES__
 __UNITS__
 ssh.service enabled
 """
+
+    def test_journal_success_with_privilege_diagnostic_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            commands = Path(folder)
+            dmesg = commands / "dmesg"
+            dmesg.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            journalctl = commands / "journalctl"
+            journalctl.write_text(
+                "#!/bin/sh\n"
+                "echo 'Hint: You are currently not seeing messages from other users.' >&2\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            dmesg.chmod(0o755)
+            journalctl.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{commands}:{env['PATH']}"
+
+            result = subprocess.run(
+                ["sh"], input=SCRIPT, text=True, capture_output=True, env=env, check=True
+            )
+
+        self.assertEqual(sections(result.stdout)["IOERRORSTATUS"], "unavailable")
 
     def test_media_is_collected_and_health_degrades(self):
         device = DeviceConfig(id="pi", hostname="pi", friendly_name="Pi",
@@ -160,6 +187,22 @@ ssh.service enabled
         snapshot = FleetCollector([device], runner=runner, timeout=1).collect_device(device)
         self.assertEqual(snapshot.media, [])
         self.assertEqual(snapshot.health, "healthy")
+
+    def test_unreadable_kernel_logs_are_unknown(self):
+        output = self.SCRIPT_OUTPUT.replace(IO_ERRORS, "").replace(
+            "__IOERRORSTATUS__\navailable", "__IOERRORSTATUS__\nunavailable")
+        device = DeviceConfig(id="pi", hostname="pi", friendly_name="Pi",
+                              address="192.168.1.10", collection_method="ssh")
+
+        def runner(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, output, "")
+
+        snapshot = FleetCollector([device], runner=runner, timeout=1).collect_device(device)
+        self.assertIsNone(snapshot.media[0]["media_errors"])
+        self.assertIsNone(snapshot.media[0]["io_errors"])
+        self.assertEqual(snapshot.media[0]["io_error_status"], "unknown")
+        self.assertEqual(snapshot.collector_status["media_errors"]["status"], "unavailable")
+        self.assertEqual(snapshot.health, "warning")
 
 
 class HistoryTest(unittest.TestCase):
@@ -192,6 +235,39 @@ class HistoryTest(unittest.TestCase):
             history._alerts(recovered, "2026-01-01T00:01:00+00:00")
             self.assertEqual(db.scalar(
                 "SELECT COUNT(*) FROM alerts WHERE resolved_at IS NULL"), 0)
+
+    def test_unknown_observability_does_not_resolve_open_alert(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = Database(f"{folder}/db.sqlite")
+            self.assertTrue(db.initialize())
+            history = HistoryManager(db, {})
+            stamp = "2026-01-01T00:00:00+00:00"
+            history._alerts(self._device(stamp), stamp)
+            unknown = self._device("2026-01-01T00:01:00+00:00")
+            unknown["media"] = [{"device": "mmcblk0", "io_errors": None,
+                                 "media_errors": None, "io_error_status": "unknown"}]
+            history._sample(unknown, "2026-01-01T00:01:00+00:00")
+            history._alerts(unknown, "2026-01-01T00:01:00+00:00")
+            sample = db.rows("SELECT * FROM media_metrics")[0]
+            self.assertIsNone(sample["io_errors"])
+            self.assertIsNone(sample["media_errors"])
+            self.assertEqual(db.scalar(
+                "SELECT COUNT(*) FROM alerts WHERE alert_type='media_io_errors' AND resolved_at IS NULL"), 1)
+
+    def test_unavailable_observability_with_empty_inventory_preserves_open_alert(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = Database(f"{folder}/db.sqlite")
+            self.assertTrue(db.initialize())
+            history = HistoryManager(db, {})
+            stamp = "2026-01-01T00:00:00+00:00"
+            history._alerts(self._device(stamp), stamp)
+            unavailable = self._device("2026-01-01T00:01:00+00:00")
+            unavailable["media"] = []
+            unavailable["collector_status"] = {
+                "media_errors": {"status": "unavailable"}}
+            history._alerts(unavailable, "2026-01-01T00:01:00+00:00")
+            self.assertEqual(db.scalar(
+                "SELECT COUNT(*) FROM alerts WHERE alert_type='media_io_errors' AND resolved_at IS NULL"), 1)
 
     def test_retention_removes_old_media_samples(self):
         with tempfile.TemporaryDirectory() as folder:
