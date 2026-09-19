@@ -360,7 +360,10 @@ or a JSON object with the same range and device filters. Kinds are `metrics`,
 corresponding SQLite tables, newest rows first for alerts and events).
 `limit` defaults to 10000 rows and is capped at 50000; metric kinds require
 `history.read` and the alerts kind requires `alerts.read` (token scopes
-`read:history` / `read:alerts`).
+`read:history` / `read:alerts`). CSV cells whose text begins with a formula
+character (`=`, `+`, `-`, or `@`) are prefixed with an apostrophe so a
+spreadsheet viewer stores them as text instead of evaluating them (CSV
+injection); numeric cells and JSON output are exported as-is.
 
 A Prometheus endpoint is served at `GET /metrics` (text format 0.0.4) with
 fleet totals, per-device health/up/CPU/memory/disk/uptime, failed-service and
