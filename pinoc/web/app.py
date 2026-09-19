@@ -117,7 +117,10 @@ def csv_safe(value: Any) -> Any:
     ``csv.writer`` quotes cells containing commas and quotes, but the viewing
     application still evaluates text that begins with ``=``, ``+``, ``-``, or
     ``@`` (CSV injection). A leading apostrophe forces the cell to be stored
-    as text. Numeric values pass through untouched so exported metrics keep
+    as text. Importers may also skip leading control characters (tab,
+    carriage return, line feed) before applying that rule, so the marker is
+    inspected past them and the apostrophe is still prefixed to the original
+    value. Numeric values pass through untouched so exported metrics keep
     their natural representation.
     """
     if value is None:
@@ -125,7 +128,9 @@ def csv_safe(value: Any) -> Any:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value
     text = str(value)
-    return "'" + text if text[:1] in {"=", "+", "-", "@"} else text
+    if text.lstrip("\t\r\n")[:1] in {"=", "+", "-", "@"}:
+        return "'" + text
+    return text
 
 
 def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None) -> Flask:
