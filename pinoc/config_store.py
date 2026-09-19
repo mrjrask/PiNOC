@@ -2,6 +2,7 @@
 import json, os, shutil, tempfile
 from pathlib import Path
 from pinoc.device_config import load_devices
+from pinoc.playbooks import validate_playbooks
 
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
@@ -9,6 +10,7 @@ def validate_config(value,base_dir=Path(".")):
     if not isinstance(polling,dict):raise ValueError("polling must be an object")
     for name,seconds in polling.items():
         if not isinstance(seconds,(int,float)) or not 1<=seconds<=86400:raise ValueError(f"invalid polling interval: {name}")
+    validate_playbooks(value.get("playbooks"))
     _,errors=load_devices(value,Path(base_dir))
     if errors:raise ValueError("; ".join(errors))
     return value
