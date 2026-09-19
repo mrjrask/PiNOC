@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -196,3 +197,19 @@ def test_validate_trusted_proxy_count(tmp_path):
     for invalid in (True, -1, 11, 1.5, "1"):
         with pytest.raises(ValueError):
             validate_config({**base, "authentication": {"trusted_proxy_count": invalid}}, tmp_path)
+
+def test_cli_validator_runs_full_configuration_validation(tmp_path, monkeypatch):
+    from pinoc.validate_config import main
+    monkeypatch.chdir(tmp_path)
+    invalid = {"devices": [], "polling": {"fleet_seconds": 10},
+               "authentication": {"trusted_proxy_count": "one"}}
+    (tmp_path / "config.json").write_text(json.dumps(invalid))
+    assert main() == 1
+    (tmp_path / "config.json").write_text(json.dumps({**invalid, "authentication": {"trusted_proxy_count": 0},
+                                                      "security": {"rate_limit": {"login_max_failed": 0}}}))
+    assert main() == 1
+    valid = {"devices": [], "polling": {"fleet_seconds": 10},
+             "authentication": {"trusted_proxy_count": 1},
+             "security": {"rate_limit": {"login_max_failed": 3}}}
+    (tmp_path / "config.json").write_text(json.dumps(valid))
+    assert main() == 0

@@ -167,7 +167,11 @@ secret when every discovered device shares that password. Devices already
 declared in `config/devices.json` retain their explicit SSH settings and are
 merged with matching temperature records by address or hostname.
 
-Run the validator after every manual configuration change:
+Run the validator after every manual configuration change. It applies the same
+full rules the web settings editor uses, checking every group the service
+parses at startup — polling intervals, `authentication` (including
+`trusted_proxy_count`), `security.rate_limit`, playbooks, and fleet devices —
+so an invalid value cannot pass the preflight check and still fail startup:
 
 ```sh
 python3 -m pinoc.validate_config
