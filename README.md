@@ -138,6 +138,7 @@ normal SSH collection uses keys and `BatchMode=yes`.
 | --- | ---: | --- |
 | `web_host`, `web_port` | `0.0.0.0`, `8088` | Web listener values. PiNOC always starts its web console. |
 | `authentication.enabled` | `false` | Authentication fallback; `PINOC_AUTH_ENABLED` takes precedence. |
+| `security.rate_limit.*` | see `config.json` | Login lockout (window, max failed attempts, lockout) and the unauthenticated `/api/*` 429 window. |
 | `polling.*` | 10–60 s | Independent fleet, local, network, remote, service, storage, sensor, and temperature schedules. |
 | `fleet_max_workers` | `4` | Maximum concurrent fleet collection workers. |
 | `ssh_command_timeout` | `8` s | Per-device SSH command timeout. |
@@ -409,6 +410,17 @@ writes, safe actions, configuration administration, and the `dev:*` scopes.
 Optional device, workspace, and job-type restrictions further narrow
 development tokens. Browser sessions use HTTP-only, SameSite cookies; enable
 `PINOC_SECURE_COOKIE=1` only when HTTPS is actually in use.
+
+Failed logins are rate limited per source address and username: after
+`security.rate_limit.login_max_failed` failures within `login_window_seconds`,
+the pair is locked for `lockout_seconds` and the login endpoint answers `429`
+instead of rendering the form. The lockout transition writes a single
+`auth.lockout` audit record, and a successful login clears the failure window
+and any pending lockout. When authentication is enabled, unauthenticated
+`/api/*` requests are limited to `api_max_unauthenticated` per
+`api_window_seconds` per address and then receive `429` with a `Retry-After`
+header before the usual `401`; token and session requests are not counted
+against this limit.
 
 Actions accept structured identifiers only, use fixed argv arrays without a
 shell, and enforce configured service/integration allowlists. Device power is
