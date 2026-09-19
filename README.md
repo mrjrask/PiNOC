@@ -18,8 +18,9 @@ other collection domains.
   I/O-error status, networking, systemd services, Raspberry Pi power/throttling
   state, roles, tags, and Cockpit links.
 - **Operational history:** SQLite/WAL storage, configurable sampling and
-  retention, graphs, storage forecasts, transition events, and persistent alert
-  lifecycles (active, acknowledged, muted, and resolved).
+  retention, graphs, storage forecasts, transition events, persistent alert
+  lifecycles (active, acknowledged, muted, and resolved), CSV/JSON export,
+  Prometheus scraping, and configurable alert runbooks (playbooks).
 - **Application integrations:** ADS-B, desk displays, MagicMirror, ICS Modifier,
   pi-hotspot, WireGuard, Samba, RAID, SMART/NVMe health, packages, Git, optional
   passive LAN inventory, and user-defined HTTP/TCP probes for arbitrary services.
@@ -222,6 +223,19 @@ The durable alert engine additionally supports hysteresis and sustained
 conditions under `history.thresholds`. A stable fingerprint updates an existing
 unresolved occurrence rather than opening one per poll. Recovery resolves the
 occurrence and records an event. A later recurrence opens a new occurrence.
+
+### Alert playbooks (runbooks)
+
+The optional top-level `playbooks` list attaches operator runbooks to alert
+types. Each entry needs an `id`, an `alert_type` (exact match, or a type
+prefix such as `critical_`), a `title`, and a markdown `markdown` body (up to
+20,000 characters); `actions` (up to 10, restricted to the safe-action
+registry) and `links` (up to 10, http(s) or relative URLs) are optional, and
+at most 50 playbooks are loaded. A `Runbook` button appears on matching alert
+rows in the web console, rendering the markdown, links, and one-click safe
+actions (service actions target the resource recorded on the alert). Invalid
+entries fail `validate_config`; the runtime loader drops them so a bad entry
+cannot break the console. `GET /api/playbooks` returns the loaded list.
 
 SQLite defaults:
 

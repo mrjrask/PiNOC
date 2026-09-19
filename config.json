@@ -63,6 +63,61 @@
       "disk_hysteresis": 2
     }
   },
+  "playbooks": [
+    {
+      "id": "service-failed",
+      "alert_type": "service_failed",
+      "title": "Service failed",
+      "markdown": "## Triage\n- Check the service's recent logs: `journalctl -u <service> -n 200`\n- Look at the device page for CPU, memory, or disk pressure that could have crashed it.\n- Restart the service once; if it fails again, inspect its configuration and free disk space.",
+      "actions": [
+        "service.restart",
+        "device.refresh"
+      ],
+      "links": []
+    },
+    {
+      "id": "device-offline",
+      "alert_type": "device_offline",
+      "title": "Device offline",
+      "markdown": "## Triage\n- Ping the device and check its switch port or Wi-Fi association.\n- If reachable, request a refresh; otherwise power-cycle it (Cockpit or physically).\n- Repeated offline periods plus media I/O errors usually mean storage wear.",
+      "actions": [
+        "device.refresh",
+        "device.reboot"
+      ],
+      "links": []
+    },
+    {
+      "id": "critical-disk-usage",
+      "alert_type": "critical_disk_usage",
+      "title": "Filesystem nearly full",
+      "markdown": "## Triage\n- Find the largest consumers: `du -xh --max-depth=2 <mount> | sort -h | tail`\n- Common culprits: journal logs, recording buffers, core dumps, failed package caches.\n- Free space before the filesystem fills; a repeat alert suggests a retention problem.",
+      "actions": [
+        "device.refresh",
+        "package.check"
+      ],
+      "links": []
+    },
+    {
+      "id": "raid-degraded",
+      "alert_type": "raid_degraded",
+      "title": "RAID degraded",
+      "markdown": "## Triage\n- Identify the failed member: `cat /proc/mdstat` plus a SMART check per disk.\n- Replace the failed disk and start a rebuild **before** a second failure.\n- Keep I/O light until the rebuild completes.",
+      "actions": [
+        "device.refresh"
+      ],
+      "links": []
+    },
+    {
+      "id": "probe-failed",
+      "alert_type": "probe_failed",
+      "title": "Connectivity probe failed",
+      "markdown": "## Triage\n- The alert message lists every failing check.\n- Probe the same target from another host to separate a device-local fault from a network fault.\n- Refresh the device so the probe re-runs on the next interval.",
+      "actions": [
+        "device.refresh"
+      ],
+      "links": []
+    }
+  ],
   "remote_host": "192.168.1.200",
   "remote_user": "pi",
   "remote_ssh_port": 22,

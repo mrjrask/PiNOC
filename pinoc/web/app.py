@@ -14,6 +14,7 @@ from pinoc.security import SecurityManager, install_security, redact, restore_re
 from pinoc.actions import ActionDispatcher, ActionError
 from pinoc.development import DevelopmentGateway, DevError, PROTOCOL_VERSION
 from pinoc.config_store import atomic_save, validate_config
+from pinoc.playbooks import load_playbooks, match as match_playbook
 
 PROMETHEUS_HEALTH = {"healthy": 0, "maintenance": 0, "warning": 1, "degraded": 2, "critical": 3, "offline": 4}
 
@@ -114,6 +115,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     security=SecurityManager(security_db,auth_enabled) if security_db else None
     actions=ActionDispatcher(history.db,state,coordinator,int(app.config.get("ACTION_WORKERS",2))) if history else None
     development=DevelopmentGateway(history.db,app.config.get("DEV_ARTIFACT_ROOT","data/jobs"),app.config.get("DEV_CONFIG",{})) if history else None
+    playbooks=load_playbooks(app.config.get("PINOC_CONFIG") or {},known_actions=actions.registry.keys() if actions else None)
     # Flask/Werkzeug enforces this while reading the stream, before the public
     # agent endpoints buffer a body for HMAC verification.  Allow enough room
     # for the configured artifact total after base64 and JSON encoding.
@@ -121,7 +123,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     app.config["MAX_CONTENT_LENGTH"]=int(app.config.get("DEV_AGENT_MAX_REQUEST_BYTES",artifact_total*4//3+1024*1024))
     app.config["TOKEN_SCOPE_PERMISSIONS"]={
         "api_session":"view","prometheus_metrics":"view",
-        "api_status":"view","api_overview":"view","api_devices":"view","api_device":"view","api_integrations":"view",
+        "api_status":"view","api_overview":"view","api_devices":"view","api_device":"view","api_integrations":"view","api_playbooks":"view",
         "api_device_integrations":"view","api_device_integration":"view","api_adsb":"view","api_displays":"view",
         "api_deployments":"view","api_software":"view","api_network_inventory":"view","api_services":"view",
         "api_alerts":"alerts.read","api_alert":"alerts.read",
@@ -130,7 +132,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     }
     if security:install_security(app,security)
     app.extensions["pinoc_security"]=security;app.extensions["pinoc_actions"]=actions
-    app.extensions["pinoc_development"]=development
+    app.extensions["pinoc_development"]=development;app.extensions["pinoc_playbooks"]=playbooks
 
     @app.route("/login",methods=["GET","POST"])
     def login():
@@ -470,13 +472,13 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
 
     @app.get("/api/alerts")
     def api_alerts():
-        if not history:return jsonify({"alerts":state.alerts()})
+        if not history:return jsonify({"alerts":[{**row,"playbook":match_playbook(playbooks,row.get("alert_type"))} for row in state.alerts()]})
         page,limit=_page(); where,args=["1=1"],[]
         for field,column in (("device","device_id"),("severity","severity"),("state","state"),("type","alert_type")):
             if request.args.get(field):where.append(f"{column}=?");args.append(request.args[field])
         total=history.db.scalar("SELECT COUNT(*) FROM alerts WHERE "+" AND ".join(where),args) or 0
         rows=history.db.rows("SELECT * FROM alerts WHERE "+" AND ".join(where)+" ORDER BY CASE severity WHEN 'critical' THEN 3 WHEN 'degraded' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END DESC, opened_at DESC LIMIT ? OFFSET ?",args+[limit,(page-1)*limit])
-        return jsonify({"alerts":rows,"page":page,"limit":limit,"total":total})
+        return jsonify({"alerts":[{**row,"playbook":match_playbook(playbooks,row.get("alert_type"))} for row in rows],"page":page,"limit":limit,"total":total})
 
     def _page():
         try:return max(1,int(request.args.get("page",1))),min(200,max(1,int(request.args.get("limit",50))))
@@ -485,7 +487,13 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     @app.get("/api/alerts/<int:alert_id>")
     def api_alert(alert_id):
         rows=history.db.rows("SELECT * FROM alerts WHERE alert_id=?",(alert_id,)) if history else []
-        return jsonify(rows[0]) if rows else (jsonify({"error":"alert not found"}),404)
+        if not rows:return jsonify({"error":"alert not found"}),404
+        return jsonify({**rows[0],"playbook":match_playbook(playbooks,rows[0].get("alert_type"))})
+
+    @app.get("/api/playbooks")
+    def api_playbooks():
+        if security and not security.allowed(g.identity,"view"):return jsonify({"error":"permission denied"}),403
+        return jsonify({"playbooks":playbooks})
     @app.post("/api/alerts/<int:alert_id>/acknowledge")
     def acknowledge(alert_id):
         if security and not security.allowed(g.identity,"alerts.write"):return jsonify({"error":"permission denied"}),403
