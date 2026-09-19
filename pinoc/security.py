@@ -37,27 +37,79 @@ def restore_redacted(value:Any,current:Any,secret:bool=False)->Any:
 
 def hash_token(secret:str)->str:return hashlib.sha256(secret.encode()).hexdigest()
 
+DEFAULT_RATE_LIMIT={"login_window_seconds":300,"login_max_failed":5,"lockout_seconds":900,"api_window_seconds":60,"api_max_unauthenticated":120}
+
+class SlidingWindow:
+    """Bounded per-key sliding-window counter.
+
+    Timestamps are pruned on access and, once the number of live keys exceeds
+    ``max_keys``, the key with the oldest timestamp is evicted so a hostile
+    client cannot grow process state without bound.
+    """
+    def __init__(self,window_seconds,max_keys=10000):
+        self.window=float(window_seconds);self.max_keys=max(1,int(max_keys));self.entries={};self.lock=threading.Lock()
+    def count(self,key)->int:
+        now=time.monotonic()
+        with self.lock:
+            times=[t for t in self.entries.get(key,()) if now-t<self.window]
+            if times:self.entries[key]=times
+            else:self.entries.pop(key,None)
+            return len(times)
+    def record(self,key)->int:
+        now=time.monotonic()
+        with self.lock:
+            times=[t for t in self.entries.get(key,()) if now-t<self.window];times.append(now)
+            if key not in self.entries and len(self.entries)>=self.max_keys:
+                self.entries.pop(min(self.entries,key=lambda entry:self.entries[entry][0]),None)
+            self.entries[key]=times
+            return len(times)
+    def clear(self,key):
+        with self.lock:self.entries.pop(key,None)
+
 class SecurityManager:
-    def __init__(self,db,enabled=False):
-        self.db=db;self.enabled=bool(enabled);self.failures={};self.lock=threading.Lock()
+    def __init__(self,db,enabled=False,rate_limit=None):
+        self.db=db;self.enabled=bool(enabled);self.lock=threading.Lock()
+        limit={**DEFAULT_RATE_LIMIT,**(rate_limit or {})}
+        self.login_window=float(limit["login_window_seconds"])
+        self.login_max_failed=int(limit["login_max_failed"])
+        self.lockout_seconds=float(limit["lockout_seconds"])
+        self.login_attempts=SlidingWindow(self.login_window)
+        self.login_lockouts={}
+        self.api_window=float(limit["api_window_seconds"])
+        self.api_max_unauthenticated=int(limit["api_max_unauthenticated"])
+        self.api_requests=SlidingWindow(self.api_window)
     def create_user(self,username,password,role="viewer"):
         username=username.strip()
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",username) or role not in ROLES or len(password)<10: raise ValueError("invalid username, role, or password (minimum 10 characters)")
         self.db.execute("INSERT INTO users(username,password_hash,role,enabled,created_at) VALUES(?,?,?,?,?)",(username,generate_password_hash(password),role,1,utcnow()))
     def authenticate(self,username,password,ip):
-        now=time.monotonic()
+        """Return ``(user_row, error, locked)``.
+
+        ``locked`` is true while the ``(ip, username)`` pair is inside a
+        lockout, including the failed attempt that triggered it; a successful
+        login clears both the failure window and any pending lockout.
+        """
+        username=(username or "").strip();ip=ip or "unknown"
+        key=(ip,username.lower());now=time.monotonic()
         with self.lock:
-            attempts=[x for x in self.failures.get(ip,[]) if now-x<300];self.failures[ip]=attempts
-            if len(attempts)>=5:return None,"Too many login attempts; try again later."
+            if now<self.login_lockouts.get(key,0.0):return None,"Too many login attempts; try again later.",True
         rows=self.db.rows("SELECT * FROM users WHERE username=? AND enabled=1",(username,)); row=rows[0] if rows else None
         valid=bool(row and check_password_hash(row["password_hash"],password))
         if not valid:
             # Perform equivalent hash work and return one generic message.
             if not row: check_password_hash(generate_password_hash("not-the-password"),password)
-            with self.lock:self.failures.setdefault(ip,[]).append(now)
-            return None,"Invalid username or password."
-        with self.lock:self.failures.pop(ip,None)
-        self.db.execute("UPDATE users SET last_login=? WHERE username=?",(utcnow(),username));return row,None
+            locked=False
+            with self.lock:
+                attempts=self.login_attempts.record(key)
+                if attempts>=self.login_max_failed and now>=self.login_lockouts.get(key,0.0):
+                    self.login_lockouts[key]=now+self.lockout_seconds;locked=True
+            if locked:
+                self.db.execute("INSERT INTO audit_records(timestamp,user,role,source_ip,device_id,action,target,parameters_json,authorization_result,execution_result,exit_code,duration_ms,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(utcnow(),username,"viewer",ip,None,"auth.lockout",None,json.dumps({"window_seconds":self.login_window,"max_failed":self.login_max_failed,"lockout_seconds":self.lockout_seconds},sort_keys=True),"denied","failed",None,None,"login rate limit exceeded"))
+                return None,"Too many login attempts; try again later.",True
+            return None,"Invalid username or password.",False
+        with self.lock:
+            self.login_lockouts.pop(key,None);self.login_attempts.clear(key)
+        self.db.execute("UPDATE users SET last_login=? WHERE username=?",(utcnow(),username));return row,None,False
     def create_token(self,owner,scopes:Iterable[str],devices=None,workspaces=None,job_types=None):
         allowed={"read:fleet","read:history","read:alerts","write:alerts","execute:safe_actions","admin:config"}|DEV_SCOPES; scopes=sorted(set(scopes))
         if not scopes or not set(scopes)<=allowed:raise ValueError("invalid token scopes")
@@ -103,7 +155,14 @@ def install_security(app,manager):
         # Agent protocol endpoints perform independent per-device HMAC auth.
         public=request.endpoint in {"static","health","login","agent_enroll","agent_heartbeat","agent_result"}
         if manager.enabled and not g.identity and not public:
-            if request.path.startswith("/api/"):return jsonify({"error":"authentication required"}),401
+            if request.path.startswith("/api/"):
+                ip=request.remote_addr or "unknown"
+                if manager.api_requests.count(ip)>=manager.api_max_unauthenticated:
+                    response=jsonify({"error":"rate limit exceeded"});response.status_code=429
+                    response.headers["Retry-After"]=str(max(1,int(manager.api_window)))
+                    return response
+                manager.api_requests.record(ip)
+                return jsonify({"error":"authentication required"}),401
             return redirect(url_for("login",next=request.full_path))
         permission=app.config.get("TOKEN_SCOPE_PERMISSIONS",{}).get(request.endpoint)
         if permission and g.identity and g.identity.get("token") and not manager.allowed(g.identity,permission):

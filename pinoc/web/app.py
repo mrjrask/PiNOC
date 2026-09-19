@@ -112,7 +112,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     # Actions, maintenance, audit, and development jobs need the persistence
     # schema even when metric history and authentication are both disabled.
     if security_db and not security_db.available:security_db.initialize()
-    security=SecurityManager(security_db,auth_enabled) if security_db else None
+    security=SecurityManager(security_db,auth_enabled,app.config.get("RATE_LIMIT")) if security_db else None
     actions=ActionDispatcher(history.db,state,coordinator,int(app.config.get("ACTION_WORKERS",2))) if history else None
     development=DevelopmentGateway(history.db,app.config.get("DEV_ARTIFACT_ROOT","data/jobs"),app.config.get("DEV_CONFIG",{})) if history else None
     playbooks=load_playbooks(app.config.get("PINOC_CONFIG") or {},known_actions=actions.registry.keys() if actions else None)
@@ -139,11 +139,13 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         if not security or not security.enabled:return redirect(url_for("dashboard"))
         error=None
         if request.method=="POST":
-            row,error=security.authenticate(request.form.get("username",""),request.form.get("password",""),request.remote_addr or "unknown")
+            row,error,locked=security.authenticate(request.form.get("username",""),request.form.get("password",""),request.remote_addr or "unknown")
             if row:
                 session.clear();session["username"]=row["username"];session["role"]=row["role"];session["csrf_token"]=secrets.token_urlsafe(32);session.permanent=True
                 actions.audit(row["username"],row["role"],request.remote_addr,None,"auth.login",None,{},"allowed","succeeded") if actions else None
                 return redirect(url_for("dashboard"))
+            if locked:
+                return jsonify({"error":error}),429
             actions.audit(request.form.get("username") or "unknown","viewer",request.remote_addr,None,"auth.login",None,{},"denied","failed",error="invalid credentials") if actions else None
         return render_template("login.html",error=error)
 
