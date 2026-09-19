@@ -99,6 +99,26 @@ class EndpointTest(unittest.TestCase):
             if actions:
                 actions.stop()
 
+    def test_non_running_service_states_are_counted_failed(self):
+        state = PiNOCState()
+        state.publish([DeviceState(id="pi", hostname="pi", friendly_name="Pi", online=True, health="warning",
+                                   services=[{"name": "a", "state": "running"},
+                                               {"name": "b", "state": "activating"},
+                                               {"name": "c", "state": "deactivating"},
+                                               {"name": "d", "state": "unknown"},
+                                               {"name": "e", "state": "failed"}])], replace=True)
+        app, _ = build(self._tmp.name, state=state)
+        try:
+            body = app.test_client().get("/metrics").get_data(as_text=True)
+            # Matches the health evaluator: every state except running/activating
+            # is a failure, so deactivating/unknown/failed count, not just the
+            # historical failed/inactive/stopped set.
+            self.assertIn('pinoc_device_services_failed{device="pi"} 3', body)
+        finally:
+            actions = app.extensions.get("pinoc_actions")
+            if actions:
+                actions.stop()
+
 
 class GatingTest(unittest.TestCase):
     def setUp(self):
@@ -130,6 +150,49 @@ class GatingTest(unittest.TestCase):
         self.assertEqual(self.client.post("/login", data={"username": "watcher", "password": "correct horse battery",
                                                           "csrf_token": csrf}).status_code, 302)
         self.assertEqual(self.client.get("/metrics").status_code, 200)
+
+    def _seeded_app(self):
+        self._seeded = tempfile.TemporaryDirectory()
+        state = make_state()
+        state.set_alerts([{"device_id": "pi", "alert_type": "high_memory", "severity": "warning", "state": "active"}])
+        app, _ = build(self._seeded.name, enabled=True, state=state)
+        app.extensions["pinoc_security"].create_user("person", "correct horse battery", "administrator")
+        return app
+
+    def _cleanup_seeded(self, app):
+        actions = app.extensions.get("pinoc_actions")
+        if actions:
+            actions.stop()
+        if getattr(self, "_seeded", None):
+            self._seeded.cleanup()
+
+    def test_fleet_token_cannot_export_alert_counts(self):
+        app = self._seeded_app()
+        try:
+            security = app.extensions["pinoc_security"]
+            client = app.test_client()
+            fleet_body = client.get("/metrics", headers={"Authorization": "Bearer " + security.create_token("person", ["read:fleet"])}).get_data(as_text=True)
+            self.assertIn("pinoc_fleet_devices_total", fleet_body)  # fleet gauges still available
+            self.assertNotIn("pinoc_alerts_total", fleet_body)
+            alerts_body = client.get("/metrics", headers={"Authorization": "Bearer " + security.create_token("person", ["read:fleet", "read:alerts"])}).get_data(as_text=True)
+            self.assertIn('pinoc_alerts_total{severity="warning",state="active"} 1', alerts_body)
+        finally:
+            self._cleanup_seeded(app)
+
+    def test_browser_session_sees_alert_counts(self):
+        app = self._seeded_app()
+        try:
+            app.extensions["pinoc_security"].create_user("watcher", "correct horse battery", "viewer")
+            client = app.test_client()
+            client.get("/login")
+            with client.session_transaction() as session:
+                csrf = session["csrf_token"]
+            client.post("/login", data={"username": "watcher", "password": "correct horse battery", "csrf_token": csrf})
+            # Role-based identities keep their full role permissions, so a
+            # viewer session (alerts.read) exports the alert series.
+            self.assertIn('pinoc_alerts_total{severity="warning",state="active"} 1', client.get("/metrics").get_data(as_text=True))
+        finally:
+            self._cleanup_seeded(app)
 
 
 class RendererTest(unittest.TestCase):

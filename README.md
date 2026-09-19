@@ -368,7 +368,12 @@ A Prometheus endpoint is served at `GET /metrics` (text format 0.0.4) with
 fleet totals, per-device health/up/CPU/memory/disk/uptime, failed-service and
 media-error gauges, open alert counts by severity and state, and history
 database state. When authentication is enabled, create a read-only token and
-scrape with its Bearer credential:
+scrape with its Bearer credential. The `pinoc_alerts_total` series is only
+exported to identities with the alerts-read permission (browser sessions or
+tokens carrying `read:alerts`), so a fleet-only token does not leak alert
+data; the fleet and device gauges remain available to `read:fleet`. The
+`pinoc_device_services_failed` gauge counts every monitored service whose
+state is not `running`/`activating`, matching the health evaluator:
 
 ```yaml
 # prometheus.yml
