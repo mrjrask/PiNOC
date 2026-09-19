@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 
 import pytest
@@ -213,3 +214,58 @@ def test_cli_validator_runs_full_configuration_validation(tmp_path, monkeypatch)
              "security": {"rate_limit": {"login_max_failed": 3}}}
     (tmp_path / "config.json").write_text(json.dumps(valid))
     assert main() == 0
+
+def test_login_lockout_maps_stay_bounded_under_distinct_keys(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    assert db.initialize()
+    security = SecurityManager(db, True, {
+        "login_window_seconds": 300, "login_max_failed": 1, "lockout_seconds": 900,
+        "login_max_failed_per_source": 1,
+    })
+    security.max_lockout_keys = 5
+    for index in range(15):
+        # A hostile client using many distinct (ip, username) keys.
+        security.authenticate(f"user{index}", "wrong", f"10.1.{index}.1")
+    assert len(security.login_lockouts) <= 5
+    assert len(security.login_source_lockouts) <= 5
+    # The most recent entries survive the eviction.
+    assert ("10.1.14.1", "user14") in security.login_lockouts
+    assert "10.1.14.1" in security.login_source_lockouts
+
+def test_login_lockouts_prune_expired_entries_at_cap(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    assert db.initialize()
+    security = SecurityManager(db, True, {"login_window_seconds": 300, "login_max_failed": 1, "lockout_seconds": 900})
+    security.max_lockout_keys = 4
+    now = time.monotonic()
+    for index in range(4):
+        security.login_lockouts[("10.0.0.1", f"user{index}")] = now - 1  # already expired
+    security.authenticate("userNew", "wrong", "10.0.0.1")
+    # Expired entries are pruned instead of accumulating or evicting live ones.
+    assert list(security.login_lockouts) == [("10.0.0.1", "usernew")]
+
+def test_login_lockouts_evict_earliest_deadline_at_cap(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    assert db.initialize()
+    security = SecurityManager(db, True, {"login_window_seconds": 300, "login_max_failed": 1, "lockout_seconds": 900})
+    security.max_lockout_keys = 4
+    now = time.monotonic()
+    for index in range(4):
+        security.login_lockouts[("10.0.0.1", f"user{index}")] = now + index + 10  # live, distinct deadlines
+    security.authenticate("userNew", "wrong", "10.0.0.1")
+    assert len(security.login_lockouts) == 4
+    assert ("10.0.0.1", "user0") not in security.login_lockouts  # earliest deadline evicted
+    assert ("10.0.0.1", "usernew") in security.login_lockouts
+
+def test_sliding_window_allow_enforces_limit_atomically(tmp_path):
+    window = SlidingWindow(300)
+    results = []
+    def worker():
+        results.append(window.allow("client", 50))
+    threads = [threading.Thread(target=worker) for _ in range(200)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    # Exactly the configured maximum is admitted even under concurrency.
+    assert sum(results) == 50
