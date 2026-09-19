@@ -95,7 +95,11 @@ sudo -u pi .venv/bin/python -m pinoc.admin create-user \
 
 Replace `pi` with the installation user. Open
 `http://<pinoc-host>:8088/` (or the configured port). PiNOC serves plain HTTP by
-default; use a TLS reverse proxy before exposing it beyond a trusted LAN.
+default; use a TLS reverse proxy before exposing it beyond a trusted LAN. When
+using a reverse proxy, set `authentication.trusted_proxy_count` to the exact
+number of proxies in front of PiNOC and prevent clients from reaching PiNOC
+directly. Leave it at `0` for direct connections; forwarded client-address
+headers are then ignored.
 
 ### Upgrade
 
@@ -423,7 +427,10 @@ CPU safeguard. When authentication is enabled, unauthenticated
 `/api/*` requests are limited to `api_max_unauthenticated` per
 `api_window_seconds` per address and then receive `429` with a `Retry-After`
 header before the usual `401`; token and session requests are not counted
-against this limit.
+against this limit. Behind a reverse proxy these address-based controls require
+an accurately configured `authentication.trusted_proxy_count`; only enable it
+when direct access to PiNOC is blocked, since trusting forwarded headers from
+untrusted clients permits address spoofing.
 
 Actions accept structured identifiers only, use fixed argv arrays without a
 shell, and enforce configured service/integration allowlists. Device power is

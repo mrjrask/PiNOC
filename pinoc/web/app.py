@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from flask import Flask, Response, abort, jsonify, render_template, request, session, redirect, url_for, g, send_file
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from pinoc.state import PiNOCState
 from pinoc.integrations import sanitize
@@ -105,6 +106,11 @@ def collect_prometheus_samples(state: PiNOCState, history: Any) -> List[tuple]:
 def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(config or {})
+    trusted_proxy_count=int(app.config.get("TRUSTED_PROXY_COUNT",0))
+    if trusted_proxy_count:
+        # Only trust forwarded client addresses when the operator explicitly
+        # declares how many reverse proxies are in front of this application.
+        app.wsgi_app=ProxyFix(app.wsgi_app,x_for=trusted_proxy_count)
     app.secret_key=app.config.get("SECRET_KEY") or os.getenv("PINOC_SECRET_KEY") or secrets.token_hex(32)
     app.config.update(SESSION_COOKIE_SECURE=bool(app.config.get("SESSION_COOKIE_SECURE",False)),SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE="Lax")
     auth_enabled=bool(app.config.get("AUTH_ENABLED",False))

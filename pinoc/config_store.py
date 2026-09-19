@@ -16,12 +16,20 @@ def validate_security(value):
         low,high=RATE_LIMIT_RULES[name]
         if isinstance(setting,bool) or not isinstance(setting,(int,float)) or not low<=setting<=high:raise ValueError(f"invalid security.rate_limit.{name}: must be a number between {low} and {high}")
 
+def validate_authentication(value):
+    authentication=value.get("authentication",{})
+    if not isinstance(authentication,dict):raise ValueError("authentication must be an object")
+    trusted_proxy_count=authentication.get("trusted_proxy_count",0)
+    if isinstance(trusted_proxy_count,bool) or not isinstance(trusted_proxy_count,int) or not 0<=trusted_proxy_count<=10:
+        raise ValueError("invalid authentication.trusted_proxy_count: must be an integer between 0 and 10")
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
     if not isinstance(polling,dict):raise ValueError("polling must be an object")
     for name,seconds in polling.items():
         if not isinstance(seconds,(int,float)) or not 1<=seconds<=86400:raise ValueError(f"invalid polling interval: {name}")
+    validate_authentication(value)
     validate_security(value)
     validate_playbooks(value.get("playbooks"))
     _,errors=load_devices(value,Path(base_dir))

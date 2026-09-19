@@ -18,7 +18,7 @@ class Coordinator:
     def refresh(self):
         self.refreshed.append("all")
 
-def fixture(tmp_path, rate_limit=None, auth_enabled=True):
+def fixture(tmp_path, rate_limit=None, auth_enabled=True, trusted_proxy_count=0):
     db = Database(str(tmp_path / "db.sqlite"))
     assert db.initialize()
     history = HistoryManager(db, {})
@@ -26,7 +26,8 @@ def fixture(tmp_path, rate_limit=None, auth_enabled=True):
     security.create_user("person", "correct horse battery", "administrator")
     state = PiNOCState()
     state.publish([DeviceState("pi", "pi", "Pi", online=True, address="host", collection_method="ssh", manageable_services=["demo.service"])])
-    config = {"TESTING": True, "AUTH_ENABLED": auth_enabled, "SECRET_KEY": "test-secret", "DATABASE": db}
+    config = {"TESTING": True, "AUTH_ENABLED": auth_enabled, "SECRET_KEY": "test-secret", "DATABASE": db,
+              "TRUSTED_PROXY_COUNT": trusted_proxy_count}
     if rate_limit is not None:
         config["RATE_LIMIT"] = rate_limit
     app = create_app(state, config, history, Coordinator())
@@ -144,6 +145,26 @@ def test_disabled_auth_is_not_rate_limited(tmp_path):
         assert c.get("/api/devices").status_code == 200
     app.extensions["pinoc_actions"].stop()
 
+def test_forwarded_login_sources_require_explicit_trusted_proxy(tmp_path):
+    app, db = fixture(tmp_path, rate_limit={"login_max_failed_per_source": 2})
+    client = app.test_client()
+    assert login(client).status_code == 200
+    # Forwarded headers are untrusted by default, so changing one cannot evade
+    # the source-wide limit applied to the direct peer address.
+    client.environ_base["HTTP_X_FORWARDED_FOR"] = "198.51.100.1"
+    assert login(client).status_code == 429
+    app.extensions["pinoc_actions"].stop()
+
+def test_trusted_proxy_preserves_client_source_for_login_limits(tmp_path):
+    app, db = fixture(tmp_path, rate_limit={"login_max_failed_per_source": 2}, trusted_proxy_count=1)
+    client = app.test_client()
+    for address in ("198.51.100.1", "198.51.100.2"):
+        client.environ_base["HTTP_X_FORWARDED_FOR"] = address
+        assert login(client).status_code == 200
+    client.environ_base["HTTP_X_FORWARDED_FOR"] = "198.51.100.1"
+    assert login(client).status_code == 429
+    app.extensions["pinoc_actions"].stop()
+
 def test_defaults_are_sensible():
     assert DEFAULT_RATE_LIMIT == {"login_window_seconds": 300, "login_max_failed": 5, "login_max_failed_per_source": 20, "lockout_seconds": 900, "api_window_seconds": 60, "api_max_unauthenticated": 120}
 
@@ -168,3 +189,10 @@ def test_validate_config_security_rate_limit(tmp_path):
         validate_config({**base, "security": "nope"}, tmp_path)
     with pytest.raises(ValueError):
         validate_config({**base, "security": {"rate_limit": "nope"}}, tmp_path)
+
+def test_validate_trusted_proxy_count(tmp_path):
+    base = {"devices": [], "polling": {"fleet_seconds": 10}}
+    assert validate_config({**base, "authentication": {"trusted_proxy_count": 1}}, tmp_path)
+    for invalid in (True, -1, 11, 1.5, "1"):
+        with pytest.raises(ValueError):
+            validate_config({**base, "authentication": {"trusted_proxy_count": invalid}}, tmp_path)
