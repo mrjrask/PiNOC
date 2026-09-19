@@ -1,11 +1,11 @@
 """Flask application backed exclusively by the shared state cache."""
 from __future__ import annotations
 
-import logging, os, secrets
-from datetime import datetime, timezone
+import csv, io, logging, os, secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from flask import Flask, abort, jsonify, render_template, request, session, redirect, url_for, g, send_file
+from flask import Flask, Response, abort, jsonify, render_template, request, session, redirect, url_for, g, send_file
 
 from pinoc.state import PiNOCState
 from pinoc.integrations import sanitize
@@ -503,6 +503,49 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         result=[]
         for mount in sorted({x["mount_point"] for x in rows}):result.append({"mount_point":mount,**storage_forecast([x for x in rows if x["mount_point"]==mount])})
         return jsonify({"forecasts":result})
+    # Historical tables behind /api/export and the permission each requires.
+    # The alerts kind is exported under alerts.read (its list API permission)
+    # rather than history.read so alert-only tokens work as expected.
+    EXPORT_TABLES={
+        "metrics":("device_metrics","timestamp","history.read"),
+        "storage":("storage_metrics","timestamp","history.read"),
+        "network":("network_metrics","timestamp","history.read"),
+        "services":("service_status","timestamp","history.read"),
+        "integrations":("integration_metrics","timestamp","history.read"),
+        "alerts":("alerts","opened_at","alerts.read"),
+        "events":("events","timestamp","history.read"),
+    }
+    @app.get("/api/export/<kind>")
+    def api_export(kind):
+        entry=EXPORT_TABLES.get(kind)
+        if entry is None:return jsonify({"error":f"export kind must be one of {', '.join(EXPORT_TABLES)}"}),400
+        table,time_column,permission=entry
+        if security is not None and not security.allowed(g.identity,permission):return jsonify({"error":"permission denied"}),403
+        if not history or not history.db.available:return jsonify({"error":"history unavailable"}),503
+        name=request.args.get("range","24h")
+        if name not in RANGES:return jsonify({"error":"range must be 1h, 6h, 24h, 7d, or 30d"}),400
+        try:limit=min(50000,max(1,int(request.args.get("limit",10000))))
+        except ValueError:abort(400,"invalid limit")
+        device=request.args.get("device")
+        where=[f"{time_column}>=?"]
+        args=[(datetime.now(timezone.utc)-timedelta(seconds=RANGES[name])).isoformat()]
+        if device:where.append("device_id=?");args.append(device)
+        # Rows follow the matching list APIs: chronological for time-series
+        # tables, newest-first for alerts and events.
+        order=f"{time_column} DESC" if kind in ("alerts","events") else f"device_id, {time_column}"
+        rows=sanitize(history.db.rows(f"SELECT * FROM {table} WHERE {' AND '.join(where)} ORDER BY {order} LIMIT ?",args+[limit]))
+        fmt=(request.args.get("format") or "csv").lower()
+        if fmt not in ("csv","json"):return jsonify({"error":"format must be csv or json"}),400
+        if fmt=="json":
+            return jsonify({"kind":kind,"range":name,"device":device or None,"generated_at":datetime.now(timezone.utc).isoformat(),"count":len(rows),"rows":rows})
+        if rows:columns=list(rows[0].keys())
+        else:columns=[x["name"] for x in history.db.rows(f"PRAGMA table_info({table})")]
+        def generate():
+            buffer=io.StringIO();csv.writer(buffer).writerow(columns);yield buffer.getvalue()
+            for row in rows:
+                buffer=io.StringIO();csv.writer(buffer).writerow(["" if row.get(c) is None else str(row.get(c)) for c in columns]);yield buffer.getvalue()
+        return Response(generate(),mimetype="text/csv",headers={"Content-Disposition":f'attachment; filename="pinoc-{kind}-{name}.csv"'})
+
     @app.get("/api/database/status")
     def database_status():return jsonify(history.db.status() if history else {"status":"disabled"})
 
