@@ -41,6 +41,9 @@ def evaluate(device: Dict[str, Any], thresholds: Dict[str, float] | None = None,
         if disk.get("read_only") and important: critical.append(f"{mount_point} is read-only")
         if pct is not None and pct > t["disk_critical"]: critical.append("filesystem nearly full")
         elif pct is not None and pct > t["disk_warning"]: warnings.append("filesystem usage high")
+    for medium in device.get("media", []):
+        if medium.get("media_errors"):
+            critical.append(f"storage media {medium.get('device')} is reporting I/O errors")
     if hw.get("undervoltage_now") or hw.get("throttled_now"): critical.append("current Pi power/throttle condition")
     elif hw.get("undervoltage_occurred") or hw.get("throttled_occurred"): warnings.append("historical Pi power/throttle condition")
     critical_names = set(device.get("critical_services", []))

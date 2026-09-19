@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,6 +30,8 @@ echo __THROTTLED__; command -v vcgencmd >/dev/null && vcgencmd get_throttled
 echo __MEM__; cat /proc/meminfo
 echo __DF__; df -PT -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null
 echo __MOUNTS__; cat /proc/mounts
+echo __DISKSTATS__; cat /proc/diskstats 2>/dev/null
+echo __IOERRORS__; (dmesg 2>/dev/null || journalctl -k --no-pager -n 500 2>/dev/null) | grep -iE "i/o error|blk_update_request|EXT4-fs error|sdhci|mmcblk.*error|bad block" | tail -20
 echo __ROUTE__; ip -j route show default 2>/dev/null; echo __ADDR__; ip -j address show 2>/dev/null
 echo __NET__; cat /proc/net/dev
 echo __IW__; command -v iw >/dev/null && iw dev 2>/dev/null; command -v iw >/dev/null && iw dev $(iw dev 2>/dev/null | awk '$1=="Interface"{print $2;exit}') link 2>/dev/null
@@ -100,6 +103,87 @@ def parse_storage(df: str, mounts: str) -> List[Dict[str, Any]]:
     return result
 
 
+def _whole_disk(name: str) -> List[str]:
+    """Whole-disk parent of a block device (sda1 -> sda, mmcblk0p2 -> mmcblk0)."""
+    for pattern in (r"p\d+$", r"\d+$"):
+        parent = re.sub(pattern, "", name)
+        if parent and parent != name:
+            return [parent]
+    return []
+
+
+def parse_media(diskstats: str, io_errors: str, storage: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per-medium media wear/I-O-error status for block-backed filesystems.
+
+    Best effort by design: non-root collectors (the normal case) may not read
+    kernel logs, and unusual systems may lack matching /proc/diskstats rows;
+    either way the capability degrades to an empty list instead of an error.
+    """
+    counters: Dict[str, Dict[str, int]] = {}
+    for line in diskstats.splitlines():
+        bits = line.split()
+        if len(bits) < 10 or not bits[2]:
+            continue
+        try:
+            counters[bits[2]] = {"read_sectors": int(bits[5]), "written_sectors": int(bits[9])}
+        except ValueError:
+            continue
+    if not counters:
+        return []
+    mounts_by_device: Dict[str, List[str]] = {}
+    for disk in storage:
+        device = str(disk.get("device") or "")
+        mount = disk.get("mount_point") or disk.get("path")
+        if not device or not mount or device.startswith(("tmpfs", "devtmpfs", "overlay", "squashfs")):
+            continue
+        base = device.rsplit("/", 1)[-1]
+        # Also track the whole-disk parent (e.g. mmcblk0p2 -> mmcblk0) so wear
+        # is reported once per physical medium.
+        names = [base, *_whole_disk(base)]
+        for name in names:
+            targets = mounts_by_device.setdefault(name, [])
+            if mount not in targets:
+                targets.append(mount)
+    error_lines = [line.strip() for line in io_errors.splitlines() if line.strip()][:20]
+    # Consolidate partitions into their whole-disk medium (mmcblk0p2 ->
+    # mmcblk0) so each physical medium is reported once.
+    members: Dict[str, List[str]] = {}
+    for name in mounts_by_device:
+        medium = next((parent for parent in _whole_disk(name) if parent in counters), name)
+        names = members.setdefault(medium, [])
+        if name not in names:
+            names.append(name)
+    result: List[Dict[str, Any]] = []
+    for medium, name_list in sorted(members.items()):
+        row = counters.get(medium)
+        if row is None:
+            continue
+        mounts: List[str] = []
+        for name in name_list:
+            for mount in mounts_by_device[name]:
+                if mount not in mounts:
+                    mounts.append(mount)
+        # Kernel logs may reference the same medium under sibling names
+        # (mmcblk0 vs mmc0); treat them as aliases.
+        aliases = set(name_list)
+        for name in name_list:
+            if name.startswith("mmcblk"):
+                aliases.add(name.replace("mmcblk", "mmc"))
+            elif name.startswith("mmc"):
+                aliases.add("mmcblk" + name[3:])
+        errors = [line for line in error_lines if any(alias in line for alias in aliases)]
+        result.append({
+            "device": medium,
+            "mount_points": mounts,
+            "read_bytes": row["read_sectors"] * 512,
+            "written_bytes": row["written_sectors"] * 512,
+            "io_errors": len(errors),
+            "media_errors": bool(errors),
+            "last_error": errors[-1][:200] if errors else None,
+        })
+    return result
+
+
 def parse_throttled(text: str) -> Dict[str, bool]:
     try: value=int(text.split("=",1)[-1], 0)
     except ValueError: return {}
@@ -164,6 +248,8 @@ class FleetCollector:
             if prior and network.get("rx_bytes") is not None:
                 elapsed=max(.001,stamp-prior[0]); network["rx_rate"]=max(0,(network["rx_bytes"]-prior[1])/elapsed); network["tx_rate"]=max(0,(network["tx_bytes"]-prior[2])/elapsed)
             if network.get("rx_bytes") is not None: self.previous_net[device.id]=(stamp,network["rx_bytes"],network["tx_bytes"])
+            storage=parse_storage(data.get("DF",""),data.get("MOUNTS",""))
+            media=parse_media(data.get("DISKSTATS",""),data.get("IOERRORS",""),storage)
             raw={"id":device.id,"hostname":device.hostname,"friendly_name":device.friendly_name,"address":device.address,
                  "roles":list(device.roles),"tags":list(device.tags),"collection_method":device.collection_method,"notes":device.notes,
                  "ssh_user":device.ssh_user,"ssh_port":device.ssh_port,"monitored_services":list(device.monitored_services),
@@ -175,7 +261,7 @@ class FleetCollector:
                  "model":data.get("MODEL", ""),"architecture":uname[-1] if uname else "","os":os_values.get("NAME",""),
                  "os_version":os_values.get("VERSION_ID",""),"kernel":uname[1] if len(uname)>1 else "","cpu":cpu,
                  "hardware":parse_throttled(data.get("THROTTLED","")),"memory":parse_memory(data.get("MEM","")),
-                 "storage":parse_storage(data.get("DF",""),data.get("MOUNTS","")),"network":network,
+                 "storage":storage,"media":media,"network":network,
                  "important_paths":list(device.important_paths),
                  "services":services,"critical_services":list(device.critical_services),
                  "collector_status":{"system":{"status":"ok"},"storage":{"status":"ok"},"network":{"status":"ok"},"services":{"status":"ok"}}}

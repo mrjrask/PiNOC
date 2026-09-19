@@ -14,8 +14,9 @@ other collection domains.
 ## What PiNOC provides
 
 - **Fleet monitoring:** stable device identities; local and bounded concurrent
-  SSH collection; CPU, temperature, memory, storage, networking, systemd
-  services, Raspberry Pi power/throttling state, roles, tags, and Cockpit links.
+  SSH collection; CPU, temperature, memory, storage, storage-media wear and
+  I/O-error status, networking, systemd services, Raspberry Pi power/throttling
+  state, roles, tags, and Cockpit links.
 - **Operational history:** SQLite/WAL storage, configurable sampling and
   retention, graphs, storage forecasts, transition events, and persistent alert
   lifecycles (active, acknowledged, muted, and resolved).
@@ -211,7 +212,8 @@ sudo -u pi ssh -o BatchMode=yes -p 22 pi@device.local true
 Live health is computed once in the backend. Default warnings begin above 70%
 CPU, 80% memory, 70 °C, or 80% disk. Critical conditions include temperatures
 above 80 °C, disks above 95%, current undervoltage/throttling, important
-read-only storage, degraded RAID, and failed critical services. One warning is
+read-only storage, degraded RAID, storage media reporting kernel I/O errors, and
+failed critical services. One warning is
 `warning`; multiple warnings or telemetry older than 30 seconds is `degraded`;
 telemetry older than 120 seconds is `offline`. Maintenance suppresses normal
 health evaluation but does not make never-successful telemetry healthy.
@@ -223,7 +225,8 @@ occurrence and records an event. A later recurrence opens a new occurrence.
 
 SQLite defaults:
 
-- Core and network samples every 60 seconds; storage every 300 seconds.
+- Core and network samples every 60 seconds; storage and media-wear counters
+every 300 seconds.
 - Raw data retained 7 days, hourly aggregates 90 days, and daily aggregates 365
   days.
 - WAL mode and a busy timeout; database failures degrade history without
