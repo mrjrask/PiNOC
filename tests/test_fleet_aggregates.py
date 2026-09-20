@@ -49,7 +49,7 @@ def build(tmp_path: str, enabled: bool = False, with_history: bool = True, devic
 
 
 def seed_history(db: Database, now: datetime) -> None:
-    """24 hourly buckets for two devices plus 40 hourly storage rows per device.
+    """24 hours of raw samples plus 40 hourly storage rows per device.
 
     "pi" storage grows 500 GiB -> 890 GiB over ~39h (unambiguous growth);
     "rv" storage is flat (stable). All rows fall inside the last-24h sparkline
@@ -58,18 +58,14 @@ def seed_history(db: Database, now: datetime) -> None:
     hour = now.replace(minute=0, second=0, microsecond=0)
     for h in range(24):
         bucket = (hour - timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00+00:00")
-        db.execute("INSERT OR IGNORE INTO metric_aggregates(bucket,resolution,device_id,avg_cpu,max_cpu,avg_temp,min_temp,max_temp,avg_memory,sample_count) "
-                   "VALUES(?,?,?,?,?,?,?,?,?,?)", (bucket, "hourly", "pi", 10.0, 12.0, 40.0, 38.0, 44.0, 20.0, 60))
-        db.execute("INSERT OR IGNORE INTO metric_aggregates(bucket,resolution,device_id,avg_cpu,max_cpu,avg_temp,min_temp,max_temp,avg_memory,sample_count) "
-                   "VALUES(?,?,?,?,?,?,?,?,?,?)", (bucket, "hourly", "rv", 30.0, 35.0, 60.0, 55.0, 65.0, 40.0, 60))
-        db.execute("INSERT OR IGNORE INTO network_aggregates(bucket,resolution,device_id,interface,avg_rx_rate,avg_tx_rate,avg_wifi_signal,avg_wifi_quality,sample_count) "
-                   "VALUES(?,?,?,?,?,?,?,?,?)", (bucket, "hourly", "pi", "eth0", 1_000_000, 500_000, None, None, 1))
-        db.execute("INSERT OR IGNORE INTO network_aggregates(bucket,resolution,device_id,interface,avg_rx_rate,avg_tx_rate,avg_wifi_signal,avg_wifi_quality,sample_count) "
-                   "VALUES(?,?,?,?,?,?,?,?,?)", (bucket, "hourly", "rv", "eth0", 2_000_000, 1_000_000, None, None, 1))
-        db.execute("INSERT OR IGNORE INTO storage_aggregates(bucket,resolution,device_id,mount_point,min_used,max_used,latest_used,total_bytes,sample_count) "
-                   "VALUES(?,?,?,?,?,?,?,?,?)", (bucket, "hourly", "pi", "/data", 500_000_000, 500_000_000, 500_000_000, 1_000_000_000, 1))
-        db.execute("INSERT OR IGNORE INTO storage_aggregates(bucket,resolution,device_id,mount_point,min_used,max_used,latest_used,total_bytes,sample_count) "
-                   "VALUES(?,?,?,?,?,?,?,?,?)", (bucket, "hourly", "rv", "/data", 100_000_000, 100_000_000, 100_000_000, 500_000_000, 1))
+        db.execute("INSERT OR IGNORE INTO device_metrics(timestamp,device_id,cpu_percent,cpu_temp_c,memory_percent) VALUES(?,?,?,?,?)",
+                   (bucket, "pi", 10.0, 40.0, 20.0))
+        db.execute("INSERT OR IGNORE INTO device_metrics(timestamp,device_id,cpu_percent,cpu_temp_c,memory_percent) VALUES(?,?,?,?,?)",
+                   (bucket, "rv", 30.0, 60.0, 40.0))
+        db.execute("INSERT OR IGNORE INTO network_metrics(timestamp,device_id,interface,rx_rate_bps,tx_rate_bps) VALUES(?,?,?,?,?)",
+                   (bucket, "pi", "eth0", 1_000_000, 500_000))
+        db.execute("INSERT OR IGNORE INTO network_metrics(timestamp,device_id,interface,rx_rate_bps,tx_rate_bps) VALUES(?,?,?,?,?)",
+                   (bucket, "rv", "eth0", 2_000_000, 1_000_000))
     for i in range(40):
         timestamp = (hour - timedelta(hours=39 - i)).isoformat()
         db.execute("INSERT OR IGNORE INTO storage_metrics(timestamp,device_id,mount_point,total_bytes,used_bytes) VALUES(?,?,?,?,?)",
@@ -146,7 +142,7 @@ class SparklineForecastTest(unittest.TestCase):
         self.assertEqual(latest["avg_memory"], 30.0)
         self.assertEqual(latest["rx_rate_bps"], 1_500_000)  # sample-weighted fleet average
         self.assertEqual(latest["tx_rate_bps"], 750_000)
-        self.assertEqual(latest["storage_percent"], 40.0)  # 600 MB used of 1.5 GB total
+        self.assertEqual(latest["storage_percent"], 66.0)  # latest raw samples: 990 MB of 1.5 GB
         self.assertIsInstance(latest["timestamp"], str)
         timestamps = [x["timestamp"] for x in sparkline]
         self.assertEqual(timestamps, sorted(timestamps))

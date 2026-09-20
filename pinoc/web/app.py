@@ -181,20 +181,24 @@ def fleet_aggregates(devices: List[Dict[str, Any]], history: Any = None) -> Dict
     trend_start = (now - timedelta(hours=24)).isoformat()
     points: Dict[str, Dict[str, Any]] = {}
     for row in history.db.rows(
-            "SELECT bucket, AVG(avg_cpu) AS avg_cpu, AVG(avg_temp) AS avg_temp, AVG(avg_memory) AS avg_memory "
-            "FROM metric_aggregates WHERE resolution='hourly' AND bucket>=? GROUP BY bucket", (trend_start,)):
+            "SELECT strftime('%Y-%m-%dT%H:00:00+00:00', timestamp) AS bucket, "
+            "AVG(cpu_percent) AS avg_cpu, AVG(cpu_temp_c) AS avg_temp, AVG(memory_percent) AS avg_memory "
+            "FROM device_metrics WHERE timestamp>=? GROUP BY bucket", (trend_start,)):
         points[row["bucket"]] = {"timestamp": row["bucket"], "avg_cpu": row["avg_cpu"],
                                   "avg_temp": row["avg_temp"], "avg_memory": row["avg_memory"]}
     for row in history.db.rows(
-            "SELECT bucket, SUM(avg_rx_rate * sample_count) / SUM(sample_count) AS rx_rate_bps, "
-            "SUM(avg_tx_rate * sample_count) / SUM(sample_count) AS tx_rate_bps "
-            "FROM network_aggregates WHERE resolution='hourly' AND bucket>=? GROUP BY bucket", (trend_start,)):
+            "SELECT strftime('%Y-%m-%dT%H:00:00+00:00', timestamp) AS bucket, "
+            "AVG(rx_rate_bps) AS rx_rate_bps, AVG(tx_rate_bps) AS tx_rate_bps "
+            "FROM network_metrics WHERE timestamp>=? GROUP BY bucket", (trend_start,)):
         entry = points.setdefault(row["bucket"], {"timestamp": row["bucket"]})
         entry["rx_rate_bps"] = row["rx_rate_bps"]
         entry["tx_rate_bps"] = row["tx_rate_bps"]
     for row in history.db.rows(
-            "SELECT bucket, SUM(latest_used) AS used, SUM(total_bytes) AS total FROM storage_aggregates "
-            "WHERE resolution='hourly' AND bucket>=? GROUP BY bucket", (trend_start,)):
+            "SELECT bucket, SUM(used_bytes) AS used, SUM(total_bytes) AS total FROM ("
+            "SELECT strftime('%Y-%m-%dT%H:00:00+00:00', timestamp) AS bucket, used_bytes, total_bytes, "
+            "ROW_NUMBER() OVER (PARTITION BY device_id, mount_point, "
+            "strftime('%Y-%m-%dT%H:00:00+00:00', timestamp) ORDER BY timestamp DESC) AS sample_rank "
+            "FROM storage_metrics WHERE timestamp>=?) WHERE sample_rank=1 GROUP BY bucket", (trend_start,)):
         entry = points.setdefault(row["bucket"], {"timestamp": row["bucket"]})
         if row["total"]:
             entry["storage_percent"] = round(row["used"] * 100.0 / row["total"], 1)
