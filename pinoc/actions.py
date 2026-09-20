@@ -3,12 +3,46 @@ from __future__ import annotations
 import json, os, queue, re, subprocess, threading, time, uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Any, Callable, Iterable, Optional
 from pinoc.database import utcnow
 from pinoc.security import redact
 
 UNIT=re.compile(r"[A-Za-z0-9_.@:-]{1,128}\.service$")
 MAX_OUTPUT=8192
+
+# Disk-rescue actions. Each is only executable on devices that explicitly
+# list the action in their per-device allowed_actions (default: none).
+RESCUE_ACTIONS=frozenset({"apt.clean","apt.autoremove","logs.truncate","journal.vacuum","cache.drop"})
+# Log paths are /var/log/** or under a path the operator declared as
+# important; the character class plus the .. check keep them file-safe.
+LOG_PATH_RE=re.compile(r"/var/log/[A-Za-z0-9/._@:-]{1,254}$")
+LOG_NAME_RE=re.compile(r"(?:^|/)[A-Za-z0-9._@:-]*\.log(?:\.\d+)?(?:\.gz)?$|(?:^|/)(?:syslog|messages)$")
+PATH_REMAINDER_RE=re.compile(r"[A-Za-z0-9/._@:-]+")
+VACUUM_SPEC_RE=re.compile(r"size:\d{1,5}[KMGT]?B?|time:\d{1,6}[smhdwy]")
+JOURNAL_SIZE_RE=re.compile(r"([\d.]+[KMGT]?B?)\s+in the journal")
+
+def _mi(kib: int) -> str:
+    """Human size for KiB values in action summaries."""
+    kib = int(kib or 0)
+    return f"{kib // 1024} MiB" if kib >= 1024 else f"{kib} KiB"
+
+def _journal_size(raw: str) -> Optional[str]:
+    match = JOURNAL_SIZE_RE.search(raw or "")
+    return match.group(1) if match else None
+
+def valid_log_path(path: Any, important_paths: Iterable[Any] = ()) -> bool:
+    """True when a log path is absolute, file-safe, and in an approved tree."""
+    if not isinstance(path, str) or ".." in path or len(path) > 256 or not path.startswith("/"):
+        return False
+    if LOG_PATH_RE.fullmatch(path):
+        return "/var/log//" not in path
+    for declared in important_paths:
+        prefix = str(declared).rstrip("/")
+        if prefix.startswith("/") and path.startswith(prefix + "/"):
+            remainder = path[len(prefix) + 1:]
+            if remainder and ".." not in remainder and PATH_REMAINDER_RE.fullmatch(remainder):
+                return True
+    return False
 
 @dataclass(frozen=True)
 class ActionDefinition:
@@ -31,6 +65,11 @@ class ActionDispatcher:
           "magicmirror.restart":ActionDefinition("magicmirror.restart","Restart MagicMirror","actions.execute","simple",60,handler=self._integration_service),
           "pi_hotspot.restart":ActionDefinition("pi_hotspot.restart","Restart hotspot",handler=self._integration_service),
           "package.check":ActionDefinition("package.check","Check package metadata",handler=self._package_check),
+          "apt.clean":ActionDefinition("apt.clean","Clean apt cache",timeout=120,handler=self._apt_clean),
+          "apt.autoremove":ActionDefinition("apt.autoremove","Preview package autoremove",timeout=120,handler=self._apt_autoremove),
+          "logs.truncate":ActionDefinition("logs.truncate","Truncate a log file","actions.execute","strong",60,handler=self._logs_truncate),
+          "journal.vacuum":ActionDefinition("journal.vacuum","Vacuum the journal","actions.execute","strong",180,handler=self._journal_vacuum),
+          "cache.drop":ActionDefinition("cache.drop","Drop page caches","actions.execute","strong",30,handler=self._cache_drop),
         }
         if db and db.available:
             db.execute("UPDATE action_jobs SET status='failed',completed_at=?,error='PiNOC restarted while action was running' WHERE status IN ('running','queued')",(utcnow(),))
@@ -51,6 +90,12 @@ class ActionDispatcher:
             if isinstance(cfg,dict):service=cfg.get("service",service)
             if service not in device.get("manageable_services",[]):raise ActionError("integration service is not approved for management")
         if action=="package.check" and action not in device.get("allowed_actions",[]):raise ActionError("package metadata checks are not approved for this device")
+        if action in RESCUE_ACTIONS:
+            if action not in device.get("allowed_actions",[]):raise ActionError("this recovery action is not approved for this device")
+            if action=="logs.truncate" and target is not None and not valid_log_path(target,device.get("important_paths",[])):
+                raise ActionError("log path must be under /var/log or a declared important path")
+            if action=="journal.vacuum" and target is not None and not VACUUM_SPEC_RE.fullmatch(str(target)):
+                raise ActionError("journal vacuum target must be like size:100M or time:7d")
         running=self.db.scalar("SELECT COUNT(*) FROM action_jobs WHERE device_id=? AND status IN ('queued','running')",(device_id,)) if self.db else 0
         if running and definition.conflict!="refresh":raise ActionError("a conflicting device action is already pending")
         return definition,device
@@ -84,13 +129,19 @@ class ActionDispatcher:
         self.db.execute("UPDATE action_jobs SET status=?,completed_at=?,exit_code=?,summary=?,error=?,duration_ms=? WHERE job_id=?",(status,done,code,summary,error,duration,row["job_id"]))
         self.audit(row["requested_by"],row["requested_role"],row.get("source_ip"),row["device_id"],row["action"],row.get("target"),{},"allowed",status,code,duration,error)
         if status=="succeeded" and self.coordinator:self.coordinator.refresh_device(row["device_id"]) if hasattr(self.coordinator,"refresh_device") else self.coordinator.refresh()
-    def _command(self,device,args,timeout):
-        if device.get("collection_method")=="local":cmd=args
+    def _raw(self,device,args,timeout,input_text=None):
+        """Run a fixed argv on the device (never a shell); return (code, output)."""
+        if device.get("collection_method")=="local":cmd=list(args)
         else:
             cmd=["ssh","-p",str(int(device.get("ssh_port",22))),"-o",f"ConnectTimeout={max(1,min(timeout,10))}","-o","BatchMode=yes",f"{device.get('ssh_user','pi')}@{device['address']}","--",*args]
-        proc=self.runner(cmd,text=True,capture_output=True,timeout=timeout,check=False,env={**os.environ,"LC_ALL":"C"})
+        kwargs={"text":True,"capture_output":True,"timeout":timeout,"check":False,"env":{**os.environ,"LC_ALL":"C"}}
+        if input_text is not None:kwargs["input"]=input_text
+        proc=self.runner(cmd,**kwargs)
         output=((proc.stdout or "")+("\n" if proc.stdout and proc.stderr else "")+(proc.stderr or ""))[:MAX_OUTPUT]
-        return {"exit_code":proc.returncode,"summary":"Command completed" if proc.returncode==0 else f"Remote system returned exit code {proc.returncode}","error":None if proc.returncode==0 else redact(output)}
+        return proc.returncode,output
+    def _command(self,device,args,timeout,input_text=None):
+        code,output=self._raw(device,args,timeout,input_text)
+        return {"exit_code":code,"summary":"Command completed" if code==0 else f"Remote system returned exit code {code}","error":None if code==0 else redact(output)}
     def _refresh(self,row,timeout):
         if not self.coordinator:raise ActionError("collector scheduling unavailable")
         self.coordinator.refresh_device(row["device_id"]) if hasattr(self.coordinator,"refresh_device") else self.coordinator.refresh();return {"exit_code":0,"summary":"Refresh scheduled"}
@@ -99,6 +150,84 @@ class ActionDispatcher:
         device=self.state.device(row["device_id"]); default={"wireguard.restart":"wg-quick@wg0.service","desk_display.restart":"desk-display.service","magicmirror.restart":"magicmirror.service","pi_hotspot.restart":"pi-hotspot.service"}[row["action"]]
         return self._command(device,["sudo","-n","systemctl","restart",default],timeout)
     def _package_check(self,row,timeout):return self._command(self.state.device(row["device_id"]),["/usr/bin/apt-get","--just-print","upgrade"],timeout)
+    def _fs_stats(self,device,timeout=20):
+        """(size, available) in KiB for /, or None when unreadable."""
+        code,raw=self._raw(device,["df","-kP","/"],timeout)
+        if code:return None
+        for line in raw.splitlines():
+            parts=line.split()
+            if len(parts)>=6 and parts[1].isdigit() and parts[3].isdigit():
+                return int(parts[1]),int(parts[3])
+        return None
+    def _apt_clean(self,row,timeout):
+        device=self.state.device(row["device_id"])
+        before=self._fs_stats(device)
+        result=self._command(device,["sudo","-n","apt-get","clean"],timeout)
+        if result.get("exit_code")!=0:return result
+        after=self._fs_stats(device)
+        if before and after and after[1]>before[1]:
+            result["summary"]="apt cache cleaned; "+_mi(after[1]-before[1])+" freed on /"
+        return result
+    def _apt_autoremove(self,row,timeout):
+        device=self.state.device(row["device_id"])
+        code,output=self._raw(device,["sudo","-n","apt-get","--just-print","-y","autoremove"],timeout)
+        if code:
+            return {"exit_code":code,"summary":"Remote system returned a non-zero exit code","error":redact(output)}
+        count=len([line for line in output.splitlines() if line.startswith("Remv ")])
+        return {"exit_code":0,"summary":f"autoremove preview: {count} package(s) would be removed (simulation only; no changes made)","error":None}
+    def _logs_truncate(self,row,timeout):
+        device=self.state.device(row["device_id"])
+        path=row.get("target")
+        pre=None
+        if path is not None:
+            if not valid_log_path(path,device.get("important_paths",[])):raise ActionError("log path must be under /var/log or a declared important path")
+            code,size=self._raw(device,["sudo","-n","stat","-c","%s",path],timeout)
+            if code==0 and size.strip().isdigit():pre=int(size.strip())
+        else:
+            # No explicit target: pick the largest log-looking file under /var/log.
+            code,raw=self._raw(device,["sudo","-n","du","-ak","/var/log"],timeout)
+            best=None
+            for line in raw.splitlines():
+                parts=line.split()
+                if len(parts)<2 or not parts[0].isdigit() or not LOG_NAME_RE.search(parts[1]):continue
+                if best is None or int(parts[0])>best[0]:best=(int(parts[0]),parts[1])
+            if not best:
+                return {"exit_code":1,"summary":"no truncatable log files under /var/log","error":None}
+            path=best[1];pre=best[0]*1024
+        result=self._command(device,["sudo","-n","truncate","-s","0",path],timeout)
+        if result.get("exit_code")==0 and pre:
+            result["summary"]="truncated "+path+"; "+_mi(pre//1024)+" freed"
+        return result
+    def _journal_vacuum(self,row,timeout):
+        device=self.state.device(row["device_id"])
+        spec=str(row.get("target") or "time:7d").strip()
+        if not VACUUM_SPEC_RE.fullmatch(spec):raise ActionError("journal vacuum target must be like size:100M or time:7d")
+        kind,value=spec.split(":",1)
+        code,size_before=self._raw(device,["sudo","-n","journalctl","--disk-usage"],timeout)
+        before=_journal_size(size_before) if code==0 else None
+        result=self._command(device,["sudo","-n","journalctl",f"--vacuum-{kind}={value}"],timeout)
+        if result.get("exit_code")!=0:return result
+        code,size_after=self._raw(device,["sudo","-n","journalctl","--disk-usage"],timeout)
+        after=_journal_size(size_after) if code==0 else None
+        if before or after:
+            result["summary"]="journal vacuumed ("+spec+"); "+(before or "?")+" → "+(after or "?")
+        return result
+    def _cache_drop(self,row,timeout):
+        device=self.state.device(row["device_id"])
+        def mem_available():
+            code,raw=self._raw(device,["cat","/proc/meminfo"],timeout)
+            for line in raw.splitlines():
+                if line.startswith("MemAvailable:"):
+                    parts=line.split()
+                    return int(parts[1]) if len(parts)>1 and parts[1].isdigit() else None
+            return None
+        before=mem_available()
+        result=self._command(device,["sudo","-n","tee","/proc/sys/vm/drop_caches"],timeout,input_text="3\n")
+        if result.get("exit_code")!=0:return result
+        after=mem_available()
+        if before is not None and after is not None:
+            result["summary"]="page caches dropped; MemAvailable "+_mi(before)+" → "+_mi(after)
+        return result
     def set_maintenance(self,device_id,actor,reason="",seconds=None):
         if not self.state.device(device_id):raise ActionError("device not found")
         until=(datetime.now(timezone.utc)+timedelta(seconds=seconds)).isoformat() if seconds else None

@@ -731,7 +731,10 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         if operation not in {"start","stop","restart"}:return jsonify({"error":"unsupported service operation"}),404
         return submit_action(device_id,"service."+operation,service)
     @app.post("/api/devices/<device_id>/actions/<integration_action>")
-    def integration_action(device_id,integration_action):return submit_action(device_id,integration_action.replace("-","."))
+    def integration_action(device_id,integration_action):
+        # Recovery actions (apt-*, logs-truncate, journal-vacuum) take an
+        # optional target in the request body; the registry validates it.
+        return submit_action(device_id,integration_action.replace("-","."),(request.get_json(silent=True) or {}).get("target"))
     @app.get("/api/actions")
     def action_list():return jsonify({"actions":actions.list(min(200,max(1,request.args.get("limit",50,type=int))))}) if actions else (jsonify({"actions":[]}),503)
     @app.get("/api/actions/<job_id>")
