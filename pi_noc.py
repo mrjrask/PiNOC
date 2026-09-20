@@ -57,6 +57,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "service_seconds": 15,
         "storage_seconds": 60,
         "sensor_seconds": 10,
+        "fleet_seconds": 10,
+        "log_tail_seconds": 300,
+        "log_tail_lines": 50,
     },
     "remote_host": "192.168.1.200",
     "remote_user": "pi",
@@ -1188,9 +1191,11 @@ class SharedSnapshotCoordinator:
         for error in errors:
             logging.getLogger("pinoc.config").error("invalid fleet configuration: %s", error)
         logging.getLogger("pinoc.config").info("loaded %d fleet device(s)", len(devices))
+        polling = CONFIG.get("polling", {})
         self.fleet_collector = FleetCollector(
             devices, int(CONFIG.get("fleet_max_workers", 4)),
-            float(CONFIG.get("ssh_command_timeout", 8)), read_env_value("CM5_SSH_PASS"))
+            float(CONFIG.get("ssh_command_timeout", 8)), read_env_value("CM5_SSH_PASS"),
+            float(polling.get("log_tail_seconds", 300)), int(polling.get("log_tail_lines", 50)))
         self.configured_fleet_devices = tuple(devices)
         global_thresholds = CONFIG.get("health_thresholds", {})
         try:
@@ -1202,7 +1207,6 @@ class SharedSnapshotCoordinator:
             self.global_health_thresholds = {}
         self.local_fleet_ids = {device.id for device in devices if device.collection_method == "local"}
         self.fleet_devices: List[Any] = []
-        polling = CONFIG.get("polling", {})
         temp_config = CONFIG.get("remote_temp_monitor", {})
         integration_polling = CONFIG.get("integration_polling", {})
         self.probe_collector = ProbeCollector(

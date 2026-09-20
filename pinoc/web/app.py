@@ -13,6 +13,7 @@ from pinoc.integrations import sanitize
 from pinoc.integrations.adsb import compare as compare_adsb
 from pinoc.security import SecurityManager, install_security, redact, restore_redacted
 from pinoc.actions import ActionDispatcher, ActionError
+from pinoc.collectors.fleet import redact_log_line
 from pinoc.development import DevelopmentGateway, DevError, PROTOCOL_VERSION
 from pinoc.config_store import atomic_save, validate_config
 from pinoc.playbooks import load_playbooks, match as match_playbook
@@ -163,7 +164,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         "api_device_integrations":"view","api_device_integration":"view","api_adsb":"view","api_displays":"view",
         "api_deployments":"view","api_software":"view","api_network_inventory":"view","api_services":"view",
         "api_alerts":"alerts.read","api_alert":"alerts.read",
-        "api_events":"history.read","device_events":"history.read","metrics":"history.read","forecast":"history.read",
+        "api_events":"history.read","device_events":"history.read","metrics":"history.read","forecast":"history.read","device_logs":"history.read",
         "action_list":"actions.execute","action_result":"actions.execute","api_audit":"config.write","database_status":"config.write",
     }
     if security:install_security(app,security)
@@ -642,6 +643,28 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         result=[]
         for mount in sorted({x["mount_point"] for x in rows}):result.append({"mount_point":mount,**storage_forecast([x for x in rows if x["mount_point"]==mount])})
         return jsonify({"forecasts":result})
+
+    @app.get("/api/devices/<device_id>/logs")
+    def device_logs(device_id):
+        if not history or not history.db.available:return jsonify({"error":"history unavailable","unit":None,"samples":[]}),503
+        try:samples=min(100,max(1,int(request.args.get("samples",20))))
+        except ValueError:samples=20
+        unit=(request.args.get("unit") or "").strip()[:128]
+        if not unit:
+            units=[]
+            for row in history.db.rows("SELECT unit,MAX(timestamp) AS last_timestamp FROM service_logs WHERE device_id=? GROUP BY unit ORDER BY last_timestamp DESC,unit LIMIT 50",(device_id,)):
+                latest=history.db.rows("SELECT lines FROM service_logs WHERE device_id=? AND unit=? ORDER BY timestamp DESC,id DESC LIMIT 1",(device_id,row["unit"]))
+                line_count=len(latest[0]["lines"].splitlines()) if latest else 0
+                units.append({"unit":row["unit"],"last_timestamp":row["last_timestamp"],"line_count":line_count})
+            return jsonify({"device_id":device_id,"unit":None,"units":units})
+        # Log lines were redacted when stored; redact again on the read path
+        # so previously persisted samples stay safe if the rules ever tighten.
+        rows=history.db.rows("SELECT timestamp,lines FROM service_logs WHERE device_id=? AND unit=? ORDER BY timestamp DESC,id DESC LIMIT ?",(device_id,unit,samples))
+        out=[]
+        for row in rows:
+            lines=[redact_log_line(line) for line in row["lines"].splitlines() if line.strip()][:100]
+            if lines:out.append({"timestamp":row["timestamp"],"lines":lines})
+        return jsonify({"device_id":device_id,"unit":unit,"samples":out})
     # Historical tables behind /api/export and the permission each requires.
     # The alerts kind is exported under alerts.read (its list API permission)
     # rather than history.read so alert-only tokens work as expected.

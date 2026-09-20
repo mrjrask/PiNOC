@@ -16,6 +16,7 @@ class HistoryManager:
         self.previous={}; self.last_sample={}; self.cpu_since={}; self.dropped=0
         self.state=state
         self.intervals={"core":float(self.config.get("core_interval_seconds",60)),"network":float(self.config.get("network_interval_seconds",60)),"storage":float(self.config.get("storage_interval_seconds",300)),"integration":float(self.config.get("integration_interval_seconds",60))}
+        self.log_ring_size=min(1000,max(1,int(self.config.get("log_ring_samples",50))))
 
     def start(self):
         if self.enabled and self.db.initialize(): self.thread.start(); self.event(None,"pinoc_started","info","PiNOC started")
@@ -96,6 +97,14 @@ class HistoryManager:
         if d.get("online") and self._due(did,"storage",stamp):
             for x in d.get("storage",[]):self.db.execute("INSERT OR IGNORE INTO storage_metrics(timestamp,device_id,device,mount_point,filesystem,total_bytes,used_bytes,available_bytes,percent_used,read_only) VALUES(?,?,?,?,?,?,?,?,?,?)",(stamp,did,x.get("device"),x.get("mount_point") or x.get("path") or "unknown",x.get("filesystem"),x.get("total") or x.get("size"),x.get("used"),x.get("available"),x.get("percent"),int(bool(x.get("read_only")))))
             for x in d.get("media",[]):self.db.execute("INSERT OR IGNORE INTO media_metrics(timestamp,device_id,block_device,read_bytes,written_bytes,io_errors,media_errors) VALUES(?,?,?,?,?,?,?)",(stamp,did,x.get("device"),x.get("read_bytes"),x.get("written_bytes"),x.get("io_errors"),None if x.get("media_errors") is None else int(bool(x.get("media_errors")))))
+        if d.get("online"):
+            for entry in d.get("logs",[]):
+                unit=str(entry.get("unit") or "")[:128]
+                lines="\n".join(str(x) for x in entry.get("lines") or [])[:65536]
+                if unit and lines:
+                    self.db.execute("INSERT INTO service_logs(timestamp,device_id,unit,lines) VALUES(?,?,?,?)",(stamp,did,unit,lines))
+                    self.db.execute("DELETE FROM service_logs WHERE device_id=? AND unit=? AND id NOT IN (SELECT id FROM service_logs WHERE device_id=? AND unit=? ORDER BY id DESC LIMIT ?)",
+                                    (did,unit,did,unit,self.log_ring_size))
         if d.get("online") and self._due(did,"integration",stamp):
             allow={"adsb":{"aircraft","aircraft_with_positions","messages_per_second","positions_per_second","maximum_range_nm","strong_signal_percent"},"samba":{"active_sessions","unique_users","open_files"},"pi_hotspot":{"client_count","response_latency_ms"},"magicmirror":{"response_latency_ms","restart_count"},"desk_display":{"response_latency_ms"},"wireguard":{"latest_handshake_seconds","rx_bytes","tx_bytes"},"probe":{"response_latency_ms","failed_checks","checks_total"}}
             for name,status in d.get("integrations",{}).items():
@@ -209,7 +218,7 @@ class HistoryManager:
                     ON CONFLICT(bucket,resolution,device_id,mount_point) DO UPDATE SET min_used=min(min_used,excluded.min_used),max_used=max(max_used,excluded.max_used),latest_used=excluded.latest_used,total_bytes=excluded.total_bytes,sample_count=sample_count+1""",(x["bucket"],x["device_id"],x["mount_point"],x["used_bytes"],x["used_bytes"],x["used_bytes"],x["total_bytes"]))
             network=con.execute("SELECT strftime('%Y-%m-%dT%H:00:00+00:00',timestamp) AS bucket,device_id,interface,AVG(rx_rate_bps),AVG(tx_rate_bps),AVG(wifi_signal_dbm),AVG(wifi_quality_percent),COUNT(*) FROM network_metrics WHERE timestamp<? GROUP BY bucket,device_id,interface",(cutoff,)).fetchall()
             con.executemany("INSERT OR REPLACE INTO network_aggregates VALUES(?,'hourly',?,?,?,?,?,?,?)",network)
-            con.execute("DELETE FROM device_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM network_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM storage_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM integration_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM media_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM metric_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),));con.execute("DELETE FROM metric_aggregates WHERE resolution='daily' AND bucket<?",((now-timedelta(days=daily)).isoformat(),));con.execute("DELETE FROM storage_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),));con.execute("DELETE FROM network_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),))
+            con.execute("DELETE FROM device_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM network_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM storage_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM integration_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM media_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM service_logs WHERE timestamp<?",(cutoff,));con.execute("DELETE FROM metric_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),));con.execute("DELETE FROM metric_aggregates WHERE resolution='daily' AND bucket<?",((now-timedelta(days=daily)).isoformat(),));con.execute("DELETE FROM storage_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),));con.execute("DELETE FROM network_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),))
         self.db.last_aggregation=self.db.last_retention_cleanup=utcnow()
         self._refresh_cache()
 

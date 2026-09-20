@@ -144,6 +144,8 @@ normal SSH collection uses keys and `BatchMode=yes`.
 | `authentication.enabled` | `false` | Authentication fallback; `PINOC_AUTH_ENABLED` takes precedence. |
 | `security.rate_limit.*` | see `config.json` | Login lockout (window, max failed attempts, lockout) and the unauthenticated `/api/*` 429 window. |
 | `polling.*` | 10–60 s | Independent fleet, local, network, remote, service, storage, sensor, and temperature schedules. |
+| `polling.log_tail_seconds` / `log_tail_lines` | `300` / `50` | Journal-tail capture cadence and per-unit line count (1–200). |
+| `history.log_ring_samples` | `50` | Service-log samples kept per device/unit ring buffer. |
 | `fleet_max_workers` | `4` | Maximum concurrent fleet collection workers. |
 | `ssh_command_timeout` | `8` s | Per-device SSH command timeout. |
 | `health_thresholds` | see `config.json` | Live CPU, memory, temperature, disk, stale, and offline thresholds. |
@@ -252,6 +254,9 @@ SQLite defaults:
 
 - Core and network samples every 60 seconds; storage and media-wear counters
 every 300 seconds.
+- Journal tails for each device's monitored/critical services (up to 10 units)
+every 300 seconds (`polling.log_tail_seconds`), at most 50 lines per unit
+(`polling.log_tail_lines`, 1–200).
 - Raw data retained 7 days, hourly aggregates 90 days, and daily aggregates 365
   days.
 - WAL mode and a busy timeout; database failures degrade history without
@@ -265,6 +270,27 @@ Back up the live database with SQLite's online backup API:
 python3 -m pinoc.database backup /safe/path/pinoc-backup.db \
   --database data/pinoc.db
 ```
+
+### Service logs (bounded journal tails)
+
+Each device's monitored and critical services receive a bounded `journalctl`
+tail. The collector requests journal output only on the low-frequency
+`polling.log_tail_seconds` cycle (default 300 s) and never more than
+`polling.log_tail_lines` lines per unit (1–200; default 50). The device-side
+capture is further limited to the newest 200 lines and 64 KiB per unit, and
+PiNOC caps each stored line at 512 characters. Apparent secrets — key material,
+`password`/`token`/`api key`/`authorization` values, and `Bearer`
+credentials — are redacted when the tail is stored and again when it is read
+back. Between journal cycles the device keeps its most recent tail, so the Logs
+panel always shows the latest capture.
+
+Samples persist in the history database as a per-unit ring of
+`history.log_ring_samples` (default 50) plus the normal raw retention. The
+device page renders a **Service logs** panel with unit selection, refresh,
+copy, and plain-text download, backed by `GET /api/devices/<id>/logs` (a
+per-unit summary without `unit`, or the newest `samples` — 1 to 100, default
+20 — line tails for one unit). The route requires `history.read` (token scope
+`read:history`).
 
 Use `python3 -m pinoc.database status --database PATH` for status. Run
 `python3 -m pinoc.database vacuum --database PATH` only during a planned
@@ -344,6 +370,7 @@ GET /api/deployments
 GET /api/software
 GET /api/network-inventory
 GET /api/devices/<id>/metrics?range=24h
+GET /api/devices/<id>/logs[?unit=&samples=20]
 GET /api/devices/<id>/integrations/probe
 GET /api/devices/<id>/storage/forecast
 GET /api/alerts[?state=active]
