@@ -98,7 +98,7 @@ class ParseJlogsTest(unittest.TestCase):
         self.assertEqual(units, ["ssh", "cockpit"])
         ssh = entries[0]["lines"]
         self.assertEqual(ssh[0], "Jan 01 00:00:01 pi sshd[123]: Accepted publickey for pi")
-        self.assertEqual(ssh[1], "Jan 01 00:00:02 pi sshd[123]: password=[REDACTED] in env")
+        self.assertEqual(ssh[1], "Jan 01 00:00:02 pi sshd[123]: password=[REDACTED]")
         self.assertEqual(ssh[2], "Jan 01 00:00:03 pi sshd[123]: using [REDACTED]")
         self.assertEqual(entries[1]["lines"], ["Jan 01 00:00:04 pi cockpit: listening"])
 
@@ -146,6 +146,14 @@ class ParseJlogsTest(unittest.TestCase):
                          '{"token":"[REDACTED]"}')
         self.assertEqual(redact_log_line("{'password': 'hunter2'}"),
                          "{'password': '[REDACTED]'}")
+        self.assertEqual(
+            redact_log_line("password: correct horse battery"),
+            "password: [REDACTED]",
+        )
+        self.assertEqual(
+            redact_log_line("token=multi word credential followed by context"),
+            "token=[REDACTED]",
+        )
         self.assertEqual(
             redact_log_line(r'{"token":"prefix\"secret-suffix","status":200}'),
             '{"token":"[REDACTED]","status":200}',

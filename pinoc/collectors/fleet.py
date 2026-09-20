@@ -281,10 +281,14 @@ _AUTHORIZATION_RE = re.compile(
     r"(?P=key_quote)\s*[:=]\s*)"
     r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n]*)"
 )
+# An unquoted secret has no reliable delimiter: whitespace may be part of a
+# passphrase.  Consume the remainder of the log line rather than risk retaining
+# credential material after its first word.  Quoted values remain bounded by
+# their matching quote so structured log fields following them are preserved.
 _SECRET_RE = re.compile(
     r"(?i)(?P<assignment>(?P<key_quote>['\"]?)[A-Za-z0-9_-]*"
     r"(?:password|passwd|secret|token|api[_\-]?key)[A-Za-z0-9_-]*"
-    r"(?P=key_quote)\s*[:=]\s*)(?:Bearer\s+)?(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\S+)"
+    r"(?P=key_quote)\s*[:=]\s*)(?:Bearer\s+)?(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n]*)"
     r"|\bBearer\s+\S+"
 )
 _KEY_BLOCK_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
