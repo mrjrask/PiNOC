@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from pinoc.collectors.fleet import SCRIPT, FleetCollector, parse_devresolve, parse_media, sections
-from pinoc.database import Database
+from pinoc.database import Database, SCHEMA_VERSION
 from pinoc.device_config import DeviceConfig
 from pinoc.health import evaluate
 from pinoc.history import HistoryManager
@@ -297,7 +297,7 @@ class HistoryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             db = Database(f"{folder}/db.sqlite")
             self.assertTrue(db.initialize())
-            self.assertEqual(db.scalar("SELECT version FROM schema_version"), 7)
+            self.assertEqual(db.scalar("SELECT version FROM schema_version"), SCHEMA_VERSION)
             history = HistoryManager(db, {})
             stamp = "2026-01-01T00:00:00+00:00"
             history._sample(self._device(stamp), stamp)

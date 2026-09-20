@@ -5,3 +5,6 @@
 #alert-runbook .runbook-body ul{margin:8px 0 8px 22px;line-height:1.5}
 #alert-runbook .actions{margin-top:10px;display:flex;flex-wrap:wrap;gap:8px}
 #alert-runbook .action-result{min-height:1.3em;margin-top:8px}
+
+.log-output{max-height:340px;overflow:auto;background:#081722;border:1px solid var(--line);border-radius:8px;padding:12px;margin:0;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+#logs .filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center}

@@ -21,6 +21,10 @@ LOG = logging.getLogger("pinoc.collectors.fleet")
 DISCOVERY = ("cockpit", "ssh", "desk-display", "piaware", "dump1090", "readsb", "magicmirror",
              "ics_modifier", "pi-hotspot", "temp-monitor", "smb", "smbd", "nmbd", "wg-quick")
 SCRIPT = r'''set +e
+# Optional bounded journal tail: "__jlogs__:<lines>:<unit1,unit2,...>" is passed
+# only on the low-frequency cycles the PiNOC host selects.
+jlogs_lines=""; jlogs_units=""
+for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; esac; done
 echo __OS__; cat /etc/os-release 2>/dev/null; echo __UNAME__; uname -srm
 echo __MODEL__; tr -d '\000' </proc/device-tree/model 2>/dev/null; echo
 echo __UPTIME__; cat /proc/uptime; echo __LOAD__; cat /proc/loadavg
@@ -55,6 +59,14 @@ echo __IW__; command -v iw >/dev/null && iw dev 2>/dev/null; command -v iw >/dev
 if [ "$1" = "__discover__" ]; then shift; discovered=$(systemctl list-unit-files --no-legend --no-pager 2>/dev/null | awk '{print $1}' | grep -E '^(cockpit|ssh|desk-display|piaware|dump1090|readsb|magicmirror|ics_modifier|pi-hotspot|temp-monitor|smb|smbd|nmbd|wg-quick)' | head -30); fi
 echo __SERVICES__; systemctl show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ActiveEnterTimestampMonotonic,NRestarts,MemoryCurrent "$@" $discovered 2>/dev/null
 echo __UNITS__; systemctl list-unit-files --no-legend --no-pager 2>/dev/null
+echo __JLOGS__
+if [ -n "$jlogs_lines" ]; then
+  for unit in $(printf '%s' "$jlogs_units" | tr ',' ' '); do
+    echo "=== $unit"
+    journalctl -u "$unit" --no-pager -q -n "$jlogs_lines" --output=short-precise 2>/dev/null | tail -n 200 | tail -c 65536
+    echo
+  done
+fi
 '''
 
 
@@ -263,14 +275,82 @@ def parse_services(text: str, critical: Iterable[str], system_uptime: float = 0)
     return result
 
 
+_UNIT_RE = re.compile(r"[A-Za-z0-9@:_.\-]{1,128}")
+_AUTHORIZATION_RE = re.compile(
+    r"(?i)(?P<assignment>(?P<key_quote>['\"]?)[A-Za-z0-9_-]*authorization[A-Za-z0-9_-]*"
+    r"(?P=key_quote)\s*[:=]\s*)"
+    r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n]*)"
+)
+# An unquoted secret has no reliable delimiter: whitespace may be part of a
+# passphrase.  Consume the remainder of the log line rather than risk retaining
+# credential material after its first word.  Quoted values remain bounded by
+# their matching quote so structured log fields following them are preserved.
+_SECRET_RE = re.compile(
+    r"(?i)(?P<assignment>(?P<key_quote>['\"]?)[A-Za-z0-9_-]*"
+    r"(?:password|passwd|secret|token|api(?:[_\-]|[ \t]+)?key)[A-Za-z0-9_-]*"
+    r"(?P=key_quote)\s*[:=]\s*)(?:Bearer\s+)?(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n]*)"
+    r"|\bBearer\s+\S+"
+)
+_KEY_BLOCK_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
+
+def redact_log_line(line: str) -> str:
+    """Best-effort neutralization of obvious secret patterns in log text."""
+    line = _KEY_BLOCK_RE.sub("[REDACTED-KEY]", line)
+    def replacement(match: re.Match[str]) -> str:
+        assignment = match.group("assignment")
+        if assignment is None:
+            return "[REDACTED]"
+        value = match.group("value")
+        quote = value[0] if value and value[0] in "'\"" else ""
+        return assignment + quote + "[REDACTED]" + quote
+
+    # Authorization schemes have different credential grammars (for example,
+    # Basic, Digest, and AWS4-HMAC-SHA256), so redact an unquoted header value
+    # through the end of the line rather than attempting to identify a token.
+    line = _AUTHORIZATION_RE.sub(replacement, line)
+    return _SECRET_RE.sub(replacement, line)
+
+def parse_jlogs(text: str) -> List[Dict[str, Any]]:
+    """Parse the __JLOGS__ section into per-unit tails with hard caps."""
+    # Redact across the complete section before splitlines() so a conventional
+    # multiline PEM block is matched from its BEGIN marker through its END
+    # marker.  Per-line redaction alone cannot recognize such blocks.
+    text = _KEY_BLOCK_RE.sub("[REDACTED-KEY]", text)
+    entries: List[Dict[str, Any]] = []
+    current: Optional[Dict[str, Any]] = None
+    for line in text.splitlines():
+        if line.startswith("=== "):
+            if current is not None:
+                entries.append(current)
+            current = {"unit": line[4:].strip()[:128], "lines": []}
+        elif current is not None and line.strip():
+            current["lines"].append(redact_log_line(line)[:512])
+            if len(current["lines"]) > 200:
+                del current["lines"][: len(current["lines"]) - 200]
+    if current is not None:
+        entries.append(current)
+    return [entry for entry in entries if entry["lines"]][:50]
+
 class FleetCollector:
     def __init__(self, devices: List[DeviceConfig], max_workers: int = 4, timeout: float = 8,
-                 password: str = "", runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> None:
+                 password: str = "", runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+                 log_tail_seconds: float = 300.0, log_tail_lines: int = 50) -> None:
         self.devices=devices; self.max_workers=max(1,min(int(max_workers),16)); self.timeout=float(timeout)
         self.password=password; self.runner=runner; self.previous_cpu={}; self.previous_net={}; self.snapshots={}
+        self.log_tail_seconds=max(30.0,float(log_tail_seconds)); self.log_tail_lines=min(200,max(1,int(log_tail_lines)))
+        self._last_jlogs: Dict[str, float] = {}
 
-    def _command(self, device: DeviceConfig) -> List[str]:
+    def _command(self, device: DeviceConfig, jlogs_due: bool = False) -> List[str]:
         args = (["__discover__"] if device.service_discovery else []) + list(device.monitored_services)
+        if jlogs_due:
+            units: List[str] = []
+            for name in [str(x) for x in list(device.monitored_services) + list(device.critical_services)]:
+                if _UNIT_RE.fullmatch(name) and name not in units:
+                    units.append(name)
+                if len(units) >= 10:
+                    break
+            if units:
+                args.append(f"__jlogs__:{self.log_tail_lines}:{','.join(units)}")
         if device.collection_method == "local": return ["sh", "-s", "--", *args]
         ssh=["ssh","-p",str(device.ssh_port),"-o",f"ConnectTimeout={max(1,int(self.timeout))}","-o","ServerAliveInterval=3"]
         if self.password: return ["sshpass","-e",*ssh,"-o","BatchMode=no",f"{device.ssh_user}@{device.address}","sh","-s","--",*args]
@@ -278,11 +358,13 @@ class FleetCollector:
 
     def collect_device(self, device: DeviceConfig) -> DeviceState:
         attempted=datetime.now(timezone.utc).isoformat(); old=self.snapshots.get(device.id)
+        jlogs_due=time.monotonic()-self._last_jlogs.get(device.id,0.0)>=self.log_tail_seconds
         try:
             env={**os.environ,"LC_ALL":"C"};
             if self.password: env["SSHPASS"]=self.password
-            proc=self.runner(self._command(device),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
+            proc=self.runner(self._command(device,jlogs_due),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
             if proc.returncode: raise RuntimeError((proc.stderr or f"command exited {proc.returncode}").strip()[:240])
+            self._last_jlogs[device.id]=time.monotonic()
             data=sections(proc.stdout); cpu,counter=parse_cpu(data,self.previous_cpu.get(device.id)); self.previous_cpu[device.id]=counter
             os_values={}
             for row in data.get("OS","").splitlines():
@@ -344,6 +426,7 @@ class FleetCollector:
                     error=None if available else "optional data source not discovered",
                     data={"services":found},critical=bool(cfg.get("critical",False))).to_dict()
             raw["integrations"]=integrations
+            raw["logs"]=parse_jlogs(data.get("JLOGS","")) if jlogs_due else (list(old.logs) if old else [])
             health,reasons,stale=evaluate(raw,device.thresholds); raw.update(health=health,health_reasons=reasons,stale=stale)
             result=DeviceState.from_dict(raw); self.snapshots[device.id]=result; return result
         except (subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
