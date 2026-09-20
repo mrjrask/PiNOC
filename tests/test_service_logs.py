@@ -128,6 +128,19 @@ class ParseJlogsTest(unittest.TestCase):
             "abcdef123456789",
             redact_log_line("Authorization: Bearer abcdef123456789"),
         )
+        for value in (
+            "Basic dXNlcjpwYXNz",
+            'Digest username="admin", realm="private", response="secret"',
+            "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20260920/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc123",
+        ):
+            self.assertEqual(
+                redact_log_line(f"Authorization: {value}"),
+                "Authorization: [REDACTED]",
+            )
+        self.assertEqual(
+            redact_log_line('{"authorization":"Basic dXNlcjpwYXNz","status":200}'),
+            '{"authorization":"[REDACTED]","status":200}',
+        )
         self.assertIn("[REDACTED]", redact_log_line("api-key: ab12cd34ef"))
         self.assertEqual(redact_log_line('{"token":"abcdef123456"}'),
                          '{"token":"[REDACTED]"}')

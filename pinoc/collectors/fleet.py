@@ -276,8 +276,12 @@ def parse_services(text: str, critical: Iterable[str], system_uptime: float = 0)
 
 
 _UNIT_RE = re.compile(r"[A-Za-z0-9@:_.\-]{1,128}")
+_AUTHORIZATION_RE = re.compile(
+    r"(?i)(?P<assignment>(?P<key_quote>['\"]?)\bauthorization\b(?P=key_quote)\s*[:=]\s*)"
+    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\r\n]*)"
+)
 _SECRET_RE = re.compile(
-    r"(?i)(?P<assignment>(?P<key_quote>['\"]?)\b(?:authorization|password|passwd|secret|token|api[_\-]?key)\b"
+    r"(?i)(?P<assignment>(?P<key_quote>['\"]?)\b(?:password|passwd|secret|token|api[_\-]?key)\b"
     r"(?P=key_quote)\s*[:=]\s*)(?:Bearer\s+)?(?P<value>\"[^\"]*\"|'[^']*'|\S+)"
     r"|\bBearer\s+\S+"
 )
@@ -294,6 +298,10 @@ def redact_log_line(line: str) -> str:
         quote = value[0] if value and value[0] in "'\"" else ""
         return assignment + quote + "[REDACTED]" + quote
 
+    # Authorization schemes have different credential grammars (for example,
+    # Basic, Digest, and AWS4-HMAC-SHA256), so redact an unquoted header value
+    # through the end of the line rather than attempting to identify a token.
+    line = _AUTHORIZATION_RE.sub(replacement, line)
     return _SECRET_RE.sub(replacement, line)
 
 def parse_jlogs(text: str) -> List[Dict[str, Any]]:
