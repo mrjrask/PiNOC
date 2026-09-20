@@ -118,6 +118,25 @@ class ExportApiTest(unittest.TestCase):
         payload = self.client.get("/api/export/events?format=json&range=24h").get_json()
         self.assertIn('=HYPERLINK("https://evil.example")', [r["message"] for r in payload["rows"]])
 
+    def test_csv_neutralizes_formula_hidden_behind_control_characters(self):
+        # Importers may skip leading tab/CR/LF before treating the cell as a
+        # formula, so each control-character variant must be neutralized too.
+        hostile = ["\t=HYPERLINK(\"https://evil.example\")", "\r+cmd|calc",
+                   "\n-SUM(A1)", "\t\r\n=PING()"]
+        benign = ["\tplain text", "\nplain text"]
+        for message in [*hostile, *benign]:
+            self.db.execute("INSERT INTO events(timestamp,device_id,event_type,severity,message,metadata_json) VALUES(?,?,?,?,?,?)",
+                            (iso(120), "pi", "device_online", "info", message, "{}"))
+        text = self.client.get("/api/export/events?format=csv&range=24h").get_data(as_text=True)
+        rows = list(csv.reader(io.StringIO(text)))
+        messages = [row[rows[0].index("message")] for row in rows[1:]]
+        self.assertEqual(set(messages),
+                         {"'" + m for m in hostile} | set(benign) | {"Device returned online"})
+        # JSON exports return the raw values, control characters included.
+        payload = self.client.get("/api/export/events?format=json&range=24h").get_json()
+        self.assertEqual(set(r["message"] for r in payload["rows"]),
+                         set(hostile) | set(benign) | {"Device returned online"})
+
     def test_csv_keeps_numeric_cells_unmodified(self):
         self.db.execute("INSERT INTO device_metrics(timestamp,device_id,cpu_percent) VALUES(?,?,?)",
                         (iso(120), "pi", -5.5))
