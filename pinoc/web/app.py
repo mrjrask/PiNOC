@@ -133,7 +133,7 @@ def csv_safe(value: Any) -> Any:
     return text
 
 
-def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None) -> Flask:
+def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(config or {})
     trusted_proxy_count=int(app.config.get("TRUSTED_PROXY_COUNT",0))
@@ -160,6 +160,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     app.config["TOKEN_SCOPE_PERMISSIONS"]={
         "api_session":"view","prometheus_metrics":"view",
         "api_status":"view","api_overview":"view","api_devices":"view","api_device":"view","api_integrations":"view","api_playbooks":"view",
+        "api_notifications":"config.write","api_notifications_test":"config.write",
         "api_device_integrations":"view","api_device_integration":"view","api_adsb":"view","api_displays":"view",
         "api_deployments":"view","api_software":"view","api_network_inventory":"view","api_services":"view",
         "api_alerts":"alerts.read","api_alert":"alerts.read",
@@ -209,6 +210,20 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         app.config["PINOC_CONFIG"]=value
         actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"config.update",None,{},"allowed","succeeded") if actions else None
         return jsonify({"ok":True,"restart_required":True})
+    @app.get("/api/notifications")
+    def api_notifications():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        if notifications is None:return jsonify({"enabled":False,"channels":[]})
+        return jsonify(redact(notifications.status()))
+    @app.post("/api/notifications/test")
+    def api_notifications_test():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        if notifications is None:return jsonify({"ok":False,"error":"notifications are not running"}),409
+        channel=(request.get_json(silent=True) or {}).get("channel")
+        result=notifications.test_channel(str(channel)) if channel else None
+        if result is None:return jsonify({"ok":False,"error":"unknown channel"}),404
+        actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"notifications.test",channel,{},"allowed","succeeded" if result["ok"] else "failed",error=result["error"]) if actions else None
+        return jsonify(result)
     @app.get("/api/users")
     def users():
         if not security.allowed(g.identity,"users.write"):return jsonify({"error":"permission denied"}),403

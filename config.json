@@ -74,6 +74,13 @@
       "disk_hysteresis": 2
     }
   },
+  "notifications": {
+    "enabled": false,
+    "open_severities": ["critical"],
+    "resolve_severities": [],
+    "queue_size": 200,
+    "channels": []
+  },
   "playbooks": [
     {
       "id": "service-failed",

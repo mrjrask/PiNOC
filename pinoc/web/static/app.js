@@ -75,4 +75,54 @@ async function deviceHistory(id){let ranges=['1h','6h','24h','7d','30d'],root=do
 const originalDevice=device;device=async id=>{await originalDevice(id);deviceHistory(id);let [dr,sr]=await Promise.all([fetch(`/api/devices/${encodeURIComponent(id)}`),fetch('/api/session')]),d=await dr.json(),who=await sr.json();if(!['operator','administrator'].includes(who.user?.role))return;let root=document.querySelector('#device'),panel=document.createElement('section');panel.className='panel actions';panel.innerHTML=`<h2>Safe actions</h2><button data-refresh>Refresh now</button> ${(d.manageable_services||[]).map(x=>`<button data-service="${esc(x)}">Restart ${esc(x)}</button>`).join(' ')} <button data-maintenance>Maintenance 1 hour</button>${who.user.role==='administrator'?' <button data-reboot>Reboot</button> <button data-shutdown>Shutdown</button>':''}<p class="action-result"></p>`;root.querySelector('.title-row').after(panel);panel.onclick=async e=>{let url,body={};if(e.target.dataset.refresh!==undefined)url=`/api/devices/${encodeURIComponent(id)}/refresh`;if(e.target.dataset.service&&confirm(`Restart ${e.target.dataset.service} on ${d.friendly_name}?`))url=`/api/devices/${encodeURIComponent(id)}/services/${encodeURIComponent(e.target.dataset.service)}/restart`;if(e.target.dataset.maintenance!==undefined){url=`/api/devices/${encodeURIComponent(id)}/maintenance`;body={seconds:3600,reason:prompt('Maintenance reason (optional)')||''}}if(e.target.dataset.reboot!==undefined&&confirm(`Reboot ${d.friendly_name}?`))url=`/api/devices/${encodeURIComponent(id)}/reboot`;if(e.target.dataset.shutdown!==undefined&&prompt(`Type ${d.friendly_name} to confirm shutdown`)===d.friendly_name)url=`/api/devices/${encodeURIComponent(id)}/shutdown`;if(!url)return;let response=await mutate(url,{method:'POST',body:JSON.stringify(body)}),result=await response.json();panel.querySelector('.action-result').textContent=response.ok?`Queued ${result.job_id||'maintenance update'}`:result.error}};
 async function integrations(path){let endpoint=path==='/adsb'?'/api/adsb':path==='/displays'?'/api/displays':path==='/software'?'/api/software':path==='/network-inventory'?'/api/network-inventory':'/api/integrations',data=await(await fetch(endpoint)).json(),rows=data.integrations||data.receivers||data.displays||data.devices||[];document.querySelector('#integration-list').innerHTML=table(['Device','Integration / status','Health','Data'],rows.map(x=>`<tr><td>${esc(x.friendly_name||x.device_id||x.hostname)}</td><td>${esc(x.name||x.os||'inventory')}</td><td>${esc(x.health||x.status||'available')}</td><td><code>${esc(JSON.stringify(x.data||x.packages||x))}</code></td></tr>`))}
 async function audit(){let d=await(await fetch('/api/audit')).json();document.querySelector('#audit-table').innerHTML=table(['Time','User','Device','Action','Result'],(d.audit||[]).map(x=>`<tr><td>${localTime(x.timestamp)}</td><td>${esc(x.user)}</td><td>${esc(x.device_id)}</td><td>${esc(x.action)} ${esc(x.target||'')}</td><td>${esc(x.execution_result||x.authorization_result)}</td></tr>`))}
-return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
+async function settings(){
+  const statusRoot=document.querySelector('#notifications-status');
+  const editor=document.querySelector('#notifications-editor');
+  if(!statusRoot&&!editor&&!document.querySelector('#notifications-save'))return;
+  const statusMessage=()=>document.querySelector('#notifications-message');
+  const renderStatus=async()=>{
+    if(!statusRoot)return;
+    try{
+      let d=await(await fetch('/api/notifications')).json();
+      if(!d.channels.length){statusRoot.innerHTML=`<p class="muted">${d.enabled?'No channels configured.':'Notifications are disabled.'} Add enabled channels in the editor below.</p>`;return}
+      statusRoot.innerHTML=d.channels.map(c=>`<article class="notification-channel"><div><h3>${esc(c.id||'channel')}${c.enabled?'':' <span class="maintenance">disabled</span>'}</h3><small>${esc(c.kind||'')}${c.sent||c.failed?` · sent ${c.sent||0}, failed ${c.failed||0}`:''}${c.last_success?` · last success ${localTime(c.last_success)}`:''}</small>${c.last_error?`<small class="critical-row">last error: ${esc(c.last_error)}</small>`:''}</div><button data-channel="${esc(c.id||'')}">Send test</button></article>`).join('');
+      statusRoot.querySelectorAll('button[data-channel]').forEach(button=>{button.onclick=async()=>{
+        button.disabled=true;
+        try{
+          let response=await mutate('/api/notifications/test',{method:'POST',body:JSON.stringify({channel:button.dataset.channel})});
+          let result=await response.json().catch(()=>({ok:false,error:`HTTP ${response.status}`}));
+          let note=statusMessage();
+          if(note){note.textContent=result.ok?'Test message delivered.':`Test failed: ${result.error||response.status}`;note.className=result.ok?'muted':'critical-row'}
+          await renderStatus();
+        }catch(error){}
+        button.disabled=false;
+      }});
+    }catch(error){statusRoot.innerHTML='<p class="muted">Notification status unavailable.</p>'}
+  };
+  await renderStatus();
+  let refresh=document.querySelector('#notifications-status-refresh');
+  if(refresh)refresh.onclick=()=>{renderStatus()};
+  if(editor){
+    let fallback={enabled:false,open_severities:[],resolve_severities:[],channels:[]};
+    let current=fallback;
+    try{let config=await(await fetch('/api/settings')).json();current=config.notifications||fallback}catch(error){}
+    editor.value=JSON.stringify(current,null,2);
+    let save=document.querySelector('#notifications-save');
+    if(save)save.onclick=async()=>{
+      let value;
+      try{value=JSON.parse(editor.value)}catch(err){let note=statusMessage();if(note){note.textContent=`Invalid JSON: ${err.message}`;note.className='critical-row'}return}
+      let note=statusMessage();
+      if(note){note.textContent='Saving…';note.className='muted'}
+      try{
+        let config=await(await fetch('/api/settings')).json();
+        config.notifications=value;
+        let response=await mutate('/api/settings',{method:'PUT',body:JSON.stringify(config)});
+        let saved=await response.json().catch(()=>({}));
+        if(!response.ok)throw new Error(saved.error||`HTTP ${response.status}`);
+        if(note){note.textContent='Saved. Restart PiNOC to apply.';note.className='muted'}
+        await renderStatus();
+      }catch(err){if(note){note.textContent=err.message;note.className='critical-row'}}
+    };
+  }
+}
+return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();

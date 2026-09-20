@@ -5,3 +5,4 @@
 #alert-runbook .runbook-body ul{margin:8px 0 8px 22px;line-height:1.5}
 #alert-runbook .actions{margin-top:10px;display:flex;flex-wrap:wrap;gap:8px}
 #alert-runbook .action-result{min-height:1.3em;margin-top:8px}
+.config-editor{width:100%;min-height:220px;margin-top:6px;background:#09131c;border:1px solid var(--line);border-radius:8px;color:var(--text);font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;padding:12px}.notification-channel{display:flex;justify-content:space-between;align-items:center;gap:14px;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:12px 16px;margin:10px 0}.notification-channel h3{margin:0;font-size:15px}.notification-channel small{display:block;color:var(--muted)}

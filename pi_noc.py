@@ -1400,13 +1400,16 @@ def main() -> None:
     state = PiNOCState()
     from pinoc.database import Database
     from pinoc.history import HistoryManager
+    from pinoc.notifications import NotificationService
     history_config = CONFIG.get("history", {})
     database_path = read_env_value("PINOC_DATABASE_PATH") or str(
         history_config.get("database_path", APP_DIR / "data" / "pinoc.db")
     )
-    history = HistoryManager(Database(database_path), history_config, state)
+    notifications = NotificationService(CONFIG.get("notifications", {}), state=state)
+    history = HistoryManager(Database(database_path), history_config, state, notifier=notifications)
     state.add_publish_hook(history.submit)
     history.start()
+    notifications.start()
     coordinator = SharedSnapshotCoordinator(state)
     coordinator.start()
 
@@ -1422,7 +1425,7 @@ def main() -> None:
         "RATE_LIMIT":CONFIG.get("security",{}).get("rate_limit",{}),
         "DEV_CONFIG":CONFIG.get("development_gateway",{}),
         "DEV_ARTIFACT_ROOT":str(APP_DIR/CONFIG.get("development_gateway",{}).get("artifact_root","data/jobs")),
-        "PINOC_CONFIG":CONFIG,"CONFIG_PATH":str(APP_DIR/"config.json"),"APP_DIR":str(APP_DIR)}, history, coordinator)
+        "PINOC_CONFIG":CONFIG,"CONFIG_PATH":str(APP_DIR/"config.json"),"APP_DIR":str(APP_DIR)}, history, coordinator, notifications)
 
     previous_signal_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
@@ -1443,6 +1446,7 @@ def main() -> None:
     finally:
         try:
             coordinator.stop()
+            notifications.stop()
             history.stop()
         finally:
             for signum, previous_handler in previous_signal_handlers.items():

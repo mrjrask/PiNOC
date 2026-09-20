@@ -23,6 +23,40 @@ def validate_authentication(value):
     if isinstance(trusted_proxy_count,bool) or not isinstance(trusted_proxy_count,int) or not 0<=trusted_proxy_count<=10:
         raise ValueError("invalid authentication.trusted_proxy_count: must be an integer between 0 and 10")
 
+def validate_notifications(value):
+    section=value.get("notifications") or {}
+    if not isinstance(section,dict):raise ValueError("notifications must be an object")
+    if not isinstance(section.get("enabled",False),bool):raise ValueError("notifications.enabled must be a boolean")
+    queue_size=section.get("queue_size")
+    if queue_size is not None and (isinstance(queue_size,bool) or not isinstance(queue_size,int) or not 1<=queue_size<=10000):
+        raise ValueError("notifications.queue_size must be an integer between 1 and 10000")
+    for key in ("open_severities","resolve_severities"):
+        severities=section.get(key) or []
+        if not isinstance(severities,list) or any(not isinstance(s,str) or s not in ("info","warning","degraded","critical") for s in severities):
+            raise ValueError(f"notifications.{key} must be a list of info, warning, degraded, or critical")
+    ids=set()
+    for i,channel in enumerate(section.get("channels") or []):
+        if not isinstance(channel,dict):raise ValueError(f"notifications.channels[{i}] must be an object")
+        cid=channel.get("id")
+        if not isinstance(cid,str) or not cid or cid in ids:raise ValueError(f"notifications.channels[{i}].id must be a unique non-empty string")
+        ids.add(cid)
+        kind=channel.get("kind")
+        if kind not in ("ntfy","smtp","webhook"):raise ValueError(f"notifications.channels[{i}].kind must be ntfy, smtp, or webhook")
+        if "enabled" in channel and not isinstance(channel.get("enabled"),bool):raise ValueError(f"notifications.channels[{i}].enabled must be a boolean")
+        url=str(channel.get("url") or "")
+        if kind in ("ntfy","webhook") and not url.startswith(("http://","https://")):
+            raise ValueError(f"notifications.channels[{i}].url must be an http(s) URL")
+        if kind=="ntfy" and not str(channel.get("topic") or "").strip():
+            raise ValueError(f"notifications.channels[{i}].topic is required for ntfy channels")
+        if kind=="smtp":
+            if not str(channel.get("host") or "").strip():raise ValueError(f"notifications.channels[{i}].host is required for smtp channels")
+            port=channel.get("port")
+            if port is not None and (isinstance(port,bool) or not isinstance(port,int) or not 1<=port<=65535):
+                raise ValueError(f"notifications.channels[{i}].port must be between 1 and 65535")
+            to=channel.get("to") or []
+            if not isinstance(to,list) or not to or any(not isinstance(x,str) or not x.strip() for x in to):
+                raise ValueError(f"notifications.channels[{i}].to must be a non-empty list of addresses")
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
@@ -32,6 +66,7 @@ def validate_config(value,base_dir=Path(".")):
     validate_authentication(value)
     validate_security(value)
     validate_playbooks(value.get("playbooks"))
+    validate_notifications(value)
     _,errors=load_devices(value,Path(base_dir))
     if errors:raise ValueError("; ".join(errors))
     return value
