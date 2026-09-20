@@ -1,8 +1,9 @@
 """Flask application backed exclusively by the shared state cache."""
 from __future__ import annotations
 
-import csv, io, logging, os, secrets, time
+import csv, io, logging, os, secrets, shutil, time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from flask import Flask, Response, abort, jsonify, render_template, request, session, redirect, url_for, g, send_file
@@ -230,7 +231,7 @@ def fleet_aggregates(devices: List[Dict[str, Any]], history: Any = None) -> Dict
     return result
 
 
-def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None) -> Flask:
+def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None, backups: Any = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(config or {})
     trusted_proxy_count=int(app.config.get("TRUSTED_PROXY_COUNT",0))
@@ -321,6 +322,46 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         if result is None:return jsonify({"ok":False,"error":"unknown channel"}),404
         actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"notifications.test",channel,{},"allowed","succeeded" if result["ok"] else "failed",error=result["error"]) if actions else None
         return jsonify(result)
+    @app.get("/api/backup")
+    def backup_status():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"administrator required"}),403
+        if backups is None:return jsonify({"enabled":False,"destination":None,"interval_hours":None,"keep":None,"last_run":None,"last_bundle":None,"last_size_bytes":None,"last_error":None,"signing_key_configured":False})
+        return jsonify(backups.status())
+    @app.post("/api/backup/run")
+    def backup_run():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"administrator required"}),403
+        if backups is None or not backups.enabled:return jsonify({"error":"scheduled backups are not configured"}),409
+        status=backups.run_backup()
+        actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"backup.run",None,{},"allowed","succeeded" if not status.get("last_error") else "failed",error=status.get("last_error")) if actions else None
+        return jsonify(status)
+    @app.get("/api/backup/export")
+    def backup_export():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"administrator required"}),403
+        from pinoc.backup import BackupError, build_bundle
+        import tempfile
+        staging=Path(tempfile.mkdtemp(prefix="pinoc-export-"))
+        try:
+            db=history.db if history else app.config.get("DATABASE")
+            if db is None or not getattr(db,"available",False):raise BackupError("database unavailable")
+            key=(backups.signing_key() if backups is not None else None) or os.environ.get("PINOC_BACKUP_KEY") or None
+            metadata=build_bundle(app.config.get("APP_DIR","."),staging/"pinoc-bundle.tar",db,config=app.config.get("PINOC_CONFIG"),signing_key=key)
+        except BackupError as exc:
+            shutil.rmtree(staging,ignore_errors=True)
+            actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"backup.export",None,{},"allowed","failed",error=str(redact(exc))[:500]) if actions else None
+            return jsonify({"error":str(redact(exc))}),500
+        except Exception as exc:
+            shutil.rmtree(staging,ignore_errors=True)
+            actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"backup.export",None,{},"allowed","failed",error=str(redact(exc))[:500]) if actions else None
+            return jsonify({"error":str(redact(exc))}),500
+        actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"backup.export",None,{},"allowed","succeeded") if actions else None
+        bundle_path=staging/"pinoc-bundle.tar"
+        stamp=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        response=send_file(bundle_path,as_attachment=True,download_name=f"pinoc-bundle-{stamp}.tar")
+        response.headers["Content-Type"]="application/x-tar"
+        def _cleanup():
+            shutil.rmtree(staging,ignore_errors=True)
+        response.call_on_close(_cleanup)
+        return response
     @app.get("/api/users")
     def users():
         if not security.allowed(g.identity,"users.write"):return jsonify({"error":"permission denied"}),403

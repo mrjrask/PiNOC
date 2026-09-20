@@ -277,6 +277,52 @@ python3 -m pinoc.database backup /safe/path/pinoc-backup.db \
   --database data/pinoc.db
 ```
 
+### Backup/restore bundles (one file = one instance)
+
+`pinoc backup` packages a whole PiNOC instance into a single signed tar:
+`config.json`, `config/devices.json` (when present), `env-manifest.txt` (the
+`.env` **key names only — values never enter a bundle**), an online SQLite
+backup, and a `bundle.json`/`bundle.sig` metadata pair. The signature is
+HMAC-SHA256 when a signing key is set (environment `PINOC_BACKUP_KEY` by
+default, overridable via `backups.signing_key_env`), otherwise a plain
+SHA-256 digest; verification has no bypass.
+
+```sh
+# Export one bundle (also available as “Download backup” on the Settings page)
+python3 -m pinoc.backup export -o /safe/path/pinoc-bundle.tar
+
+# Restore: validates signature, schema version, and required .env secrets,
+# audits the restore against the pre-restore database, then replaces
+# config.json / config/devices.json / pinoc.db atomically while the service
+# runs and audits the restored database as well. Type RESTORE (or --yes) to
+# confirm; restart the service afterwards.
+python3 -m pinoc.backup restore /safe/path/pinoc-bundle.tar --yes
+```
+
+Restore refuses a bundle that fails its signature, is from a newer PiNOC
+schema, or references required secrets (for example `PINOC_SECRET_KEY` when
+authentication is enabled) that are absent from the local `.env`; the missing
+keys are listed and `--allow-missing-secrets` is the only way to proceed.
+
+Scheduled remote backups read the `backups` section (default: disabled):
+
+```json
+"backups": {
+  "enabled": true,
+  "interval_hours": 24,
+  "keep": 7,
+  "signing_key_env": "PINOC_BACKUP_KEY",
+  "destination": {"type": "path", "path": "/mnt/nas/pinoc"}
+}
+```
+
+`destination.type` is `path` (any local, SMB, or NFS mount) or `ssh`
+(`host`, `user`, `port`, `path`) for outbound copies; delivery uses fixed-argv
+`scp`/`ssh`, rotates to `keep` bundles, and a failed run raises a `critical`
+notification when notifications are configured. The Settings page shows the
+schedule, last run, and size, with Download and Run-now controls (both
+administrator-only and audited).
+
 ### Service logs (bounded journal tails)
 
 Each device's monitored and critical services receive a bounded `journalctl`

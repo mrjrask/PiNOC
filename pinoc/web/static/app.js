@@ -168,5 +168,33 @@ async function settings(){
       }catch(err){if(note){note.textContent=err.message;note.className='critical-row'}}
     };
   }
+  const backupStatus=document.querySelector('#backup-status');
+  const backupMessage=()=>document.querySelector('#backup-message');
+  if(backupStatus){
+    const renderBackup=async()=>{
+      try{
+        let d=await(await fetch('/api/backup')).json();
+        if(!d.enabled){backupStatus.innerHTML='<p class="muted">Scheduled backups are disabled. Set <code>backups.enabled</code> and a destination in config.json (applies after restart).</p>';return}
+        const dest=d.destination?(d.destination.type==='ssh'?`${d.destination.host}:${d.destination.path}`:d.destination.path):'';
+        backupStatus.innerHTML=`<p>Scheduled every ${d.interval_hours}h, keeping ${d.keep}. Destination: <code>${esc(dest)}</code>${d.last_run?` — last run ${localTime(d.last_run)}`:''}${d.last_size_bytes?`, ${formatBytes(d.last_size_bytes)}`:''}.</p>${d.last_error?`<small class="critical-row">last run failed: ${esc(d.last_error)}</small>`:''}`;
+      }catch(error){backupStatus.innerHTML='<p class="muted">Backup status unavailable.</p>'}
+    };
+    await renderBackup();
+    let download=document.querySelector('#backup-download');
+    if(download)download.onclick=()=>{let note=backupMessage();if(note){note.textContent='Preparing download…';note.className='muted'}window.location.href='/api/backup/export'};
+    let runNow=document.querySelector('#backup-run-now');
+    if(runNow)runNow.onclick=async()=>{
+      let note=backupMessage();
+      if(note){note.textContent='Running backup…';note.className='muted'}
+      runNow.disabled=true;
+      try{
+        let response=await mutate('/api/backup/run',{method:'POST'});
+        let result=await response.json().catch(()=>({ok:false,error:`HTTP ${response.status}`}));
+        if(note){note.textContent=result.last_error?`Backup failed: ${result.last_error}`:`Backup complete: ${result.last_bundle||''}`;note.className=result.last_error?'critical-row':'muted'}
+        await renderBackup();
+      }catch(err){if(note){note.textContent=err.message;note.className='critical-row'}}
+      runNow.disabled=false;
+    };
+  }
 }
 return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
