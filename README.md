@@ -31,8 +31,11 @@ other collection domains.
   enrollment, restricted workspaces, approved test profiles, bounded output and
   artifacts, explicit state-changing approvals, cancellation, and matrix jobs.
 - **Web operations console:** a responsive, accessible Flask/Waitress interface
-  with fleet health summaries, search and filters, device drill-downs, history,
-  integrations, alerts, events, safe actions, and development workflows.
+  with fleet health summaries, fleet-wide aggregates (average CPU, memory, and
+  temperature; storage totals with growth forecast; combined network throughput;
+  uptime range) plus a 24-hour trend chart, search and filters, device
+  drill-downs, history, integrations, alerts, events, safe actions, and
+  development workflows.
 
 ## Architecture
 
@@ -355,6 +358,13 @@ GET /api/database/status
 Fleet queries accept `health`, `role`, and `tag` filters. Event and alert APIs
 support bounded pagination and relevant device/type/severity/state filters.
 Allowed metric ranges are `1h`, `6h`, `24h`, `7d`, and `30d`.
+
+The dashboard's `GET /api/overview` also returns an `aggregates` object:
+fleet-wide rollups (online count, average CPU/memory/temperature, storage
+totals and average usage, summed network rates, uptime range) computed from
+the live state cache, plus — when the caller holds `history.read` — a 24-hour
+sparkline and a storage-growth forecast (the shortest time-to-full across the
+most-used mounts).
 
 The export API returns a whole history table as a CSV download (the default)
 or a JSON object with the same range and device filters. Kinds are `metrics`,

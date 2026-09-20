@@ -16,6 +16,7 @@ from pinoc.actions import ActionDispatcher, ActionError
 from pinoc.development import DevelopmentGateway, DevError, PROTOCOL_VERSION
 from pinoc.config_store import atomic_save, validate_config
 from pinoc.playbooks import load_playbooks, match as match_playbook
+from pinoc.history import storage_forecast
 
 PROMETHEUS_HEALTH = {"healthy": 0, "maintenance": 0, "warning": 1, "degraded": 2, "critical": 3, "offline": 4}
 
@@ -131,6 +132,97 @@ def csv_safe(value: Any) -> Any:
     if text.lstrip("\t\r\n")[:1] in {"=", "+", "-", "@"}:
         return "'" + text
     return text
+
+
+def fleet_aggregates(devices: List[Dict[str, Any]], history: Any = None) -> Dict[str, Any]:
+    """Fleet-wide rollup for the dashboard.
+
+    Live values are averaged or summed across online devices from the state
+    cache. When a history store is available, a 24-hour trend (fleet-averaged
+    CPU, temperature, memory, network throughput, storage usage) and a fleet
+    storage-growth forecast from the per-mount storage_forecast() are added.
+    """
+    online = [d for d in devices if d.get("online")]
+    def average(values):
+        values = [v for v in values if v is not None]
+        return round(sum(values) / len(values), 1) if values else None
+    temps = [d.get("cpu", {}).get("temperature_c") for d in online]
+    storage_total = storage_used = 0
+    storage_percents: List[float] = []
+    mounts: List[tuple] = []
+    for d in online:
+        for x in d.get("storage", []):
+            total = int(x.get("total") or 0)
+            if total:
+                storage_total += total
+                storage_used += int(x.get("used") or 0)
+                mounts.append((d.get("id"), x.get("mount_point") or x.get("path") or "", int(x.get("used") or 0)))
+            if x.get("percent") is not None:
+                storage_percents.append(x["percent"])
+    uptimes = sorted(int(d["uptime_seconds"]) for d in online if d.get("uptime_seconds"))
+    result: Dict[str, Any] = {
+        "online_devices": len(online),
+        "cpu_average_percent": average([d.get("cpu", {}).get("utilization_percent") for d in online]),
+        "cpu_max_temperature_c": round(max(t for t in temps if t is not None), 1) if any(t is not None for t in temps) else None,
+        "memory_average_percent": average([d.get("memory", {}).get("percent") for d in online]),
+        "storage_total_bytes": storage_total or None,
+        "storage_used_bytes": storage_used if storage_total else None,
+        "storage_average_percent": average(storage_percents),
+        "rx_rate_bps": sum(int(d.get("network", {}).get("rx_rate") or 0) for d in online) or None,
+        "tx_rate_bps": sum(int(d.get("network", {}).get("tx_rate") or 0) for d in online) or None,
+        "uptime_min_seconds": uptimes[0] if uptimes else None,
+        "uptime_max_seconds": uptimes[-1] if uptimes else None,
+        "storage_forecast": None,
+        "sparkline": None,
+    }
+    if history is None or not history.db.available:
+        return result
+    now = datetime.now(timezone.utc)
+    trend_start = (now - timedelta(hours=24)).isoformat()
+    points: Dict[str, Dict[str, Any]] = {}
+    for row in history.db.rows(
+            "SELECT bucket, AVG(avg_cpu) AS avg_cpu, AVG(avg_temp) AS avg_temp, AVG(avg_memory) AS avg_memory "
+            "FROM metric_aggregates WHERE resolution='hourly' AND bucket>=? GROUP BY bucket", (trend_start,)):
+        points[row["bucket"]] = {"timestamp": row["bucket"], "avg_cpu": row["avg_cpu"],
+                                  "avg_temp": row["avg_temp"], "avg_memory": row["avg_memory"]}
+    for row in history.db.rows(
+            "SELECT bucket, SUM(avg_rx_rate * sample_count) / SUM(sample_count) AS rx_rate_bps, "
+            "SUM(avg_tx_rate * sample_count) / SUM(sample_count) AS tx_rate_bps "
+            "FROM network_aggregates WHERE resolution='hourly' AND bucket>=? GROUP BY bucket", (trend_start,)):
+        entry = points.setdefault(row["bucket"], {"timestamp": row["bucket"]})
+        entry["rx_rate_bps"] = row["rx_rate_bps"]
+        entry["tx_rate_bps"] = row["tx_rate_bps"]
+    for row in history.db.rows(
+            "SELECT bucket, SUM(latest_used) AS used, SUM(total_bytes) AS total FROM storage_aggregates "
+            "WHERE resolution='hourly' AND bucket>=? GROUP BY bucket", (trend_start,)):
+        entry = points.setdefault(row["bucket"], {"timestamp": row["bucket"]})
+        if row["total"]:
+            entry["storage_percent"] = round(row["used"] * 100.0 / row["total"], 1)
+    result["sparkline"] = [points[bucket] for bucket in sorted(points)][-24:]
+    # Fleet storage growth: the shortest forecast across the highest-use mounts.
+    days: List[float] = []
+    statuses: List[str] = []
+    for device_id, mount, used in sorted(mounts, key=lambda item: -item[2])[:12]:
+        if not mount:
+            continue
+        rows = history.db.rows(
+            "SELECT timestamp, used_bytes, total_bytes FROM storage_metrics WHERE device_id=? AND mount_point=? AND timestamp>=? ORDER BY timestamp",
+            (device_id, mount, (now - timedelta(days=30)).isoformat()))
+        forecast = storage_forecast(rows)
+        statuses.append(forecast["status"])
+        if forecast.get("estimated_days_remaining") is not None:
+            days.append(forecast["estimated_days_remaining"])
+    if days:
+        status = "growing"
+    elif "stable" in statuses:
+        status = "stable"
+    elif "decreasing" in statuses:
+        status = "decreasing"
+    else:
+        status = statuses[0] if statuses else "insufficient"
+    result["storage_forecast"] = {"status": status,
+                                   "estimated_days_remaining": round(min(days), 1) if days else None}
+    return result
 
 
 def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None) -> Flask:
@@ -453,6 +545,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
                 )
         return jsonify({
             "summary": state.summary(),
+            "aggregates": fleet_aggregates(devices, history if can_read_history else None),
             "active_alerts": sanitize(alerts[:5]),
             "recent_events": sanitize(events),
             "integration_counts": integration_counts,

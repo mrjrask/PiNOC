@@ -14,6 +14,21 @@ async function dashboard(){
     let names=['devices','online','healthy','warning','degraded','critical','offline','failed_services'];
     document.querySelector('#summary').innerHTML=names.map(n=>`<article data-kind="${esc(n)}"><strong>${esc(s[n]??0)}</strong><span>${esc(n.replaceAll('_',' '))}</span></article>`).join('');
     if(updated)updated.textContent=`Updated ${localTime(overview.generated_at)}`;
+    let f=overview.aggregates||{},bps=v=>v==null?'—':v>=1e6?`${(v/1e6).toFixed(1)} MB/s`:v>=1e3?`${Math.round(v/1e3)} KB/s`:`${Math.round(v)} B/s`;
+    let items=[
+      [f.storage_used_bytes!=null&&f.storage_total_bytes?`${bytes(f.storage_used_bytes)} of ${bytes(f.storage_total_bytes)}`:null,'storage used',f.storage_forecast&&f.storage_forecast.estimated_days_remaining!=null?`≈${Math.round(f.storage_forecast.estimated_days_remaining)} days to full`:(f.storage_forecast&&f.storage_forecast.status!=='growing'?`trend ${f.storage_forecast.status}`:'')],
+      [f.rx_rate_bps!=null||f.tx_rate_bps!=null?`${bps(f.rx_rate_bps)} ↓ · ${bps(f.tx_rate_bps)} ↑`:null,'network',''],
+      [f.cpu_average_percent!=null?pct(f.cpu_average_percent):null,'avg cpu',''],
+      [f.memory_average_percent!=null?pct(f.memory_average_percent):null,'avg memory',''],
+      [f.cpu_max_temperature_c!=null?temperature(f.cpu_max_temperature_c):null,'max temperature',''],
+      [f.uptime_min_seconds!=null?`${duration(f.uptime_min_seconds)} – ${duration(f.uptime_max_seconds)}`:null,'uptime min – max','']
+    ].filter(x=>x[0]!=null);
+    let aggRoot=document.querySelector('#fleet-aggregates');
+    aggRoot.hidden=!items.length;
+    aggRoot.innerHTML=items.map(([v,label,sub])=>`<article><strong>${esc(v)}</strong><span>${esc(label)}</span>${sub?`<small>${esc(sub)}</small>`:''}</article>`).join('');
+    let spark=f.sparkline||[],trend=document.querySelector('#fleet-trend');
+    trend.hidden=spark.length<2;
+    if(!trend.hidden&&spark.length)plot(document.querySelector('#fleet-spark'),spark,['avg_cpu','avg_temp','avg_memory'],['#62d3ff','#edc84b','#ff9850']);
     let active=overview.active_alerts||[],alertRoot=document.querySelector('#alert-summary');
     alertRoot.innerHTML=`<div class="panel-heading"><div><p class="eyebrow">Attention</p><h2>Active alerts</h2></div><a href="/alerts">View all</a></div>${active.length?active.slice(0,3).map(a=>`<p><strong class="severity-${esc(a.severity)}">${esc(a.severity)}</strong> · ${esc(a.device_id)} — ${esc(a.message)}</p>`).join(''):'<p class="muted">No unresolved conditions. Your fleet is clear.</p>'}`;
     let valid=(key,fn,format)=>{let x=devices.filter(d=>Number.isFinite(fn(d))).sort((a,b)=>fn(b)-fn(a))[0];return x?`<article><span>${key}</span><strong>${esc(x.friendly_name)}</strong><small>${esc(format(fn(x)))}</small></article>`:''};
