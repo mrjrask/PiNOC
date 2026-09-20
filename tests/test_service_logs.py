@@ -134,6 +134,18 @@ class ParseJlogsTest(unittest.TestCase):
             "key [REDACTED-KEY]")
         self.assertEqual(redact_log_line("plain line"), "plain line")
 
+    def test_multiline_private_key_is_redacted_before_lines_are_split(self):
+        entries = parse_jlogs("""=== ssh
+Jan 01 sshd: key follows -----BEGIN PRIVATE KEY-----
+MIIE-sensitive-material
+-----END PRIVATE KEY----- trailing text
+Jan 01 sshd: safe line""")
+
+        self.assertEqual(entries, [{"unit": "ssh", "lines": [
+            "Jan 01 sshd: key follows [REDACTED-KEY] trailing text",
+            "Jan 01 sshd: safe line",
+        ]}])
+
 
 class CommandCadenceTest(unittest.TestCase):
     def _collector(self, log_tail_seconds=300.0, **overrides):
@@ -285,6 +297,17 @@ class LogsApiTest(unittest.TestCase):
         self.assertEqual(len(payload["samples"]), 2)
         self.assertEqual(payload["samples"][0]["lines"], ["newer line", "[REDACTED]"])
         self.assertEqual(payload["samples"][1]["lines"], ["line one", "password=[REDACTED]", "line three"])
+
+    def test_multiline_private_key_already_in_storage_is_redacted_on_read(self):
+        self.db.execute("INSERT INTO service_logs(timestamp,device_id,unit,lines) VALUES(?,?,?,?)",
+                        ("2026-01-01T03:00:00+00:00", "pi", "ssh",
+                         "key -----BEGIN PRIVATE KEY-----\nMIIE-sensitive-material\n"
+                         "-----END PRIVATE KEY----- done\nsafe line"))
+
+        payload = self.client.get("/api/devices/pi/logs?unit=ssh&samples=1").get_json()
+
+        self.assertEqual(payload["samples"][0]["lines"],
+                         ["key [REDACTED-KEY] done", "safe line"])
 
     def test_samples_parameter_is_bounded(self):
         for value in ("0", "500", "abc"):

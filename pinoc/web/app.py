@@ -662,7 +662,11 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         rows=history.db.rows("SELECT timestamp,lines FROM service_logs WHERE device_id=? AND unit=? ORDER BY timestamp DESC,id DESC LIMIT ?",(device_id,unit,samples))
         out=[]
         for row in rows:
-            lines=[redact_log_line(line) for line in row["lines"].splitlines() if line.strip()][:100]
+            # Redact the complete stored sample before splitting it so the
+            # defense-in-depth read path also catches multiline PEM blocks
+            # persisted by older versions.
+            redacted=redact_log_line(row["lines"])
+            lines=[line for line in redacted.splitlines() if line.strip()][:100]
             if lines:out.append({"timestamp":row["timestamp"],"lines":lines})
         return jsonify({"device_id":device_id,"unit":unit,"samples":out})
     # Historical tables behind /api/export and the permission each requires.

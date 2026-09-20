@@ -293,6 +293,10 @@ def redact_log_line(line: str) -> str:
 
 def parse_jlogs(text: str) -> List[Dict[str, Any]]:
     """Parse the __JLOGS__ section into per-unit tails with hard caps."""
+    # Redact across the complete section before splitlines() so a conventional
+    # multiline PEM block is matched from its BEGIN marker through its END
+    # marker.  Per-line redaction alone cannot recognize such blocks.
+    text = _KEY_BLOCK_RE.sub("[REDACTED-KEY]", text)
     entries: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
     for line in text.splitlines():
