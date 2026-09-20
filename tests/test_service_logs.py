@@ -142,6 +142,14 @@ class ParseJlogsTest(unittest.TestCase):
             '{"authorization":"[REDACTED]","status":200}',
         )
         self.assertIn("[REDACTED]", redact_log_line("api-key: ab12cd34ef"))
+        self.assertEqual(
+            redact_log_line("api key: ab12cd34ef"),
+            "api key: [REDACTED]",
+        )
+        self.assertEqual(
+            redact_log_line("API KEY = supersecret"),
+            "API KEY = [REDACTED]",
+        )
         self.assertEqual(redact_log_line('{"token":"abcdef123456"}'),
                          '{"token":"[REDACTED]"}')
         self.assertEqual(redact_log_line("{'password': 'hunter2'}"),
