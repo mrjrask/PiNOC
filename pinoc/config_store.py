@@ -1,5 +1,5 @@
 """Validated atomic JSON configuration persistence with bounded backups."""
-import json, os, shutil, tempfile
+import json, os, re, shutil, tempfile
 from pathlib import Path
 from pinoc.device_config import load_devices
 from pinoc.playbooks import validate_playbooks
@@ -57,6 +57,40 @@ def validate_notifications(value):
             if not isinstance(to,list) or not to or any(not isinstance(x,str) or not x.strip() for x in to):
                 raise ValueError(f"notifications.channels[{i}].to must be a non-empty list of addresses")
 
+def validate_backups(value):
+    section=value.get("backups")
+    if section is None:return
+    if not isinstance(section,dict):raise ValueError("backups must be an object")
+    if "enabled" in section and not isinstance(section.get("enabled"),bool):raise ValueError("backups.enabled must be a boolean")
+    interval=section.get("interval_hours",24)
+    if isinstance(interval,bool) or not isinstance(interval,(int,float)) or not 1<=interval<=8760:
+        raise ValueError("backups.interval_hours must be a number between 1 and 8760")
+    keep=section.get("keep",7)
+    if isinstance(keep,bool) or not isinstance(keep,int) or not 1<=keep<=99:
+        raise ValueError("backups.keep must be an integer between 1 and 99")
+    key_env=section.get("signing_key_env","PINOC_BACKUP_KEY")
+    if not isinstance(key_env,str) or not re.fullmatch(r"[A-Z0-9_]{1,64}",key_env):
+        raise ValueError("backups.signing_key_env must be an environment variable name")
+    if section.get("enabled") and not section.get("destination"):
+        raise ValueError("backups.destination is required when backups.enabled is true")
+    destination=section.get("destination")
+    if destination is None:return
+    if not isinstance(destination,dict):raise ValueError("backups.destination must be an object")
+    kind=destination.get("type")
+    if kind not in ("path","ssh"):raise ValueError("backups.destination.type must be path or ssh")
+    path=str(destination.get("path") or "")
+    if not path.startswith("/") or "\x00" in path or len(path)>4096:
+        raise ValueError("backups.destination.path must be an absolute path")
+    if kind=="ssh":
+        host=str(destination.get("host") or "")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,255}",host):raise ValueError("backups.destination.host must be a hostname")
+        user=str(destination.get("user") or "pi")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,255}",user):
+            raise ValueError("backups.destination.user must be a simple username")
+        port=destination.get("port",22)
+        if isinstance(port,bool) or not isinstance(port,int) or not 1<=port<=65535:
+            raise ValueError("backups.destination.port must be between 1 and 65535")
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
@@ -65,6 +99,7 @@ def validate_config(value,base_dir=Path(".")):
         if not isinstance(seconds,(int,float)) or not 1<=seconds<=86400:raise ValueError(f"invalid polling interval: {name}")
     validate_authentication(value)
     validate_security(value)
+    validate_backups(value)
     validate_playbooks(value.get("playbooks"))
     validate_notifications(value)
     _,errors=load_devices(value,Path(base_dir))

@@ -1418,6 +1418,11 @@ def main() -> None:
     coordinator = SharedSnapshotCoordinator(state)
     coordinator.start()
 
+    from pinoc.backup import BackupService
+    backups = BackupService(CONFIG.get("backups", {}), app_dir=APP_DIR,
+                            database_path=database_path, notifier=notifications)
+    backups.start()
+
     from pinoc.web import create_app, serve
     host = read_env_value("PINOC_WEB_HOST") or str(CONFIG.get("web_host", "0.0.0.0"))
     port = int(read_env_value("PINOC_WEB_PORT") or CONFIG.get("web_port", 8088))
@@ -1430,7 +1435,7 @@ def main() -> None:
         "RATE_LIMIT":CONFIG.get("security",{}).get("rate_limit",{}),
         "DEV_CONFIG":CONFIG.get("development_gateway",{}),
         "DEV_ARTIFACT_ROOT":str(APP_DIR/CONFIG.get("development_gateway",{}).get("artifact_root","data/jobs")),
-        "PINOC_CONFIG":CONFIG,"CONFIG_PATH":str(APP_DIR/"config.json"),"APP_DIR":str(APP_DIR)}, history, coordinator, notifications)
+        "PINOC_CONFIG":CONFIG,"CONFIG_PATH":str(APP_DIR/"config.json"),"APP_DIR":str(APP_DIR)}, history, coordinator, notifications, backups)
 
     previous_signal_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
@@ -1451,6 +1456,7 @@ def main() -> None:
     finally:
         try:
             coordinator.stop()
+            backups.stop()
             notifications.stop()
             history.stop()
         finally:
