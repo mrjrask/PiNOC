@@ -13,9 +13,11 @@ from pinoc.integrations import sanitize
 from pinoc.integrations.adsb import compare as compare_adsb
 from pinoc.security import SecurityManager, install_security, redact, restore_redacted
 from pinoc.actions import ActionDispatcher, ActionError
+from pinoc.collectors.fleet import redact_log_line
 from pinoc.development import DevelopmentGateway, DevError, PROTOCOL_VERSION
 from pinoc.config_store import atomic_save, validate_config
 from pinoc.playbooks import load_playbooks, match as match_playbook
+from pinoc.history import storage_forecast
 
 PROMETHEUS_HEALTH = {"healthy": 0, "maintenance": 0, "warning": 1, "degraded": 2, "critical": 3, "offline": 4}
 
@@ -134,6 +136,102 @@ def csv_safe(value: Any) -> Any:
 
 
 def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None) -> Flask:
+def fleet_aggregates(devices: List[Dict[str, Any]], history: Any = None) -> Dict[str, Any]:
+    """Fleet-wide rollup for the dashboard.
+
+    Live values are averaged or summed across online devices from the state
+    cache. When a history store is available, a 24-hour trend (fleet-averaged
+    CPU, temperature, memory, network throughput, storage usage) and a fleet
+    storage-growth forecast from the per-mount storage_forecast() are added.
+    """
+    online = [d for d in devices if d.get("online")]
+    def average(values):
+        values = [v for v in values if v is not None]
+        return round(sum(values) / len(values), 1) if values else None
+    temps = [d.get("cpu", {}).get("temperature_c") for d in online]
+    storage_total = storage_used = 0
+    storage_percents: List[float] = []
+    mounts: List[tuple] = []
+    for d in online:
+        for x in d.get("storage", []):
+            total = int(x.get("total") or 0)
+            if total:
+                storage_total += total
+                storage_used += int(x.get("used") or 0)
+                mounts.append((d.get("id"), x.get("mount_point") or x.get("path") or "", int(x.get("used") or 0)))
+            if x.get("percent") is not None:
+                storage_percents.append(x["percent"])
+    uptimes = sorted(int(d["uptime_seconds"]) for d in online if d.get("uptime_seconds"))
+    result: Dict[str, Any] = {
+        "online_devices": len(online),
+        "cpu_average_percent": average([d.get("cpu", {}).get("utilization_percent") for d in online]),
+        "cpu_max_temperature_c": round(max(t for t in temps if t is not None), 1) if any(t is not None for t in temps) else None,
+        "memory_average_percent": average([d.get("memory", {}).get("percent") for d in online]),
+        "storage_total_bytes": storage_total or None,
+        "storage_used_bytes": storage_used if storage_total else None,
+        "storage_average_percent": average(storage_percents),
+        "rx_rate_bps": sum(int(d.get("network", {}).get("rx_rate") or 0) for d in online) or None,
+        "tx_rate_bps": sum(int(d.get("network", {}).get("tx_rate") or 0) for d in online) or None,
+        "uptime_min_seconds": uptimes[0] if uptimes else None,
+        "uptime_max_seconds": uptimes[-1] if uptimes else None,
+        "storage_forecast": None,
+        "sparkline": None,
+    }
+    if history is None or not history.db.available:
+        return result
+    now = datetime.now(timezone.utc)
+    trend_start = (now - timedelta(hours=24)).isoformat()
+    points: Dict[str, Dict[str, Any]] = {}
+    for row in history.db.rows(
+            "SELECT strftime('%Y-%m-%dT%H:00:00+00:00', timestamp) AS bucket, "
+            "AVG(cpu_percent) AS avg_cpu, AVG(cpu_temp_c) AS avg_temp, AVG(memory_percent) AS avg_memory "
+            "FROM device_metrics WHERE timestamp>=? GROUP BY bucket", (trend_start,)):
+        points[row["bucket"]] = {"timestamp": row["bucket"], "avg_cpu": row["avg_cpu"],
+                                  "avg_temp": row["avg_temp"], "avg_memory": row["avg_memory"]}
+    for row in history.db.rows(
+            "SELECT strftime('%Y-%m-%dT%H:00:00+00:00', timestamp) AS bucket, "
+            "AVG(rx_rate_bps) AS rx_rate_bps, AVG(tx_rate_bps) AS tx_rate_bps "
+            "FROM network_metrics WHERE timestamp>=? GROUP BY bucket", (trend_start,)):
+        entry = points.setdefault(row["bucket"], {"timestamp": row["bucket"]})
+        entry["rx_rate_bps"] = row["rx_rate_bps"]
+        entry["tx_rate_bps"] = row["tx_rate_bps"]
+    for row in history.db.rows(
+            "SELECT bucket, SUM(used_bytes) AS used, SUM(total_bytes) AS total FROM ("
+            "SELECT strftime('%Y-%m-%dT%H:00:00+00:00', timestamp) AS bucket, used_bytes, total_bytes, "
+            "ROW_NUMBER() OVER (PARTITION BY device_id, mount_point, "
+            "strftime('%Y-%m-%dT%H:00:00+00:00', timestamp) ORDER BY timestamp DESC) AS sample_rank "
+            "FROM storage_metrics WHERE timestamp>=?) WHERE sample_rank=1 GROUP BY bucket", (trend_start,)):
+        entry = points.setdefault(row["bucket"], {"timestamp": row["bucket"]})
+        if row["total"]:
+            entry["storage_percent"] = round(row["used"] * 100.0 / row["total"], 1)
+    result["sparkline"] = [points[bucket] for bucket in sorted(points)][-24:]
+    # Fleet storage growth: the shortest forecast across the highest-use mounts.
+    days: List[float] = []
+    statuses: List[str] = []
+    for device_id, mount, used in sorted(mounts, key=lambda item: -item[2])[:12]:
+        if not mount:
+            continue
+        rows = history.db.rows(
+            "SELECT timestamp, used_bytes, total_bytes FROM storage_metrics WHERE device_id=? AND mount_point=? AND timestamp>=? ORDER BY timestamp",
+            (device_id, mount, (now - timedelta(days=30)).isoformat()))
+        forecast = storage_forecast(rows)
+        statuses.append(forecast["status"])
+        if forecast.get("estimated_days_remaining") is not None:
+            days.append(forecast["estimated_days_remaining"])
+    if days:
+        status = "growing"
+    elif "stable" in statuses:
+        status = "stable"
+    elif "decreasing" in statuses:
+        status = "decreasing"
+    else:
+        status = statuses[0] if statuses else "insufficient"
+    result["storage_forecast"] = {"status": status,
+                                   "estimated_days_remaining": round(min(days), 1) if days else None}
+    return result
+
+
+def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(config or {})
     trusted_proxy_count=int(app.config.get("TRUSTED_PROXY_COUNT",0))
@@ -164,7 +262,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         "api_device_integrations":"view","api_device_integration":"view","api_adsb":"view","api_displays":"view",
         "api_deployments":"view","api_software":"view","api_network_inventory":"view","api_services":"view",
         "api_alerts":"alerts.read","api_alert":"alerts.read",
-        "api_events":"history.read","device_events":"history.read","metrics":"history.read","forecast":"history.read",
+        "api_events":"history.read","device_events":"history.read","metrics":"history.read","forecast":"history.read","device_logs":"history.read",
         "action_list":"actions.execute","action_result":"actions.execute","api_audit":"config.write","database_status":"config.write",
     }
     if security:install_security(app,security)
@@ -468,6 +566,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
                 )
         return jsonify({
             "summary": state.summary(),
+            "aggregates": fleet_aggregates(devices, history if can_read_history else None),
             "active_alerts": sanitize(alerts[:5]),
             "recent_events": sanitize(events),
             "integration_counts": integration_counts,
@@ -477,6 +576,8 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     @app.get("/api/devices")
     def api_devices():
         devices = state.devices()
+        for device in devices:
+            device.pop("logs", None)
         health, role, tag = request.args.get("health"), request.args.get("role"), request.args.get("tag")
         if health: devices = [d for d in devices if d.get("health") == health]
         if role: devices = [d for d in devices if role.lower() in d.get("roles", [])]
@@ -486,6 +587,8 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     @app.get("/api/devices/<device_id>")
     def api_device(device_id: str):
         device = state.device(device_id)
+        if device:
+            device.pop("logs", None)
         return jsonify(device) if device else (jsonify({"error": "device not found"}), 404)
 
     def _integration_rows(name=None):
@@ -657,6 +760,32 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         result=[]
         for mount in sorted({x["mount_point"] for x in rows}):result.append({"mount_point":mount,**storage_forecast([x for x in rows if x["mount_point"]==mount])})
         return jsonify({"forecasts":result})
+
+    @app.get("/api/devices/<device_id>/logs")
+    def device_logs(device_id):
+        if not history or not history.db.available:return jsonify({"error":"history unavailable","unit":None,"samples":[]}),503
+        try:samples=min(100,max(1,int(request.args.get("samples",20))))
+        except ValueError:samples=20
+        unit=(request.args.get("unit") or "").strip()[:128]
+        if not unit:
+            units=[]
+            for row in history.db.rows("SELECT unit,MAX(timestamp) AS last_timestamp FROM service_logs WHERE device_id=? GROUP BY unit ORDER BY last_timestamp DESC,unit LIMIT 50",(device_id,)):
+                latest=history.db.rows("SELECT lines FROM service_logs WHERE device_id=? AND unit=? ORDER BY timestamp DESC,id DESC LIMIT 1",(device_id,row["unit"]))
+                line_count=len(latest[0]["lines"].splitlines()) if latest else 0
+                units.append({"unit":row["unit"],"last_timestamp":row["last_timestamp"],"line_count":line_count})
+            return jsonify({"device_id":device_id,"unit":None,"units":units})
+        # Log lines were redacted when stored; redact again on the read path
+        # so previously persisted samples stay safe if the rules ever tighten.
+        rows=history.db.rows("SELECT timestamp,lines FROM service_logs WHERE device_id=? AND unit=? ORDER BY timestamp DESC,id DESC LIMIT ?",(device_id,unit,samples))
+        out=[]
+        for row in rows:
+            # Redact the complete stored sample before splitting it so the
+            # defense-in-depth read path also catches multiline PEM blocks
+            # persisted by older versions.
+            redacted=redact_log_line(row["lines"])
+            lines=[line for line in redacted.splitlines() if line.strip()][:100]
+            if lines:out.append({"timestamp":row["timestamp"],"lines":lines})
+        return jsonify({"device_id":device_id,"unit":unit,"samples":out})
     # Historical tables behind /api/export and the permission each requires.
     # The alerts kind is exported under alerts.read (its list API permission)
     # rather than history.read so alert-only tokens work as expected.

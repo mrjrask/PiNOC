@@ -37,7 +37,9 @@
     "service_seconds": 15,
     "storage_seconds": 60,
     "sensor_seconds": 10,
-    "fleet_seconds": 10
+    "fleet_seconds": 10,
+    "log_tail_seconds": 300,
+    "log_tail_lines": 50
   },
   "devices_file": "config/devices.json",
   "fleet_max_workers": 4,
@@ -58,6 +60,7 @@
     "core_interval_seconds": 60,
     "network_interval_seconds": 60,
     "storage_interval_seconds": 300,
+    "log_ring_samples": 50,
     "raw_retention_days": 7,
     "hourly_retention_days": 90,
     "daily_retention_days": 365,

@@ -21,7 +21,7 @@ def workspace(gw,path,mode="development"):
 def identity(**kw):return {"username":"codex","role":"administrator","token":True,"token_id":"t","scopes":["dev:read","dev:test","dev:command","dev:artifacts","dev:cancel"],"devices":[],"workspaces":[],"job_types":[],**kw}
 
 def test_schema_enrollment_replay_rotation_and_revocation(tmp_path):
- db,gw=setup(tmp_path);assert SCHEMA_VERSION==7;a=enroll(gw);body=b'{}';stamp=str(int(time.time()));nonce="unique";sig=gw.sign(a["agent_id"],a["credential"],stamp,nonce,body)
+ db,gw=setup(tmp_path);assert SCHEMA_VERSION==8;a=enroll(gw);body=b'{}';stamp=str(int(time.time()));nonce="unique";sig=gw.sign(a["agent_id"],a["credential"],stamp,nonce,body)
  assert gw.authenticate_agent(a["agent_id"],stamp,nonce,body,sig)["device_id"]=="pi"
  with pytest.raises(DevError) as e:gw.authenticate_agent(a["agent_id"],stamp,nonce,body,sig)
  assert e.value.error_type=="replay_rejected"
