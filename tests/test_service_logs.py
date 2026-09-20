@@ -120,7 +120,14 @@ class ParseJlogsTest(unittest.TestCase):
 
     def test_redact_variants(self):
         self.assertIn("[REDACTED]", redact_log_line("token = abc123"))
-        self.assertIn("[REDACTED]", redact_log_line("Authorization: Bearer abcdef123456789"))
+        self.assertEqual(
+            redact_log_line("Authorization: Bearer abcdef123456789"),
+            "Authorization: [REDACTED]",
+        )
+        self.assertNotIn(
+            "abcdef123456789",
+            redact_log_line("Authorization: Bearer abcdef123456789"),
+        )
         self.assertIn("[REDACTED]", redact_log_line("api-key: ab12cd34ef"))
         self.assertEqual(
             redact_log_line("key -----BEGIN PRIVATE KEY-----MIIE-----END PRIVATE KEY-----"),
