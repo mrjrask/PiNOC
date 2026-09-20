@@ -279,12 +279,12 @@ _UNIT_RE = re.compile(r"[A-Za-z0-9@:_.\-]{1,128}")
 _AUTHORIZATION_RE = re.compile(
     r"(?i)(?P<assignment>(?P<key_quote>['\"]?)[A-Za-z0-9_-]*authorization[A-Za-z0-9_-]*"
     r"(?P=key_quote)\s*[:=]\s*)"
-    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\r\n]*)"
+    r"(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\r\n]*)"
 )
 _SECRET_RE = re.compile(
     r"(?i)(?P<assignment>(?P<key_quote>['\"]?)[A-Za-z0-9_-]*"
     r"(?:password|passwd|secret|token|api[_\-]?key)[A-Za-z0-9_-]*"
-    r"(?P=key_quote)\s*[:=]\s*)(?:Bearer\s+)?(?P<value>\"[^\"]*\"|'[^']*'|\S+)"
+    r"(?P=key_quote)\s*[:=]\s*)(?:Bearer\s+)?(?P<value>\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\S+)"
     r"|\bBearer\s+\S+"
 )
 _KEY_BLOCK_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)

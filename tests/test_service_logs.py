@@ -146,6 +146,14 @@ class ParseJlogsTest(unittest.TestCase):
                          '{"token":"[REDACTED]"}')
         self.assertEqual(redact_log_line("{'password': 'hunter2'}"),
                          "{'password': '[REDACTED]'}")
+        self.assertEqual(
+            redact_log_line(r'{"token":"prefix\"secret-suffix","status":200}'),
+            '{"token":"[REDACTED]","status":200}',
+        )
+        self.assertEqual(
+            redact_log_line(r"{'password':'prefix\'secret-suffix','status':200}"),
+            "{'password':'[REDACTED]','status':200}",
+        )
         for line, secret in (
             ("DATABASE_PASSWORD=hunter2", "hunter2"),
             ("AWS_SECRET_ACCESS_KEY=aws-secret", "aws-secret"),
