@@ -1,1 +1,12 @@
-{% extends "base.html" %}{% block title %}Settings · PiNOC{% endblock %}{% block content %}<h1>Settings</h1><p class="muted">Administrator-only validated configuration. Secrets are never returned.</p><div class="filters"><span>General</span><span>Devices</span><span>Polling</span><span>Health thresholds</span><span>Alerts</span><span>Integrations</span><span>Services</span><span>Actions</span><span>Authentication</span><span>Storage / History</span></div><section class="panel"><p>Use the validated settings API or local configuration CLI. Changes currently require restart and are saved atomically with bounded backups.</p></section>{% endblock %}
+{% extends "base.html" %}{% block title %}Settings · PiNOC{% endblock %}
+{% block content %}<h1>Settings</h1><p class="muted">Administrator-only validated configuration. Secrets are never returned.</p>
+<div class="filters"><span>General</span><span>Devices</span><span>Polling</span><span>Health thresholds</span><span>Alerts</span><span>Integrations</span><span>Services</span><span>Actions</span><span>Authentication</span><span>Storage / History</span><span>Notifications</span></div>
+<section class="panel"><h2>Alert notifications</h2><p class="muted">Notify an ntfy topic, an SMTP mailbox, or an HTTP webhook when alerts open or resolve. Delivery is queued off the alert path; changes to this section apply after a restart.</p>
+<div id="notifications-status" class="muted">Loading notification status…</div>
+<label for="notifications-editor">Notifications JSON (config.json <code>notifications</code> section)</label>
+<textarea id="notifications-editor" class="config-editor" rows="12" spellcheck="false" aria-label="Notifications JSON"></textarea>
+<div class="toolbar" style="margin-top:.5rem"><button id="notifications-save" class="primary">Save</button><button id="notifications-status-refresh">Refresh status</button><span id="notifications-message" class="muted" role="status"></span></div>
+</section>
+<section class="panel"><p>Use the validated settings API or local configuration CLI. Changes currently require restart and are saved atomically with bounded backups.</p></section>
+{% endblock %}
+{% block scripts %}<script>PiNOC.settings();</script>{% endblock %}

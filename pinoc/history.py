@@ -9,8 +9,8 @@ LOG=logging.getLogger("pinoc.history"); UTC=timezone.utc
 SEVERITY_RANK={"info":0,"warning":1,"degraded":2,"critical":3}
 
 class HistoryManager:
-    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None):
-        self.db=db; self.config=config or {}; self.enabled=bool(self.config.get("enabled",True))
+    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None,notifier:Any=None):
+        self.db=db; self.config=config or {}; self.enabled=bool(self.config.get("enabled",True)); self.notifier=notifier
         self.queue:queue.Queue=queue.Queue(maxsize=int(self.config.get("queue_size",1000)))
         self.stop_event=threading.Event(); self.thread=threading.Thread(target=self._run,name="pinoc-history",daemon=True)
         self.previous={}; self.last_sample={}; self.cpu_since={}; self.dropped=0
@@ -173,8 +173,8 @@ class HistoryManager:
                 if condition.get("service"):continue
                 key=str(condition.get("type") or f"{name}_unhealthy")
                 active[f"{key}:{name}"]=(condition.get("severity","warning"),condition.get("message",f"{name} is unhealthy"),name)
-        self._reconcile(did,active,stamp,preserve)
-    def _reconcile(self,did,active,stamp,preserve=None):
+        self._reconcile(d,did,active,stamp,preserve)
+    def _reconcile(self,d,did,active,stamp,preserve=None):
         preserve=preserve or set()
         existing={x["fingerprint"]:x for x in self.db.rows("SELECT * FROM alerts WHERE device_id=? AND resolved_at IS NULL",(did,))}
         seen=set()
@@ -187,10 +187,18 @@ class HistoryManager:
                 state="acknowledged" if row.get("acknowledged_at") else "active"
                 if mute_expired:self.db.execute("UPDATE alerts SET last_seen_at=?,severity=?,message=?,muted_until=NULL,state=? WHERE alert_id=?",(stamp,sev,msg,state,row["alert_id"]))
                 else:self.db.execute("UPDATE alerts SET last_seen_at=?,severity=?,message=? WHERE alert_id=?",(stamp,sev,msg,row["alert_id"]))
-            else:self.db.execute("INSERT INTO alerts(device_id,alert_type,severity,message,fingerprint,opened_at,last_seen_at,state,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)",(did,typ,sev,msg,fp,stamp,stamp,"active",json.dumps({"resource":resource})))
+            else:
+                self.db.execute("INSERT INTO alerts(device_id,alert_type,severity,message,fingerprint,opened_at,last_seen_at,state,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)",(did,typ,sev,msg,fp,stamp,stamp,"active",json.dumps({"resource":resource})))
+                self._notify(d,did,"open",{"device_id":did,"alert_type":typ,"severity":sev,"message":msg})
         for fp,row in existing.items():
             if fp not in seen and fp not in preserve:
                 self.db.execute("UPDATE alerts SET resolved_at=?,state='resolved' WHERE alert_id=?",(stamp,row["alert_id"]));self._write_event(did,"alert_resolved","info",f"Recovered: {row['message']}",{"alert_id":row["alert_id"]},stamp)
+                self._notify(d,did,"resolve",row)
+    def _notify(self,d,did,transition,row):
+        if self.notifier is None:return
+        name=d.get("friendly_name") or d.get("hostname") or did
+        try:self.notifier.enqueue(transition,row,name)
+        except Exception as exc:LOG.warning("notification enqueue failed: %s",exc)
     def _write_event(self,did,typ,sev,msg,metadata,stamp):self.db.execute("INSERT INTO events(timestamp,device_id,event_type,severity,message,metadata_json) VALUES(?,?,?,?,?,?)",(stamp,did,typ,sev,msg,json.dumps(metadata)))
     def _refresh_cache(self):
         if self.state:

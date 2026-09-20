@@ -19,8 +19,9 @@ other collection domains.
   state, roles, tags, and Cockpit links.
 - **Operational history:** SQLite/WAL storage, configurable sampling and
   retention, graphs, storage forecasts, transition events, persistent alert
-  lifecycles (active, acknowledged, muted, and resolved), CSV/JSON export,
-  Prometheus scraping, and configurable alert runbooks (playbooks).
+  lifecycles (active, acknowledged, muted, and resolved), outbound alert
+  notifications (ntfy, e-mail, webhooks), CSV/JSON export, Prometheus
+  scraping, and configurable alert runbooks (playbooks).
 - **Application integrations:** ADS-B, desk displays, MagicMirror, ICS Modifier,
   pi-hotspot, WireGuard, Samba, RAID, SMART/NVMe health, packages, Git, optional
   passive LAN inventory, and user-defined HTTP/TCP probes for arbitrary services.
@@ -153,6 +154,7 @@ normal SSH collection uses keys and `BatchMode=yes`.
 | `ssh_command_timeout` | `8` s | Per-device SSH command timeout. |
 | `health_thresholds` | see `config.json` | Live CPU, memory, temperature, disk, stale, and offline thresholds. |
 | `history.*` | enabled | Database path, sample intervals, retention, maintenance, and alert thresholds. |
+| `notifications.*` | disabled | Severity filters and ntfy/SMTP/webhook channels for alert open/resolve transitions. |
 | `integration_polling.*` | integration-specific | Integration collection intervals. |
 | `development_gateway.*` | bounded defaults | Job timeouts, output, file-read, artifact, and offline limits. |
 | `remote_*`, `raid_device` | legacy CM5 defaults | Backward-compatible file-server collection. |
@@ -175,7 +177,8 @@ merged with matching temperature records by address or hostname.
 Run the validator after every manual configuration change. It applies the same
 full rules the web settings editor uses, checking every group the service
 parses at startup — polling intervals, `authentication` (including
-`trusted_proxy_count`), `security.rate_limit`, playbooks, and fleet devices —
+`trusted_proxy_count`), `security.rate_limit`, playbooks, notifications, and
+fleet devices —
 so an invalid value cannot pass the preflight check and still fail startup:
 
 ```sh
@@ -298,6 +301,51 @@ per-unit summary without `unit`, or the newest `samples` — 1 to 100, default
 Use `python3 -m pinoc.database status --database PATH` for status. Run
 `python3 -m pinoc.database vacuum --database PATH` only during a planned
 maintenance window; routine retention does not vacuum.
+
+### Alert notifications
+
+The optional `notifications` section delivers a message when an alert opens
+or resolves. `open_severities` and `resolve_severities` (subsets of
+`info`, `warning`, `degraded`, `critical`; empty lists notify for every
+severity) filter transitions, and `channels` lists up to one entry per
+destination. Delivery is queued on a background worker — alert reconciliation
+and the web console never block on a remote endpoint — with per-channel
+sent/failed counters surfaced in the settings UI.
+
+```json
+{
+  "notifications": {
+    "enabled": true,
+    "open_severities": ["warning", "critical"],
+    "resolve_severities": ["critical"],
+    "channels": [
+      {"id": "ntfy", "kind": "ntfy", "url": "https://ntfy.example.com", "topic": "pinoc"},
+      {"id": "mail", "kind": "smtp", "host": "mail.example.com", "port": 587,
+       "username": "pinoc", "password": "…", "from": "pinoc@example.com",
+       "to": ["ops@example.com"], "starttls": true},
+      {"id": "webhook", "kind": "webhook", "url": "https://hooks.example.com/pinoc"}
+    ]
+  }
+}
+```
+
+- `ntfy` posts the message body with an `X-Title` header to `{url}/{topic}`
+  (critical alerts use the high ntfy priority; optional `tags` list maps to
+  `X-Tags`).
+- `smtp` uses Python's `smtplib`; `starttls` and `username`/`password`
+  (SMTP AUTH) are optional.
+- `webhook` POSTs a JSON object: `source`, `transition`, `device_id`,
+  `device_name`, `alert_type`, `severity`, `subject`, and `body`.
+
+The web settings page (`/settings`) shows live channel status with one-click
+test messages and an editor for this section; `GET /api/notifications`
+returns the redacted status and `POST /api/notifications/test` with a
+`{"channel": "<id>"}` body sends a test synchronously — both require the
+`config.write` permission (administrator). Channel credentials live in
+`config.json`, which the service writes with 0600 mode; the settings API
+redacts secret-valued keys and restores them on save. Configuration changes
+apply after a restart. While a device is in maintenance, alert transitions
+are neither opened, resolved, nor notified.
 
 ## Integrations
 
