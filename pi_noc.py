@@ -1195,7 +1195,8 @@ class SharedSnapshotCoordinator:
         self.fleet_collector = FleetCollector(
             devices, int(CONFIG.get("fleet_max_workers", 4)),
             float(CONFIG.get("ssh_command_timeout", 8)), read_env_value("CM5_SSH_PASS"),
-            float(polling.get("log_tail_seconds", 300)), int(polling.get("log_tail_lines", 50)))
+            log_tail_seconds=float(polling.get("log_tail_seconds", 300)),
+            log_tail_lines=int(polling.get("log_tail_lines", 50)))
         self.configured_fleet_devices = tuple(devices)
         global_thresholds = CONFIG.get("health_thresholds", {})
         try:

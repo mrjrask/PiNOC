@@ -3,7 +3,9 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
+import pi_noc
 from pinoc.collectors.fleet import FleetCollector, parse_jlogs, redact_log_line
 from pinoc.database import Database
 from pinoc.device_config import DeviceConfig
@@ -178,6 +180,18 @@ class CommandCadenceTest(unittest.TestCase):
         collector._last_jlogs[device.id] = time.monotonic() - 301
         third = collector.collect_device(device)
         self.assertTrue(any(a.startswith("__jlogs__") for a in seen[-1]))
+
+    def test_coordinator_passes_log_settings_without_replacing_runner(self):
+        polling = {"log_tail_seconds": 450, "log_tail_lines": 75}
+        with patch.object(pi_noc, "load_devices", return_value=([], [])), \
+                patch.object(pi_noc, "read_env_value", return_value="password"), \
+                patch.dict(pi_noc.CONFIG, {"polling": polling}):
+            collector = pi_noc.SharedSnapshotCoordinator(PiNOCState()).fleet_collector
+
+        self.assertIs(collector.runner, pi_noc.subprocess.run)
+        self.assertEqual(collector.log_tail_seconds, 450)
+        self.assertEqual(collector.log_tail_lines, 75)
+        self.assertEqual(collector.password, "password")
 
 
 class HistoryLogStorageTest(unittest.TestCase):
