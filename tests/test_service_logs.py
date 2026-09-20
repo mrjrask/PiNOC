@@ -146,6 +146,17 @@ class ParseJlogsTest(unittest.TestCase):
                          '{"token":"[REDACTED]"}')
         self.assertEqual(redact_log_line("{'password': 'hunter2'}"),
                          "{'password': '[REDACTED]'}")
+        for line, secret in (
+            ("DATABASE_PASSWORD=hunter2", "hunter2"),
+            ("AWS_SECRET_ACCESS_KEY=aws-secret", "aws-secret"),
+            ("GITHUB_TOKEN=github-secret", "github-secret"),
+            ("client_secret=client-secret", "client-secret"),
+            ('{"access_token":"access-secret"}', "access-secret"),
+            ("HTTP_AUTHORIZATION=Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+        ):
+            redacted = redact_log_line(line)
+            self.assertIn("[REDACTED]", redacted)
+            self.assertNotIn(secret, redacted)
         self.assertEqual(
             redact_log_line("key -----BEGIN PRIVATE KEY-----MIIE-----END PRIVATE KEY-----"),
             "key [REDACTED-KEY]")
