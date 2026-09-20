@@ -463,6 +463,8 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     @app.get("/api/devices")
     def api_devices():
         devices = state.devices()
+        for device in devices:
+            device.pop("logs", None)
         health, role, tag = request.args.get("health"), request.args.get("role"), request.args.get("tag")
         if health: devices = [d for d in devices if d.get("health") == health]
         if role: devices = [d for d in devices if role.lower() in d.get("roles", [])]
@@ -472,6 +474,8 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     @app.get("/api/devices/<device_id>")
     def api_device(device_id: str):
         device = state.device(device_id)
+        if device:
+            device.pop("logs", None)
         return jsonify(device) if device else (jsonify({"error": "device not found"}), 404)
 
     def _integration_rows(name=None):

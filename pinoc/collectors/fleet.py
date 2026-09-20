@@ -277,8 +277,8 @@ def parse_services(text: str, critical: Iterable[str], system_uptime: float = 0)
 
 _UNIT_RE = re.compile(r"[A-Za-z0-9@:_.\-]{1,128}")
 _SECRET_RE = re.compile(
-    r"(?i)(\bauthorization\b\s*[:=]\s*)(?:Bearer\s+)?\S+"
-    r"|(\b(?:password|passwd|secret|token|api[_\-]?key)\b\s*[:=]\s*)\S+"
+    r"(?i)(?P<assignment>(?P<key_quote>['\"]?)\b(?:authorization|password|passwd|secret|token|api[_\-]?key)\b"
+    r"(?P=key_quote)\s*[:=]\s*)(?:Bearer\s+)?(?P<value>\"[^\"]*\"|'[^']*'|\S+)"
     r"|\bBearer\s+\S+"
 )
 _KEY_BLOCK_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
@@ -286,10 +286,15 @@ _KEY_BLOCK_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z 
 def redact_log_line(line: str) -> str:
     """Best-effort neutralization of obvious secret patterns in log text."""
     line = _KEY_BLOCK_RE.sub("[REDACTED-KEY]", line)
-    return _SECRET_RE.sub(
-        lambda match: (match.group(1) or match.group(2) or "") + "[REDACTED]",
-        line,
-    )
+    def replacement(match: re.Match[str]) -> str:
+        assignment = match.group("assignment")
+        if assignment is None:
+            return "[REDACTED]"
+        value = match.group("value")
+        quote = value[0] if value and value[0] in "'\"" else ""
+        return assignment + quote + "[REDACTED]" + quote
+
+    return _SECRET_RE.sub(replacement, line)
 
 def parse_jlogs(text: str) -> List[Dict[str, Any]]:
     """Parse the __JLOGS__ section into per-unit tails with hard caps."""

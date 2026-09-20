@@ -129,6 +129,10 @@ class ParseJlogsTest(unittest.TestCase):
             redact_log_line("Authorization: Bearer abcdef123456789"),
         )
         self.assertIn("[REDACTED]", redact_log_line("api-key: ab12cd34ef"))
+        self.assertEqual(redact_log_line('{"token":"abcdef123456"}'),
+                         '{"token":"[REDACTED]"}')
+        self.assertEqual(redact_log_line("{'password': 'hunter2'}"),
+                         "{'password': '[REDACTED]'}")
         self.assertEqual(
             redact_log_line("key -----BEGIN PRIVATE KEY-----MIIE-----END PRIVATE KEY-----"),
             "key [REDACTED-KEY]")
@@ -348,6 +352,16 @@ class LogsGatingTest(unittest.TestCase):
         self.assertEqual(self.client.get("/api/devices/pi/logs", headers={"Authorization": "Bearer " + fleet_token}).status_code, 403)
         self.assertEqual(self.client.get("/api/devices/pi/logs", headers={"Authorization": "Bearer " + alerts_token}).status_code, 403)
         self.assertEqual(self.client.get("/api/devices/pi/logs").status_code, 401)
+
+    def test_fleet_endpoints_do_not_expose_collected_logs(self):
+        fleet_token = self.security.create_token("person", ["read:fleet"])
+        headers = {"Authorization": "Bearer " + fleet_token}
+
+        devices = self.client.get("/api/devices", headers=headers).get_json()["devices"]
+        device = self.client.get("/api/devices/pi", headers=headers).get_json()
+
+        self.assertNotIn("logs", devices[0])
+        self.assertNotIn("logs", device)
 
     def test_viewer_session_can_read(self):
         self.client.get("/login")
