@@ -135,7 +135,6 @@ def csv_safe(value: Any) -> Any:
     return text
 
 
-def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None) -> Flask:
 def fleet_aggregates(devices: List[Dict[str, Any]], history: Any = None) -> Dict[str, Any]:
     """Fleet-wide rollup for the dashboard.
 
@@ -231,7 +230,7 @@ def fleet_aggregates(devices: List[Dict[str, Any]], history: Any = None) -> Dict
     return result
 
 
-def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None) -> Flask:
+def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(config or {})
     trusted_proxy_count=int(app.config.get("TRUSTED_PROXY_COUNT",0))
