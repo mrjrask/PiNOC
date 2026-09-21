@@ -4,6 +4,7 @@
 # apt: python3-venv
 # apt: python3-pip
 # apt: python3-dev
+# apt: python3-cryptography
 # apt: build-essential
 # apt: git
 # apt: i2c-tools
@@ -16,10 +17,13 @@
 # apt: libssl-dev
 # apt: libffi-dev
 # Python packages installed into the virtual environment by install.sh.
+# cryptography intentionally comes from Debian's python3-cryptography package.
+# Trixie provides native armhf/arm64 builds; PyPI does not provide a compatible
+# wheel for every Raspberry Pi/Python combination and may otherwise invoke a
+# slow Rust/OpenSSL source build during installation.
 Adafruit-Blinka
 adafruit-circuitpython-bme280
 adafruit-circuitpython-bme680
 adafruit-circuitpython-sht4x
 Flask>=3.0,<4
 waitress>=3.0,<4
-cryptography>=41,<44
