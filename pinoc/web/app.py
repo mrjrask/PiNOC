@@ -231,7 +231,7 @@ def fleet_aggregates(devices: List[Dict[str, Any]], history: Any = None) -> Dict
     return result
 
 
-def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None, backups: Any = None) -> Flask:
+def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None, backups: Any = None, schedules: Any = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(config or {})
     trusted_proxy_count=int(app.config.get("TRUSTED_PROXY_COUNT",0))
@@ -264,10 +264,17 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         "api_alerts":"alerts.read","api_alert":"alerts.read",
         "api_events":"history.read","device_events":"history.read","metrics":"history.read","forecast":"history.read","device_logs":"history.read",
         "action_list":"actions.execute","action_result":"actions.execute","api_audit":"config.write","database_status":"config.write",
+        "api_schedules":"config.write",
     }
     if security:install_security(app,security)
     app.extensions["pinoc_security"]=security;app.extensions["pinoc_actions"]=actions
     app.extensions["pinoc_development"]=development;app.extensions["pinoc_playbooks"]=playbooks
+    app.extensions["pinoc_backups"]=backups;app.extensions["pinoc_schedules"]=schedules
+    # The schedule routes read the live service from app.extensions so it can
+    # be constructed *after* create_app (it depends on the ActionDispatcher that
+    # create_app builds) and still be served.
+    def _schedules_service():
+        return schedules if schedules is not None else app.extensions.get("pinoc_schedules")
 
     @app.route("/login",methods=["GET","POST"])
     def login():
@@ -362,6 +369,52 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
             shutil.rmtree(staging,ignore_errors=True)
         response.call_on_close(_cleanup)
         return response
+    @app.get("/api/schedules")
+    def api_schedules():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_schedules_service()
+        if service is None:return jsonify({"schedules":[],"status":None})
+        return jsonify({"schedules":[redact(s) for s in service.list()],"status":service.status()})
+    @app.post("/api/schedules")
+    def api_schedules_create():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_schedules_service()
+        if service is None:return jsonify({"error":"scheduling is not available"}),409
+        body=request.get_json(silent=True) or {}
+        try:
+            schedule=service.create(device_id=str(body.get("device_id","")),action=str(body.get("action","")),
+                spec=str(body.get("spec","")),target=body.get("target"),timezone=str(body.get("timezone") or "UTC"),
+                requested_by=g.identity["username"],role=g.identity["role"],source_ip=request.remote_addr)
+        except (ValueError,ActionError) as exc:return jsonify({"error":str(redact(exc))}),400
+        return jsonify({"schedule":redact(schedule)}),201
+    @app.put("/api/schedules/<schedule_id>")
+    def api_schedules_update(schedule_id):
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_schedules_service()
+        if service is None:return jsonify({"error":"scheduling is not available"}),409
+        body=request.get_json(silent=True) or {}
+        try:
+            schedule=service.update(schedule_id,paused=body.get("paused"),spec=body.get("spec"),target=body.get("target"),
+                requested_by=g.identity["username"],role=g.identity["role"],source_ip=request.remote_addr)
+        except (ValueError,ActionError) as exc:return jsonify({"error":str(redact(exc))}),400
+        return jsonify({"schedule":redact(schedule)})
+    @app.delete("/api/schedules/<schedule_id>")
+    def api_schedules_delete(schedule_id):
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_schedules_service()
+        if service is None:return jsonify({"error":"scheduling is not available"}),409
+        if not service.delete(schedule_id,requested_by=g.identity["username"],role=g.identity["role"],source_ip=request.remote_addr):
+            return jsonify({"error":"schedule not found"}),404
+        return jsonify({"ok":True})
+    @app.post("/api/schedules/<schedule_id>/run")
+    def api_schedules_run(schedule_id):
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_schedules_service()
+        if service is None:return jsonify({"error":"scheduling is not available"}),409
+        try:
+            job=service.run_now(schedule_id,requested_by=g.identity["username"],role=g.identity["role"],source_ip=request.remote_addr)
+        except ValueError as exc:return jsonify({"error":str(redact(exc))}),400
+        return jsonify({"job":redact(job)}),202
     @app.get("/api/users")
     def users():
         if not security.allowed(g.identity,"users.write"):return jsonify({"error":"permission denied"}),403

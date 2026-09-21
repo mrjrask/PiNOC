@@ -197,4 +197,46 @@ async function settings(){
     };
   }
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
+const SCHEDULE_ACTIONS=["device.reboot","service.restart","service.start","service.stop","package.check","apt.clean","apt.autoremove","logs.truncate","journal.vacuum","cache.drop","wireguard.restart","desk_display.restart","magicmirror.restart","pi_hotspot.restart"];
+async function schedules(){
+  const statusRoot=document.querySelector('#schedules-status');
+  const listRoot=document.querySelector('#schedules-list');
+  if(!statusRoot&&!listRoot)return;
+  const message=()=>document.querySelector('#schedule-message');
+  const deviceSelect=document.querySelector('#schedule-device');
+  const actionSelect=document.querySelector('#schedule-action');
+  const note=(text,ok=true)=>{let m=message();if(m){m.textContent=text;m.className=ok?'muted':'critical-row'}};
+  const renderStatus=d=>{if(!statusRoot)return;const s=d.status||{};statusRoot.innerHTML=`Scheduler ${s.running?'running':'stopped'} · ${s.active||0} active, ${s.paused||0} paused, ${s.schedules||0} total.`;};
+  const renderList=async()=>{
+    if(!listRoot)return;
+    let data;
+    try{data=await(await fetch('/api/schedules')).json()}catch(error){listRoot.innerHTML='<p class="muted">Schedules unavailable.</p>';return}
+    renderStatus(data);
+    const rows=(data.schedules||[]).map(x=>`<tr><td>${esc(x.device_id)}</td><td>${esc(x.action)}${x.target?` <small>${esc(x.target)}</small>`:''}</td><td><code>${esc(x.spec)}</code>${x.timezone&&x.timezone!=='UTC'?` <small>${esc(x.timezone)}</small>`:''}</td><td>${x.paused?'<span class="maintenance">paused</span>':esc(x.last_status||'—')}</td><td>${x.next_run?localTime(x.next_run):'—'}</td><td>${x.last_run?localTime(x.last_run):'—'}</td><td>${Number(x.consecutive_failures)||0}</td><td class="row-actions">
+<button data-act="toggle" data-id="${esc(x.schedule_id)}" data-paused="${x.paused?1:0}">${x.paused?'Resume':'Pause'}</button>
+<button data-act="run" data-id="${esc(x.schedule_id)}">Run now</button>
+<button data-act="del" data-id="${esc(x.schedule_id)}" class="danger">Delete</button></td></tr>`).join('');
+    listRoot.innerHTML=rows.length?table(['Device','Action','Schedule','State','Next run','Last run','Fails'],rows):'<p class="muted">No schedules yet. Add one below.</p>';
+    listRoot.querySelectorAll('button[data-act]').forEach(btn=>{btn.onclick=async()=>{const id=btn.dataset.id;
+      if(btn.dataset.act==='del'){if(!confirm('Delete this schedule?'))return;let response=await mutate(`/api/schedules/${encodeURIComponent(id)}`,{method:'DELETE'});let result=await response.json().catch(()=>({}));if(!response.ok)note(result.error||'delete failed',false);}
+      else if(btn.dataset.act==='toggle'){let response=await mutate(`/api/schedules/${encodeURIComponent(id)}`,{method:'PUT',body:JSON.stringify({paused:btn.dataset.paused==='1'?false:true})});let result=await response.json().catch(()=>({}));if(!response.ok)note(result.error||'update failed',false);}
+      else{let response=await mutate(`/api/schedules/${encodeURIComponent(id)}/run`,{method:'POST'});let result=await response.json().catch(()=>({}));if(!response.ok)note(result.error||'run failed',false);}
+      await renderList();note('');}});
+  };
+  if(actionSelect)actionSelect.innerHTML=SCHEDULE_ACTIONS.map(a=>`<option value="${a}">${a.replaceAll('.',' ')}</option>`).join('');
+  if(deviceSelect){try{let d=await(await fetch('/api/devices')).json();const devices=d.devices||[];deviceSelect.innerHTML=devices.map(x=>`<option value="${esc(x.id)}">${esc(x.friendly_name||x.hostname||x.id)}</option>`).join('')||'<option value="">no devices</option>'}catch(error){deviceSelect.innerHTML='<option value="">unavailable</option>'}}
+  let form=document.querySelector('#schedule-create');
+  if(form)form.onsubmit=async e=>{
+    e.preventDefault();
+    const body={device_id:deviceSelect?.value,action:actionSelect?.value,spec:document.querySelector('#schedule-spec')?.value.trim(),target:document.querySelector('#schedule-target')?.value.trim()||null,timezone:document.querySelector('#schedule-tz')?.value.trim()||'UTC'};
+    if(!body.device_id||!body.action||!body.spec)return note('Device, action and spec are required.',false);
+    let response=await mutate('/api/schedules',{method:'POST',body:JSON.stringify(body)});
+    let result=await response.json().catch(()=>({}));
+    if(!response.ok){note(result.error||'could not add schedule',false);return}
+    document.querySelector('#schedule-spec').value='';document.querySelector('#schedule-target')?.removeAttribute('value');
+    note('Schedule added.');
+    await renderList();
+  };
+  await renderList();
+}
+return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
