@@ -204,9 +204,23 @@ async function settings(){
       if(note){note.textContent='Running backup…';note.className='muted'}
       runNow.disabled=true;
       try{
+        let before=await(await fetch('/api/backup')).json();
         let response=await mutate('/api/backup/run',{method:'POST'});
-        let result=await response.json().catch(()=>({ok:false,error:`HTTP ${response.status}`}));
-        if(note){note.textContent=result.last_error?`Backup failed: ${result.last_error}`:`Backup complete: ${result.last_bundle||''}`;note.className=result.last_error?'critical-row':'muted'}
+        let queued=await response.json().catch(()=>({}));
+        if(!response.ok)throw new Error(queued.error||`HTTP ${response.status}`);
+        // The backup now runs on the server's own background thread (it can
+        // take minutes over a slow link), so poll status for the result
+        // instead of waiting on the request itself.
+        let settled=false;
+        for(let attempt=0;attempt<40 && !settled;attempt++){
+          await new Promise(r=>setTimeout(r,3000));
+          let d=await(await fetch('/api/backup')).json();
+          if(d.last_run && d.last_run!==before.last_run){
+            if(note){note.textContent=d.last_error?`Backup failed: ${d.last_error}`:`Backup complete: ${d.last_bundle||''}`;note.className=d.last_error?'critical-row':'muted'}
+            settled=true;
+          }
+        }
+        if(!settled && note){note.textContent='Backup still running in the background — refresh to check.';note.className='muted'}
         await renderBackup();
       }catch(err){if(note){note.textContent=err.message;note.className='critical-row'}}
       runNow.disabled=false;
