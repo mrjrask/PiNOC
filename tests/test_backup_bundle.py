@@ -340,6 +340,11 @@ class BackupServiceTest(unittest.TestCase):
         for args, kwargs in calls:
             self.assertNotIn("shell", kwargs)
             self.assertNotIn("sh", args[:3])
+        # _deliver() used to run its own "ls -1t" listing and discard the
+        # result -- _rotate(), called right after, does the only listing
+        # that's actually used for rotation.
+        listings = [args for args, _ in calls if args[0] == "ssh" and "ls" in args]
+        self.assertEqual(len(listings), 1)
 
     def test_failure_notifies(self):
         notifier = mock.MagicMock()

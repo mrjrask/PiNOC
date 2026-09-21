@@ -39,6 +39,21 @@ class Milestone3Test(unittest.TestCase):
    con.executemany('insert into device_metrics(timestamp,device_id,cpu_percent) values(?,?,?)',(((start+timedelta(minutes=i)).isoformat(),'pi',i) for i in range(5001)))
   response=create_app(PiNOCState(),history=self.history).test_client().get('/api/devices/pi/metrics?range=7d')
   core=response.get_json()['core'];self.assertEqual(len(core),5000);self.assertEqual(core[0]['cpu_percent'],1);self.assertEqual(core[-1]['cpu_percent'],5000)
+ def test_stale_in_memory_device_state_is_pruned_when_a_device_disappears(self):
+  # previous/last_sample/cpu_since track per-device transition state in
+  # memory and are only ever written to; a device removed from the fleet
+  # config must not leave its entries there forever.
+  now=datetime.now(timezone.utc)
+  a=self.device(now.isoformat())
+  b=self.device(now.isoformat(),ip='10.0.0.2');b['id']='pi2';b['hostname']='pi2'
+  self.history._snapshot([a,b],now.isoformat())
+  self.assertIn('pi',self.history.previous);self.assertIn('pi2',self.history.previous)
+  self.assertTrue(any(k[0]=='pi2' for k in self.history.last_sample))
+  # 'pi2' stops appearing in the fleet on the next poll.
+  self.history._snapshot([a],(now+timedelta(minutes=2)).isoformat())
+  self.assertIn('pi',self.history.previous)
+  self.assertNotIn('pi2',self.history.previous)
+  self.assertFalse(any(k[0]=='pi2' for k in self.history.last_sample))
  def test_maintenance_preserves_storage_and_network_aggregates(self):
   now=datetime.now(timezone.utc);old=now-timedelta(days=8);device=self.device(old.isoformat());device['network'].update(rx_rate=12,tx_rate=8,signal_dbm=-45,signal_quality_percent=90)
   self.history._snapshot([device],old.isoformat());self.history.maintenance(now)
