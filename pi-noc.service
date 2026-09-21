@@ -14,6 +14,21 @@ EnvironmentFile=-/home/pi/pi-noc/.env
 ExecStart=/home/pi/pi-noc/.venv/bin/python /home/pi/pi-noc/pi_noc.py
 Restart=always
 RestartSec=5
+# Deliberately NOT set, unlike pinoc-agent.service: collect_vpn_status()'s
+# local "sudo -n wg show" (the legacy VPN interface monitor), and every
+# ActionDispatcher rescue/service/wireguard.restart handler when this host
+# is also configured as its own collection_method=local fleet device, shell
+# out to "sudo -n ..." here. NoNewPrivileges=yes would silently break all
+# of those -- sudo cannot elevate under it.
+NoNewPrivileges=no
+PrivateTmp=yes
+ProtectSystem=full
+# WorkingDirectory and this host's own outbound SSH keys live under
+# /home/pi; mirrors pinoc-agent.service's own ProtectHome=false for the
+# same reason.
+ProtectHome=false
+LockPersonality=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=multi-user.target
