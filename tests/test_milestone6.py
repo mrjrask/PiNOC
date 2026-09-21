@@ -51,6 +51,33 @@ def test_reenrolling_a_device_replaces_its_agent_row(tmp_path):
     assert gw.authenticate_agent(second["agent_id"],stamp,"n2",body,
                                  gw.sign(second["agent_id"],second["credential"],stamp,"n2",body))["device_id"]=="pi"
 
+def test_malformed_numeric_request_fields_raise_clean_devError(tmp_path):
+    # timeout_value/lines/protocol_version were cast with a bare int(),
+    # letting a malformed value (a non-numeric string, for example) raise
+    # an uncaught ValueError instead of the structured 400 the rest of
+    # this API returns for a bad request.
+    db,gw=setup(tmp_path)
+    code=gw.enrollment_code("pi","admin")
+    with pytest.raises(DevError) as enroll_error:
+        gw.enroll({"enrollment_code":code,"hostname":"mock","model":"Pi","architecture":"aarch64",
+                  "agent_version":"1.0.0","protocol_version":"not-a-number","capabilities":{}})
+    assert (enroll_error.value.error_type,enroll_error.value.status)==("invalid_request",400)
+
+    a=enroll(gw)
+    with pytest.raises(DevError) as heartbeat_error:
+        gw.heartbeat(a["agent_id"],{"protocol_version":"nope"})
+    assert (heartbeat_error.value.error_type,heartbeat_error.value.status)==("invalid_request",400)
+
+    root=tmp_path/"repo";root.mkdir();workspace(gw,root)
+    with pytest.raises(DevError) as timeout_error:
+        gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"git_status",
+                              "timeout_seconds":"soon"})
+    assert (timeout_error.value.error_type,timeout_error.value.status)==("invalid_request",400)
+    with pytest.raises(DevError) as lines_error:
+        gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"git_status",
+                              "lines":"a-lot"})
+    assert (lines_error.value.error_type,lines_error.value.status)==("invalid_request",400)
+
 def test_schema_enrollment_replay_rotation_and_revocation(tmp_path):
  db,gw=setup(tmp_path);assert SCHEMA_VERSION==11;a=enroll(gw);body=b'{}';stamp=str(int(time.time()));nonce="unique";sig=gw.sign(a["agent_id"],a["credential"],stamp,nonce,body)
  assert gw.authenticate_agent(a["agent_id"],stamp,nonce,body,sig)["device_id"]=="pi"
