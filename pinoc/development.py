@@ -36,6 +36,12 @@ FORBIDDEN_GIT={"reset","clean","checkout","pull","push","switch","restore"}
 class DevError(ValueError):
     def __init__(self,message,error_type="invalid_request",status=400):super().__init__(message);self.error_type=error_type;self.status=status
 
+def _int(value,name):
+    """int() a request-supplied field, turning malformed JSON (a string,
+    float, null, ...) into a clean 400 instead of an unhandled 500."""
+    try:return int(value)
+    except (TypeError,ValueError):raise DevError(f"{name} must be an integer","invalid_request",400)
+
 def _loads(row,key,default):
     try:return json.loads(row.get(key) or json.dumps(default))
     except (TypeError,json.JSONDecodeError):return default
@@ -74,7 +80,7 @@ class DevelopmentGateway:
         raw=str(body.get("enrollment_code", ""));code_id,sep,secret=raw.partition(".");rows=self.db.rows("SELECT * FROM agent_enrollment_codes WHERE code_id=?",(code_id,)) if sep else [];row=rows[0] if rows else None
         now=datetime.now(timezone.utc)
         if not row or row["used_at"] or datetime.fromisoformat(row["expires_at"])<now or not hmac.compare_digest(row["secret_hash"],hash_token(secret)):raise DevError("enrollment code rejected","agent_credential_rejected",401)
-        version=str(body.get("agent_version",""))[:32];protocol=int(body.get("protocol_version",0));hostname=str(body.get("hostname",""))[:255]
+        version=str(body.get("agent_version",""))[:32];protocol=_int(body.get("protocol_version",0),"protocol_version");hostname=str(body.get("hostname",""))[:255]
         if not version or protocol!=PROTOCOL_VERSION:raise DevError("agent protocol incompatible","protocol_incompatible",409)
         agent_id=str(uuid.uuid4());credential=secrets.token_urlsafe(48);stamp=utcnow()
         # device_id is UNIQUE, so re-enrolling a device that already has an
@@ -115,7 +121,7 @@ class DevelopmentGateway:
     def sign(agent_id,credential,timestamp,nonce,body):
         key=bytes.fromhex(hash_token(credential));digest=hashlib.sha256(body).hexdigest();return hmac.new(key,f"{agent_id}\n{timestamp}\n{nonce}\n{digest}".encode(),hashlib.sha256).hexdigest()
     def heartbeat(self,agent_id,body):
-        self.db.execute("UPDATE agents SET status='connected',last_seen=?,hostname=?,model=?,architecture=?,agent_version=?,protocol_version=?,capabilities_json=?,hardware_json=?,candidates_json=? WHERE agent_id=?",(utcnow(),str(body.get("hostname",""))[:255],str(body.get("model",""))[:255],str(body.get("architecture",""))[:64],str(body.get("agent_version",""))[:32],int(body.get("protocol_version",0)),json.dumps(redact(body.get("capabilities",{}))),json.dumps(redact(body.get("hardware",{}))),json.dumps(redact(body.get("candidates",[]))[:100]),agent_id))
+        self.db.execute("UPDATE agents SET status='connected',last_seen=?,hostname=?,model=?,architecture=?,agent_version=?,protocol_version=?,capabilities_json=?,hardware_json=?,candidates_json=? WHERE agent_id=?",(utcnow(),str(body.get("hostname",""))[:255],str(body.get("model",""))[:255],str(body.get("architecture",""))[:64],str(body.get("agent_version",""))[:32],_int(body.get("protocol_version",0),"protocol_version"),json.dumps(redact(body.get("capabilities",{}))),json.dumps(redact(body.get("hardware",{}))),json.dumps(redact(body.get("candidates",[]))[:100]),agent_id))
         self.cleanup()
     def save_workspace(self,data):
         wid=str(data.get("workspace_id", ""));device=str(data.get("device_id", ""));path=str(data.get("path", ""));mode=str(data.get("mode","read_only"))
@@ -164,8 +170,8 @@ class DevelopmentGateway:
         env=definition.get("environment",{}) if definition is not None else body.get("environment",{})
         if not isinstance(env,dict) or any(k not in (ws or {}).get("allowed_env",[]) or not isinstance(v,str) or len(v)>4096 for k,v in env.items()):raise DevError("environment variable is not approved")
         timeout_value=definition.get("timeout",self.default_timeout) if definition is not None else body.get("timeout_seconds",self.default_timeout)
-        timeout=int(timeout_value);timeout=max(1,min(timeout,self.max_timeout));job_id=str(uuid.uuid4());stamp=utcnow();permissions=[required]
-        request_data={"relative_path":body.get("relative_path"),"staged":bool(body.get("staged")),"lines":min(1000,max(1,int(body.get("lines",200))))}
+        timeout=_int(timeout_value,"timeout_seconds");timeout=max(1,min(timeout,self.max_timeout));job_id=str(uuid.uuid4());stamp=utcnow();permissions=[required]
+        request_data={"relative_path":body.get("relative_path"),"staged":bool(body.get("staged")),"lines":min(1000,max(1,_int(body.get("lines",200),"lines")))}
         if validate_only:return None
         self.db.execute("INSERT INTO development_jobs(job_id,parent_job_id,device_id,workspace_id,job_type,profile,argv_json,environment_json,permissions_json,requested_by,api_token_id,source_ip,requested_at,status,timeout_seconds,request_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(job_id,parent,device,wid or None,kind,profile,json.dumps(argv),json.dumps(redact(env)),json.dumps(permissions),identity["username"],identity.get("token_id"),ip,stamp,"queued",timeout,json.dumps(request_data)))
         if approval_required:
