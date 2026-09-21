@@ -67,6 +67,13 @@ class PiNOCState:
             for device_id, device in self._devices.items():
                 active = by_device.get(device_id, [])
                 device.alerts = copy.deepcopy(active)
+                # Maintenance suppresses normal health evaluation (see
+                # health.evaluate()); a pre-existing alert that was open
+                # before maintenance started -- and stays open, since
+                # maintenance never resolves it -- must not flip the
+                # device's displayed health back to that alert's severity.
+                if device.health == "maintenance":
+                    continue
                 highest = max((str(a.get("severity", "info")) for a in active),
                               key=lambda value: ranks.get(value, 0), default="healthy")
                 if ranks.get(highest, 0) > ranks.get(device.health, 0):
