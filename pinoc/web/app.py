@@ -491,7 +491,9 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def events_page(): return render_template("events.html")
 
     @app.get("/settings/status")
-    def status_page(): return render_template("status.html")
+    def status_page():
+        if security and not security.allowed(g.identity,"config.write"):abort(403)
+        return render_template("status.html")
 
     @app.get("/settings")
     def settings_page():
@@ -981,7 +983,9 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         return Response(generate(),mimetype="text/csv",headers={"Content-Disposition":f'attachment; filename="pinoc-{kind}-{name}.csv"'})
 
     @app.get("/api/database/status")
-    def database_status():return jsonify(history.db.status() if history else {"status":"disabled"})
+    def database_status():
+        if security and not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        return jsonify(history.db.status() if history else {"status":"disabled"})
 
     return app
 
