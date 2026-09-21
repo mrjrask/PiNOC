@@ -168,7 +168,7 @@ def parse_devresolve(text: str) -> Dict[str, str]:
 
 def parse_media(diskstats: str, io_errors: str, storage: List[Dict[str, Any]],
                 io_errors_available: bool = True,
-                devresolve: Dict[str, str] = {}) -> List[Dict[str, Any]]:
+                devresolve: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """Per-medium media wear/I-O-error status for block-backed filesystems.
 
     Best effort by design: non-root collectors (the normal case) may not read
@@ -178,6 +178,7 @@ def parse_media(diskstats: str, io_errors: str, storage: List[Dict[str, Any]],
     resolved to their backing block devices via ``devresolve`` before the
     diskstats lookup so aliased media still produce telemetry.
     """
+    devresolve = devresolve or {}
     counters: Dict[str, Dict[str, int]] = {}
     for line in diskstats.splitlines():
         bits = line.split()

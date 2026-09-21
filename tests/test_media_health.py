@@ -40,6 +40,16 @@ def timestamp(seconds_ago: float = 0) -> str:
 
 
 class ParseMediaTest(unittest.TestCase):
+    def test_devresolve_default_is_not_a_shared_mutable_literal(self):
+        # devresolve: Dict[str, str] = {} would bind ONE dict object as the
+        # default for every call that omits the argument -- a classic Python
+        # footgun where a future edit that ever writes into ``devresolve``
+        # would leak state between unrelated devices/collection cycles.
+        # Guard the signature itself so the anti-pattern can't creep back in.
+        import inspect
+        default = inspect.signature(parse_media).parameters["devresolve"].default
+        self.assertIsNone(default)
+
     def test_consolidates_partitions_and_maps_wear(self):
         media = parse_media(DISKSTATS, "", STORAGE)
         self.assertEqual([x["device"] for x in media], ["mmcblk0", "sda"])
