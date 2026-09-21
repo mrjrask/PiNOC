@@ -13,6 +13,11 @@ MAX_OUTPUT=8192
 # Disk-rescue actions. Each is only executable on devices that explicitly
 # list the action in their per-device allowed_actions (default: none).
 RESCUE_ACTIONS=frozenset({"apt.clean","apt.autoremove","logs.truncate","journal.vacuum","cache.drop"})
+# Every action id device_config.py's allowed_actions field may legally
+# contain -- i.e. every action ActionDispatcher.validate() actually
+# consults device.get("allowed_actions",[]) for. Keep in sync with
+# validate()'s own checks.
+ALLOWLISTABLE_ACTIONS=RESCUE_ACTIONS|{"package.check"}
 # Log paths are /var/log/** or under a path the operator declared as
 # important; the character class plus the .. check keep them file-safe.
 LOG_PATH_RE=re.compile(r"/var/log/[A-Za-z0-9/._@:-]{1,254}$")

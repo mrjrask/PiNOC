@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from pinoc.actions import ALLOWLISTABLE_ACTIONS
+
 METHODS = {"local", "ssh"}
 KNOWN_ROLES = {"file_server", "vpn_server", "adsb_receiver", "desk_display",
                "magicmirror", "pinoc", "hotspot", "general"}
@@ -87,6 +89,16 @@ def parse_device(raw: Dict[str, Any], index: int) -> DeviceConfig:
     critical = _strings(raw.get("critical_services", []), "critical_services", label)
     manageable = _strings(raw.get("manageable_services", []), "manageable_services", label)
     allowed_actions = _strings(raw.get("allowed_actions", []), "allowed_actions", label, lowercase=False)
+    unknown_actions = [a for a in allowed_actions if a not in ALLOWLISTABLE_ACTIONS]
+    if unknown_actions:
+        # ActionDispatcher.validate() compares allowed_actions entries
+        # against exact-lowercase canonical action ids -- a typo (or any
+        # other unrecognized string) here would otherwise pass validation
+        # cleanly but can never match, silently disabling the intended
+        # rescue action on this device with no warning at all.
+        raise DeviceConfigError(
+            f"device {label}: allowed_actions contains unknown action(s) {unknown_actions}; "
+            f"must be exactly one of {sorted(ALLOWLISTABLE_ACTIONS)}")
     important_paths = _strings(raw.get("important_paths", []), "important_paths", label,
                                lowercase=False)
     if len(raw.get("monitored_services", [])) != len(set(raw.get("monitored_services", []))):

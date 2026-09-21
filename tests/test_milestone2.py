@@ -32,6 +32,18 @@ class ConfigTest(unittest.TestCase):
                     DeviceConfigError, "important_paths must be a list of strings"):
                 parse_device({"hostname": "pi", "important_paths": value}, 0)
 
+    def test_allowed_actions_rejects_unknown_or_mistyped_entries(self):
+        # allowed_actions previously accepted any non-empty string
+        # verbatim; the dispatcher compares it against the exact-lowercase
+        # canonical action id, so a typo like "Apt.Clean" silently
+        # disabled the intended rescue action with no warning at all.
+        for value in ["Apt.Clean", "apt.Clean", "apt.nonexistent", "device.reboot"]:
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    DeviceConfigError, "allowed_actions contains unknown action"):
+                parse_device({"hostname": "pi", "allowed_actions": [value]}, 0)
+        d = parse_device({"hostname": "pi", "allowed_actions": ["apt.clean", "package.check"]}, 0)
+        self.assertEqual(d.allowed_actions, ("apt.clean", "package.check"))
+
 
 class ParsingTest(unittest.TestCase):
     def test_cpu_memory_storage_throttle_and_services(self):
