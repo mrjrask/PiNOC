@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import os
 from pathlib import Path
 import subprocess
 import sys
+
+
+def _cryptography_available() -> bool:
+    try:
+        from cryptography.fernet import Fernet  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def _ensure_runtime_dependencies() -> None:
@@ -14,10 +22,10 @@ def _ensure_runtime_dependencies() -> None:
 
     PiNOC is commonly updated with ``git pull`` followed by a service restart.
     That updates the code but does not refresh the already-created virtualenv.
-    If a core dependency required by the web application is missing, sync the
-    venv from requirements.txt before importing the rest of the package.
+    If a core dependency required by the web application is missing or broken,
+    sync the venv from requirements.txt before importing the rest of the package.
     """
-    if importlib.util.find_spec("cryptography") is not None:
+    if _cryptography_available():
         return
     if os.environ.get("PINOC_DEPENDENCY_BOOTSTRAP") == "1":
         return
@@ -30,7 +38,7 @@ def _ensure_runtime_dependencies() -> None:
     env = os.environ.copy()
     env["PINOC_DEPENDENCY_BOOTSTRAP"] = "1"
     print(
-        "PiNOC: cryptography is missing; synchronizing Python dependencies...",
+        "PiNOC: cryptography is missing or unusable; synchronizing Python dependencies...",
         file=sys.stderr,
         flush=True,
     )
@@ -41,6 +49,7 @@ def _ensure_runtime_dependencies() -> None:
             env=env,
             check=True,
         )
+        importlib.invalidate_caches()
     except (OSError, subprocess.CalledProcessError) as exc:
         print(
             "PiNOC: dependency synchronization failed. Run "
