@@ -31,8 +31,15 @@ def test_application_parsers():
     assert parse_mdstat(md)[0]['failed_devices']==1
 
 def test_wireguard_and_secrets():
-    text='wg0\tPUB\tPRIVATE\t51820\toff\nPEER\tpsk\thost:1\t10.0.0.0/24\t100\t12\t13\t25'
-    assert parse_dump(text,{'PEER':'office'},required=['PEER'],now=114)[0]['peers'][0]['latest_handshake_seconds']==14
+    # "wg show all dump" field order: interface, private-key, public-key,
+    # listen-port, fwmark -- then one 9-field peer line per peer
+    # (interface, public-key, preshared-key, endpoint, allowed-ips,
+    # latest-handshake, rx, tx, keepalive).
+    text='wg0\tPRIVATEKEY000\tPUBLICKEY0001\t51820\toff\nwg0\tPEER\tpsk\thost:1\t10.0.0.0/24\t100\t12\t13\t25'
+    interfaces=parse_dump(text,{'PEER':'office'},required=['PEER'],now=114)
+    assert interfaces[0]['peers'][0]['latest_handshake_seconds']==14
+    assert interfaces[0]['public_key_short']=='PUBLICKE'
+    assert 'PRIVATEKEY000' not in str(interfaces)
     assert 'private_key' not in sanitize({'private_key':'bad','data':1})
 
 def test_disk_packages_git_inventory():
