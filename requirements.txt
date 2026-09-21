@@ -13,6 +13,8 @@
 # apt: openssh-client
 # apt: sshpass
 # apt: rsync
+# apt: libssl-dev
+# apt: libffi-dev
 # Python packages installed into the virtual environment by install.sh.
 Adafruit-Blinka
 adafruit-circuitpython-bme280
@@ -20,3 +22,4 @@ adafruit-circuitpython-bme680
 adafruit-circuitpython-sht4x
 Flask>=3.0,<4
 waitress>=3.0,<4
+cryptography>=41,<44
