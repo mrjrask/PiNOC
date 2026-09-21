@@ -1,7 +1,7 @@
 """Flask application backed exclusively by the shared state cache."""
 from __future__ import annotations
 
-import csv, io, json, logging, os, secrets, shutil, time
+import csv, io, json, logging, os, secrets, shutil, threading, time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -339,9 +339,18 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def backup_run():
         if not security.allowed(g.identity,"config.write"):return jsonify({"error":"administrator required"}),403
         if backups is None or not backups.enabled:return jsonify({"error":"scheduled backups are not configured"}),409
-        status=backups.run_backup()
-        actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"backup.run",None,{},"allowed","succeeded" if not status.get("last_error") else "failed",error=status.get("last_error")) if actions else None
-        return jsonify(status)
+        # run_backup() shells out to scp/ssh with up to a 10-minute timeout;
+        # running it inline here would tie up one of Waitress's limited
+        # request-handling threads for the whole transfer, contradicting
+        # PiNOC's "no SSH or remote HTTP calls while serving a web request"
+        # design and risking pool exhaustion if the destination is slow.
+        # Run it on its own thread and audit the outcome once it finishes.
+        username,role,source_ip=g.identity["username"],g.identity["role"],request.remote_addr
+        def _run_and_audit():
+            status=backups.run_backup()
+            if actions:actions.audit(username,role,source_ip,None,"backup.run",None,{},"allowed","succeeded" if not status.get("last_error") else "failed",error=status.get("last_error"))
+        threading.Thread(target=_run_and_audit,name="pinoc-backup-run-now",daemon=True).start()
+        return jsonify({"queued":True,**backups.status()}),202
     @app.get("/api/backup/export")
     def backup_export():
         if not security.allowed(g.identity,"config.write"):return jsonify({"error":"administrator required"}),403

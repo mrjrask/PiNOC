@@ -427,6 +427,10 @@ class WebTest(unittest.TestCase):
         self.assertEqual(client.get("/api/backup/export").status_code, 403)
 
     def test_run_now(self):
+        # POST /api/backup/run must not block the request on the actual
+        # scp/local-copy delivery -- it queues the run on its own thread
+        # and returns immediately; the audit record for the completed run
+        # lands shortly after, once that background thread finishes.
         calls = []
         destination = Path(self._tmp.name) / "dest"
         backups = BackupService(
@@ -438,11 +442,41 @@ class WebTest(unittest.TestCase):
         self._login(client, "boss")
         csrf = client.get("/api/session").get_json()["csrf_token"]
         response = client.post("/api/backup/run", headers={"X-CSRF-Token": csrf})
-        self.assertEqual(response.status_code, 200)
-        self.assertIsNone(response.get_json()["last_error"])
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.get_json()["queued"])
+        end = time.time() + 5
+        while time.time() < end and db.scalar(
+                "SELECT COUNT(*) FROM audit_records WHERE action='backup.run'") != 1:
+            time.sleep(.01)
         self.assertEqual(db.scalar(
             "SELECT COUNT(*) FROM audit_records WHERE action='backup.run'"), 1)
-        self.assertEqual(client.post("/api/backup/run", headers={"X-CSRF-Token": csrf}).status_code, 200)
+        self.assertIsNone(backups.status()["last_error"])
+        self.assertEqual(client.post("/api/backup/run", headers={"X-CSRF-Token": csrf}).status_code, 202)
+
+    def test_run_now_does_not_block_the_request_on_slow_delivery(self):
+        def slow_runner(args, **kwargs):
+            time.sleep(0.3)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        backups = BackupService(
+            {"enabled": True, "destination": {"type": "ssh", "host": "nas.local", "path": "/backups"}},
+            app_dir=Path(self._tmp.name) / "instance",
+            database_path=f"{self._tmp.name}/db.sqlite", runner=slow_runner)
+        self.app, db = self._app(backups=backups)
+        client = self.app.test_client()
+        self._login(client, "boss")
+        csrf = client.get("/api/session").get_json()["csrf_token"]
+        started = time.monotonic()
+        response = client.post("/api/backup/run", headers={"X-CSRF-Token": csrf})
+        elapsed = time.monotonic() - started
+        self.assertEqual(response.status_code, 202)
+        # The request itself must return immediately -- not wait on the
+        # (here, deliberately slow) scp delivery -- so it can never tie up
+        # a Waitress worker thread for the transfer's duration.
+        self.assertLess(elapsed, 0.3)
+        end = time.time() + 3
+        while time.time() < end and backups.status()["last_run"] is None:
+            time.sleep(.01)
+        self.assertIsNotNone(backups.status()["last_run"])
 
     def test_run_now_without_service(self):
         self.app, _ = self._app()
