@@ -6,7 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from pinoc.collectors.fleet import FleetCollector, parse_cpu, parse_memory, parse_services, parse_storage, parse_throttled
+from pinoc.collectors.fleet import (FleetCollector, SCRIPT, parse_cpu, parse_memory, parse_network,
+                                    parse_services, parse_storage, parse_throttled)
 from pinoc.device_config import DeviceConfigError, load_devices, parse_device
 from pinoc.health import evaluate
 
@@ -55,6 +56,30 @@ class ParsingTest(unittest.TestCase):
         self.assertIsNone(services[0]["main_pid"])
         self.assertIsNone(services[0]["restart_count"])
         self.assertIsNone(services[0]["memory_bytes"])
+
+    def test_wifi_channel_and_width_are_parsed_from_iw_info(self):
+        # "iw dev <if> link" never prints a channel/width line at all; that
+        # only appears in "iw dev <if> info"'s
+        # "channel N (freq MHz), width: W MHz, ..." line.
+        iw_text = (
+            "Interface wlan0\n"
+            "Connected to aa:bb:cc:dd:ee:ff (on wlan0)\n"
+            "\tSSID: HomeWiFi\n"
+            "\tsignal: -55 dBm\n"
+            "Interface wlan0\n"
+            "\tchannel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz\n"
+        )
+        net = parse_network({"ROUTE": "[]", "ADDR": "[]", "NET": "", "IW": iw_text})
+        self.assertEqual(net["ssid"], "HomeWiFi")
+        self.assertEqual(net["signal_dbm"], -55.0)
+        self.assertEqual(net["channel"], 36)
+        self.assertEqual(net["channel_width"], "80 MHz")
+
+    def test_collection_script_actually_requests_iw_info(self):
+        # The parser above only works if the remote-side script actually
+        # runs "iw dev <if> info"; assert the script does, so the two
+        # cannot silently drift apart again.
+        self.assertIn("iw dev \"$ifc\" info", SCRIPT)
 
 
 class HealthTest(unittest.TestCase):
