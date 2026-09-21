@@ -353,10 +353,16 @@ class ScheduleService:
         device = self.state.device(row["device_id"]) if self.state is not None else None
         if new_target is not None and device is not None:
             self._check_action_target(row["action"], device, new_target)
-        new_paused = bool(paused) if paused is not None else bool(row["paused"])
-        reset_failures = (paused is not None and not paused) or spec is not None
-        failures = 0 if reset_failures else int(row["consecutive_failures"] or 0)
         was_paused = bool(row["paused"])
+        new_paused = bool(paused) if paused is not None else was_paused
+        # Only an actual paused->active transition (a real "resume") clears
+        # the failure counter; saving paused=false when the schedule was
+        # already active is a no-op with respect to failures, matching the
+        # documented "resuming ... resets the failure counter" behavior --
+        # not "the update happened to include paused=false".
+        resuming = was_paused and not new_paused
+        reset_failures = resuming or spec is not None
+        failures = 0 if reset_failures else int(row["consecutive_failures"] or 0)
         if new_paused:
             next_run = None
         elif spec is not None or was_paused:

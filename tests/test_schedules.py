@@ -274,6 +274,19 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(changed["spec"], "0 4 * * *")
         self.assertEqual(changed["consecutive_failures"], 0)  # reset on spec change
 
+    def test_update_with_unchanged_active_state_does_not_reset_failures(self):
+        # Only an actual paused -> active transition (a real "resume")
+        # clears the failure counter; saving paused=false while the
+        # schedule was already active is a no-op, not a resume.
+        s = self.svc.create(device_id="pi", action="device.refresh", spec="@daily",
+                            requested_by="admin")
+        sid = s["schedule_id"]
+        self.db.execute("UPDATE action_schedules SET consecutive_failures=2 WHERE schedule_id=?",
+                        (sid,))
+        updated = self.svc.update(sid, paused=False, requested_by="admin")
+        self.assertFalse(updated["paused"])
+        self.assertEqual(updated["consecutive_failures"], 2)
+
     def test_update_missing_raises(self):
         with self.assertRaises(ValueError):
             self.svc.update("does-not-exist", paused=True, requested_by="admin")
