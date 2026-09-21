@@ -52,7 +52,11 @@ class HistoryManager:
         if self.thread.is_alive():self.thread.join(timeout)
 
     def _snapshot(self,devices,stamp):
-        for d in devices:self._device(d,stamp)
+        for d in devices:
+            try:self._device(d,stamp)
+            except Exception as exc:
+                self.db.available=False;self.db.error=str(exc)
+                LOG.exception("history snapshot failed for device %s; other devices this cycle are unaffected",d.get("id"))
         self._refresh_cache()
     def _device(self,d,stamp):
         did=d["id"]; old=self.previous.get(did); ip=d.get("network",{}).get("ip") or d.get("ip") or ""
