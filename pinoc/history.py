@@ -3,14 +3,16 @@ from __future__ import annotations
 import json, logging, queue, threading, time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+from .anomalies import BaselineTracker
 from .database import Database, utcnow
 
 LOG=logging.getLogger("pinoc.history"); UTC=timezone.utc
 SEVERITY_RANK={"info":0,"warning":1,"degraded":2,"critical":3}
 
 class HistoryManager:
-    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None,notifier:Any=None):
+    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None,notifier:Any=None,anomalies:Optional[Dict[str,Any]]=None):
         self.db=db; self.config=config or {}; self.enabled=bool(self.config.get("enabled",True)); self.notifier=notifier
+        self.anomaly=BaselineTracker(db,anomalies)
         self.queue:queue.Queue=queue.Queue(maxsize=int(self.config.get("queue_size",1000)))
         self.stop_event=threading.Event(); self.thread=threading.Thread(target=self._run,name="pinoc-history",daemon=True)
         self.previous={}; self.last_sample={}; self.cpu_since={}; self.dropped=0
@@ -173,6 +175,16 @@ class HistoryManager:
                 if condition.get("service"):continue
                 key=str(condition.get("type") or f"{name}_unhealthy")
                 active[f"{key}:{name}"]=(condition.get("severity","warning"),condition.get("message",f"{name} is unhealthy"),name)
+        # Statistical anomalies reuse the same reconcile lifecycle: the metric
+        # is the fingerprint resource, so a sustained deviation keeps one
+        # alert alive and the hysteresis z-band decides resolution.
+        if self.anomaly is not None and self.anomaly.enabled:
+            prefix=f"{did}:anomaly:"
+            open_metrics={row["fingerprint"][len(prefix):] for row in self.db.rows(
+                "SELECT fingerprint FROM alerts WHERE device_id=? AND alert_type='anomaly' AND fingerprint LIKE ?",
+                (did,f"{prefix}%")) if row["fingerprint"].startswith(prefix)}
+            for a in self.anomaly.observe(d,stamp,open_metrics):
+                active[f"anomaly:{a['metric']}"]=(a["severity"],a["message"],a["metric"])
         self._reconcile(d,did,active,stamp,preserve)
     def _reconcile(self,d,did,active,stamp,preserve=None):
         preserve=preserve or set()

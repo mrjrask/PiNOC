@@ -264,7 +264,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         "api_alerts":"alerts.read","api_alert":"alerts.read",
         "api_events":"history.read","device_events":"history.read","metrics":"history.read","forecast":"history.read","device_logs":"history.read",
         "action_list":"actions.execute","action_result":"actions.execute","api_audit":"config.write","database_status":"config.write",
-        "api_schedules":"config.write",
+        "api_schedules":"config.write","api_anomalies":"history.read",
     }
     if security:install_security(app,security)
     app.extensions["pinoc_security"]=security;app.extensions["pinoc_actions"]=actions
@@ -415,6 +415,30 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
             job=service.run_now(schedule_id,requested_by=g.identity["username"],role=g.identity["role"],source_ip=request.remote_addr)
         except ValueError as exc:return jsonify({"error":str(redact(exc))}),400
         return jsonify({"job":redact(job)}),202
+    @app.get("/api/anomalies")
+    def api_anomalies():
+        if not (security is None or security.allowed(g.identity, "history.read")):
+            return jsonify({"error": "permission denied"}), 403
+        section = app.config.get("PINOC_CONFIG", {}).get("anomaly_detection") or {}
+        tracker = history.anomaly if history is not None else None
+        if tracker is None or history is None or not history.db.available:
+            return jsonify({"status": {"enabled": False, "mode": "off", "metrics": {}}, "previews": []})
+        try:
+            limit = min(1000, max(1, int(request.args.get("limit", 100))))
+        except (TypeError, ValueError):
+            limit = 100
+        return jsonify({"status": {
+            "enabled": bool(section.get("enabled", False)),
+            "alerting": bool(section.get("alerting", False)),
+            "mode": "off" if not section.get("enabled", False) else ("alerts" if section.get("alerting", False) else "preview"),
+            "z_open": tracker.z_open, "z_hysteresis": tracker.z_hysteresis, "min_samples": tracker.min_samples,
+            "metrics": {name: {"label": spec["label"], "unit": spec["unit"], "enabled": spec["enabled"],
+                               "z_open": spec["z_open"], "z_hysteresis": spec["z_hysteresis"]}
+                        for name, spec in tracker.metric_config.items()},
+            "baselines": history.db.rows(
+                "SELECT device_id,metric,SUM(samples) AS samples,MAX(updated_at) AS updated_at FROM metric_baselines "
+                "WHERE hour=-1 GROUP BY device_id,metric ORDER BY device_id,metric"),
+        }, "previews": redact(tracker.previews(limit))})
     @app.get("/api/users")
     def users():
         if not security.allowed(g.identity,"users.write"):return jsonify({"error":"permission denied"}),403

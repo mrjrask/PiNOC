@@ -1411,7 +1411,8 @@ def main() -> None:
         history_config.get("database_path", APP_DIR / "data" / "pinoc.db")
     )
     notifications = NotificationService(CONFIG.get("notifications", {}), state=state)
-    history = HistoryManager(Database(database_path), history_config, state, notifier=notifications)
+    history = HistoryManager(Database(database_path), history_config, state, notifier=notifications,
+                              anomalies=CONFIG.get("anomaly_detection"))
     state.add_publish_hook(history.submit)
     history.start()
     notifications.start()
