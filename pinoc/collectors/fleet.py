@@ -343,9 +343,16 @@ def parse_jlogs(text: str) -> List[Dict[str, Any]]:
 class FleetCollector:
     def __init__(self, devices: List[DeviceConfig], max_workers: int = 4, timeout: float = 8,
                  password: str = "", runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-                 log_tail_seconds: float = 300.0, log_tail_lines: int = 50) -> None:
+                 log_tail_seconds: float = 300.0, log_tail_lines: int = 50,
+                 passwords: Optional[Dict[str, str]] = None) -> None:
         self.devices=devices; self.max_workers=max(1,min(int(max_workers),16)); self.timeout=float(timeout)
         self.password=password; self.runner=runner
+        # Per-device password override (device_id -> password): compromising
+        # one device's SSH access no longer exposes every other password-
+        # auth device's credential too. `password` remains as the
+        # fleet-wide fallback for devices without their own entry, so
+        # existing single-password deployments keep working unchanged.
+        self.passwords=dict(passwords or {})
         # previous_cpu/previous_net/snapshots/_last_jlogs are shared across
         # every collect_device() call, which collect() dispatches to a
         # ThreadPoolExecutor -- one worker thread per device. Safe today
@@ -361,6 +368,9 @@ class FleetCollector:
         self.log_tail_seconds=max(30.0,float(log_tail_seconds)); self.log_tail_lines=min(200,max(1,int(log_tail_lines)))
         self._last_jlogs: Dict[str, float] = {}
 
+    def _password_for(self, device: DeviceConfig) -> str:
+        return self.passwords.get(device.id) or self.password
+
     def _command(self, device: DeviceConfig, jlogs_due: bool = False) -> List[str]:
         args = (["__discover__"] if device.service_discovery else []) + list(device.monitored_services)
         if jlogs_due:
@@ -374,15 +384,16 @@ class FleetCollector:
                 args.append(f"__jlogs__:{self.log_tail_lines}:{','.join(units)}")
         if device.collection_method == "local": return ["sh", "-s", "--", *args]
         ssh=["ssh","-p",str(device.ssh_port),"-o",f"ConnectTimeout={max(1,int(self.timeout))}","-o","ServerAliveInterval=3"]
-        if self.password: return ["sshpass","-e",*ssh,"-o","BatchMode=no",f"{device.ssh_user}@{device.address}","sh","-s","--",*args]
+        if self._password_for(device): return ["sshpass","-e",*ssh,"-o","BatchMode=no",f"{device.ssh_user}@{device.address}","sh","-s","--",*args]
         return [*ssh,"-o","BatchMode=yes",f"{device.ssh_user}@{device.address}","sh","-s","--",*args]
 
     def collect_device(self, device: DeviceConfig) -> DeviceState:
         attempted=datetime.now(timezone.utc).isoformat(); old=self.snapshots.get(device.id)
         jlogs_due=time.monotonic()-self._last_jlogs.get(device.id,0.0)>=self.log_tail_seconds
         try:
-            env={**os.environ,"LC_ALL":"C"};
-            if self.password: env["SSHPASS"]=self.password
+            env={**os.environ,"LC_ALL":"C"}
+            device_password=self._password_for(device)
+            if device_password: env["SSHPASS"]=device_password
             proc=self.runner(self._command(device,jlogs_due),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
             if proc.returncode: raise RuntimeError((proc.stderr or f"command exited {proc.returncode}").strip()[:240])
             self._last_jlogs[device.id]=time.monotonic()

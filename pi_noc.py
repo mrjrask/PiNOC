@@ -276,6 +276,17 @@ def read_env_value(key: str) -> str:
     return ""
 
 
+def device_ssh_password_env_key(device_id: str) -> str:
+    """The .env key a device's own SSH password would be read from.
+
+    "SSH_PASS_<DEVICE_ID>" (uppercased, non-alnum runs collapsed to a single
+    underscore) -- lets an operator give one device its own password
+    instead of every password-auth device sharing CM5_SSH_PASS, without
+    requiring every device to have one.
+    """
+    return "SSH_PASS_" + re.sub(r"[^A-Z0-9]+", "_", device_id.upper()).strip("_")
+
+
 
 
 def collect_vpn_status() -> VPNStatus:
@@ -1203,11 +1214,20 @@ class SharedSnapshotCoordinator:
             logging.getLogger("pinoc.config").error("invalid fleet configuration: %s", error)
         logging.getLogger("pinoc.config").info("loaded %d fleet device(s)", len(devices))
         polling = CONFIG.get("polling", {})
+        # Per-device passwords (SSH_PASS_<DEVICE_ID> in .env) take priority
+        # over the fleet-wide CM5_SSH_PASS fallback, so a compromised
+        # single-device credential doesn't expose every other password-auth
+        # device too. A device without its own entry keeps using the
+        # fleet-wide password, so existing single-password setups are
+        # unaffected.
+        ssh_passwords = {device.id: value for device in devices
+                         if (value := read_env_value(device_ssh_password_env_key(device.id)))}
         self.fleet_collector = FleetCollector(
             devices, int(CONFIG.get("fleet_max_workers", 4)),
             float(CONFIG.get("ssh_command_timeout", 8)), read_env_value("CM5_SSH_PASS"),
             log_tail_seconds=float(polling.get("log_tail_seconds", 300)),
-            log_tail_lines=int(polling.get("log_tail_lines", 50)))
+            log_tail_lines=int(polling.get("log_tail_lines", 50)),
+            passwords=ssh_passwords)
         self.configured_fleet_devices = tuple(devices)
         global_thresholds = CONFIG.get("health_thresholds", {})
         try:
