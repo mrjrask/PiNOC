@@ -44,6 +44,10 @@ def test_wireguard_and_secrets():
 
 def test_disk_packages_git_inventory():
     assert parse_nvme({'critical_warning':1})['health']=='critical'
+    # smartctl -j's real NVMe log keys are "available_spare" and
+    # "percentage_used", not "avail_spare"/"percent_used".
+    nvme=parse_nvme({'critical_warning':0,'available_spare':97,'percentage_used':12})
+    assert (nvme['available_spare_percent'],nvme['percentage_used'])==(97,12)
     assert parse_smart({'smart_status':{'passed':True}})['health']=='healthy'
     assert parse_apt('Inst one\nInst sec [1] (2 Debian-Security)',True)['security_updates']==1
     git=normalize('app','/x','branch=main\ncommit=abcdefghi\ndirty=1\nahead_behind=2 3\nremote=https://user:token@example.com/org/repo.git')
