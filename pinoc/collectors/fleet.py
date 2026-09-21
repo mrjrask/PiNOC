@@ -369,7 +369,12 @@ class FleetCollector:
             os_values={}
             for row in data.get("OS","").splitlines():
                 if "=" in row: os_values[row.split("=",1)[0]]=row.split("=",1)[1].strip('"')
-            uptime=float(data.get("UPTIME","0").split()[0]); uname=data.get("UNAME","").split()
+            # data.get("UPTIME","0") only falls back when the key is absent
+            # entirely; a present-but-empty UPTIME section (device command
+            # failed silently, unreadable /proc/uptime, ...) still leaves
+            # split() == [] and [0] raising IndexError, so guard it too.
+            uptime_parts=data.get("UPTIME","0").split(); uptime=float(uptime_parts[0]) if uptime_parts else 0.0
+            uname=data.get("UNAME","").split()
             service_text=data.get("SERVICES",""); services=parse_services(service_text,device.critical_services,uptime)
             now=datetime.now(timezone.utc).isoformat()
             network=parse_network(data); stamp=time.monotonic(); prior=self.previous_net.get(device.id)
