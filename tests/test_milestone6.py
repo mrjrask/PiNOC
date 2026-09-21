@@ -7,7 +7,7 @@ from pinoc.history import HistoryManager
 from pinoc.security import SecurityManager
 from pinoc.state import PiNOCState
 from pinoc.web.app import create_app
-from pinoc_agent import Client,Executor
+from pinoc_agent import Client,Executor,MAX_DELIVERY_ATTEMPTS
 
 # A fixed key so a DevelopmentGateway created directly here and one created
 # later by create_app() (over the same database, as in
@@ -145,6 +145,35 @@ def test_agent_retries_running_acknowledgement_before_execution(monkeypatch):
  job={"job_id":"job-1"};client.execute_job(job)
  assert deliveries==[{"status":"running"}]*3+[{"status":"succeeded"}]
  assert executions==[job] and client.current_job is None
+
+def test_agent_gives_up_and_releases_job_after_persistent_ack_failure(monkeypatch):
+ # A server that keeps rejecting the "running" ack (a revoked credential,
+ # for example) must not spin forever: current_job must eventually clear
+ # so the agent can accept new work, and the job must never be executed
+ # since the server never even learned it started.
+ client=Client({"poll_seconds":2});client.current_job="job-1";executions=[]
+ client.executor.execute=lambda job:executions.append(job) or {"status":"succeeded"}
+ attempts=[]
+ def request(path,body):attempts.append(body);raise OSError("persistent outage")
+ client.request=request;monkeypatch.setattr(time,"sleep",lambda _:None)
+ client.execute_job({"job_id":"job-1"})
+ assert len(attempts)==MAX_DELIVERY_ATTEMPTS
+ assert executions==[]
+ assert client.current_job is None
+
+def test_agent_gives_up_and_releases_job_after_persistent_result_delivery_failure(monkeypatch):
+ client=Client({"poll_seconds":2});client.current_job="job-1"
+ client.executor.execute=lambda job:{"status":"succeeded"}
+ attempts=[]
+ def request(path,body):
+  attempts.append(body)
+  if body=={"status":"running"}:return {}
+  raise OSError("persistent outage")
+ client.request=request;monkeypatch.setattr(time,"sleep",lambda _:None)
+ client.execute_job({"job_id":"job-1"})
+ assert attempts[0]=={"status":"running"}
+ assert len(attempts)==1+MAX_DELIVERY_ATTEMPTS
+ assert client.current_job is None
 
 def test_executor_reports_a_missing_workspace_as_failure(tmp_path):
  missing=tmp_path/"deleted"

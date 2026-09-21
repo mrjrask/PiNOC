@@ -143,6 +143,8 @@ class Executor:
     @staticmethod
     def done(started,code,out,err,summary,status="succeeded",etype=None,ot=False,et=False,artifacts=None):return {"status":status,"exit_code":code,"stdout":out,"stderr":err,"summary":summary,"error_type":etype,"stdout_truncated":ot,"stderr_truncated":et,"duration_ms":int((time.monotonic()-started)*1000),"artifacts":artifacts or [],"result":{"status":status,"exit_code":code}}
 
+MAX_DELIVERY_ATTEMPTS=20
+
 class Client:
     def __init__(self,config):self.c=config;self.executor=Executor();self.current_job=None;self.worker=None
     def request(self,path,data=None,signed=True):
@@ -153,24 +155,29 @@ class Client:
         with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
     def heartbeat(self):
         caps,hardware,candidates=discover(self.c.get("discovery_roots",[]));body={"hostname":platform.node(),"model":hardware["model"],"architecture":hardware["architecture"],"agent_version":AGENT_VERSION,"protocol_version":PROTOCOL_VERSION,"capabilities":caps,"hardware":hardware,"candidates":candidates,"current_job_id":self.current_job};return self.request("/api/v1/agent/heartbeat",body)
+    def _deliver(self,job_id,body,label):
+        """POST a job result, retrying transient failures up to
+        MAX_DELIVERY_ATTEMPTS times. A server that keeps rejecting the
+        request (a revoked credential, a job record the server will never
+        accept again) must not spin forever: that leaves current_job set,
+        and since run() only starts a new job when current_job is None,
+        an unbounded retry here permanently wedges the agent."""
+        for attempt in range(1,MAX_DELIVERY_ATTEMPTS+1):
+            try:
+                self.request(f"/api/v1/agent/jobs/{job_id}/result",body);return True
+            except Exception as exc:
+                if attempt>=MAX_DELIVERY_ATTEMPTS:
+                    print(f"pinoc-agent job {job_id} {label}: giving up after {attempt} attempts: {exc}",file=sys.stderr)
+                    return False
+                print(f"pinoc-agent job {job_id} {label}: {exc}; retrying ({attempt}/{MAX_DELIVERY_ATTEMPTS})",file=sys.stderr)
+                time.sleep(max(2,min(60,int(self.c.get("poll_seconds",5)))))
+        return False
     def execute_job(self,job):
         job_id=job["job_id"]
         try:
-            while True:
-                try:
-                    self.request(f"/api/v1/agent/jobs/{job_id}/result",{"status":"running"})
-                    break
-                except Exception as exc:
-                    print(f"pinoc-agent job {job_id} running acknowledgement: {exc}; retrying",file=sys.stderr)
-                    time.sleep(max(2,min(60,int(self.c.get("poll_seconds",5)))))
+            if not self._deliver(job_id,{"status":"running"},"running acknowledgement"):return
             result=self.executor.execute(job)
-            while True:
-                try:
-                    self.request(f"/api/v1/agent/jobs/{job_id}/result",result)
-                    break
-                except Exception as exc:
-                    print(f"pinoc-agent job {job_id} result delivery: {exc}; retrying",file=sys.stderr)
-                    time.sleep(max(2,min(60,int(self.c.get("poll_seconds",5)))))
+            self._deliver(job_id,result,"result delivery")
         except Exception as exc:print(f"pinoc-agent job {job_id}: {exc}",file=sys.stderr)
         finally:self.current_job=None
     def run(self):
