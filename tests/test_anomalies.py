@@ -59,6 +59,27 @@ class BaselineTrackerTest(unittest.TestCase):
                             "AND metric=? AND hour=?", (metric, hour))
         return rows[0] if rows else None
 
+    def test_observe_issues_one_baseline_query_for_all_metrics(self):
+        # observe() previously issued one SELECT per tracked metric (6 by
+        # default). It should fetch every metric's baseline rows for the
+        # device in a single query instead of fanning out one per metric.
+        full_device = {"id": "pi", "online": True,
+                       "cpu": {"utilization_percent": 10.0, "load_1m": 1.0, "temperature_c": 40.0},
+                       "memory": {"percent": 40.0},
+                       "network": {"rx_rate": 100.0, "tx_rate": 100.0}}
+        queries = []
+        real_rows = self.db.rows
+        def counting_rows(sql, params=()):
+            if "metric_baselines" in sql and "SELECT" in sql:
+                queries.append(sql)
+            return real_rows(sql, params)
+        self.db.rows = counting_rows
+        try:
+            self.tracker.observe(full_device, _stamp())
+        finally:
+            self.db.rows = real_rows
+        self.assertEqual(len(queries), 1)
+
     def test_disabled_tracker_is_inert(self):
         tracker = BaselineTracker(self.db)
         self.assertEqual(tracker.observe(_device(99.0), _stamp()), [])

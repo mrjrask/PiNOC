@@ -119,7 +119,7 @@ class BaselineTracker:
             return []
         hour = datetime.fromisoformat(stamp).hour
         open_metrics = set(open_metrics)
-        results = []
+        candidates = []
         for metric, raw in _extract(d):
             spec = self.metric_config.get(metric)
             if spec is None or not spec["enabled"]:
@@ -127,9 +127,22 @@ class BaselineTracker:
             value = _number(raw)
             if value is None:
                 continue
-            baselines = {row["hour"]: row for row in self.db.rows(
-                "SELECT * FROM metric_baselines WHERE device_id=? AND metric=? AND hour IN (-1,?)",
-                (did, metric, hour))}
+            candidates.append((metric, value))
+        if not candidates:
+            return []
+        # One query for every tracked metric on this device instead of one
+        # per metric -- observe() runs once per device per poll, and with 6
+        # tracked metrics that was 6 round-trips just to read the baselines.
+        metrics = [metric for metric, _ in candidates]
+        placeholders = ",".join("?" * len(metrics))
+        baselines_by_metric: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        for row in self.db.rows(
+                f"SELECT * FROM metric_baselines WHERE device_id=? AND metric IN ({placeholders}) AND hour IN (-1,?)",
+                (did, *metrics, hour)):
+            baselines_by_metric.setdefault(row["metric"], {})[row["hour"]] = row
+        results = []
+        for metric, value in candidates:
+            baselines = baselines_by_metric.get(metric, {})
             ref, z, stale = self._reference(baselines, hour, value, stamp)
             anomaly = self._evaluate(metric, value, hour, stamp, baselines, open_metrics,
                                      ref=ref, z=z, stale=stale)
