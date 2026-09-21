@@ -9,8 +9,15 @@ from pinoc.state import PiNOCState
 from pinoc.web.app import create_app
 from pinoc_agent import Client,Executor
 
+# A fixed key so a DevelopmentGateway created directly here and one created
+# later by create_app() (over the same database, as in
+# test_incompatible_heartbeat_does_not_claim_queued_job) decrypt the same
+# stored agent credential, matching how a real deployment runs exactly one
+# DevelopmentGateway instance keyed by its configured PINOC_SECRET_KEY.
+CREDENTIAL_KEY="test-credential-key"
+
 def setup(tmp_path):
- db=Database(str(tmp_path/"pinoc.db"));assert db.initialize();gw=DevelopmentGateway(db,str(tmp_path/"jobs"),{"output_limit_bytes":1024,"artifact_file_limit_bytes":1024,"artifact_total_limit_bytes":2048});return db,gw
+ db=Database(str(tmp_path/"pinoc.db"));assert db.initialize();gw=DevelopmentGateway(db,str(tmp_path/"jobs"),{"output_limit_bytes":1024,"artifact_file_limit_bytes":1024,"artifact_total_limit_bytes":2048},CREDENTIAL_KEY);return db,gw
 
 def enroll(gw):
  code=gw.enrollment_code("pi","admin");answer=gw.enroll({"enrollment_code":code,"hostname":"mock","model":"Pi","architecture":"aarch64","agent_version":"1.0.0","protocol_version":PROTOCOL_VERSION,"capabilities":{"python":"3.12","git":"2"}});return answer
@@ -96,7 +103,7 @@ def test_restricted_job_history_applies_filters_before_limit(tmp_path):
 def test_incompatible_heartbeat_does_not_claim_queued_job(tmp_path):
  db,gateway=setup(tmp_path);credentials=enroll(gateway);root=tmp_path/"repo";root.mkdir();workspace(gateway,root)
  queued=gateway.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"git_status"})
- history=HistoryManager(db,{});app=create_app(PiNOCState(),{"TESTING":True,"AUTH_ENABLED":True},history);body=json.dumps({"protocol_version":PROTOCOL_VERSION+1}).encode();stamp=str(int(time.time()));nonce="mismatch"
+ history=HistoryManager(db,{});app=create_app(PiNOCState(),{"TESTING":True,"AUTH_ENABLED":True,"SECRET_KEY":CREDENTIAL_KEY},history);body=json.dumps({"protocol_version":PROTOCOL_VERSION+1}).encode();stamp=str(int(time.time()));nonce="mismatch"
  headers={"Content-Type":"application/json","X-PiNOC-Agent":credentials["agent_id"],"X-PiNOC-Timestamp":stamp,"X-PiNOC-Nonce":nonce,"X-PiNOC-Signature":gateway.sign(credentials["agent_id"],credentials["credential"],stamp,nonce,body)}
  response=app.test_client().post("/api/v1/agent/heartbeat",data=body,headers=headers)
  assert response.status_code==409 and response.get_json()["error_type"]=="protocol_incompatible"

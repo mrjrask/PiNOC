@@ -249,7 +249,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     if security_db and not security_db.available:security_db.initialize()
     security=SecurityManager(security_db,auth_enabled,app.config.get("RATE_LIMIT")) if security_db else None
     actions=ActionDispatcher(history.db,state,coordinator,int(app.config.get("ACTION_WORKERS",2))) if history else None
-    development=DevelopmentGateway(history.db,app.config.get("DEV_ARTIFACT_ROOT","data/jobs"),app.config.get("DEV_CONFIG",{})) if history else None
+    development=DevelopmentGateway(history.db,app.config.get("DEV_ARTIFACT_ROOT","data/jobs"),app.config.get("DEV_CONFIG",{}),app.secret_key) if history else None
     playbooks=load_playbooks(app.config.get("PINOC_CONFIG") or {},known_actions=actions.registry.keys() if actions else None)
     # Flask/Werkzeug enforces this while reading the stream, before the public
     # agent endpoints buffer a body for HMAC verification.  Allow enough room

@@ -7,8 +7,13 @@ from __future__ import annotations
 import base64, hashlib, hmac, json, mimetypes, os, secrets, time, uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from cryptography.fernet import Fernet, InvalidToken
 from pinoc.database import utcnow
 def hash_token(secret):return hashlib.sha256(secret.encode()).hexdigest()
+def _fernet_key(secret):
+    """Derive a Fernet key from an arbitrary-length application secret."""
+    material=secret.encode() if isinstance(secret,str) else bytes(secret)
+    return base64.urlsafe_b64encode(hashlib.sha256(material).digest())
 def redact(value):
     """Best-effort managed-secret redaction; application secrets are unknowable."""
     if isinstance(value,dict):return {str(k):("[REDACTED]" if any(x in str(k).lower() for x in ("password","secret","token","credential","private_key")) else redact(v)) for k,v in value.items()}
@@ -36,12 +41,29 @@ def _loads(row,key,default):
     except (TypeError,json.JSONDecodeError):return default
 
 class DevelopmentGateway:
-    def __init__(self,db,artifact_root="data/jobs",config=None):
+    def __init__(self,db,artifact_root="data/jobs",config=None,credential_key=None):
         self.db=db;self.config=config or {};self.root=Path(artifact_root).resolve();self.root.mkdir(parents=True,exist_ok=True)
+        # Agent credentials are stored encrypted at rest, not merely hashed:
+        # every request's HMAC signature must be independently recomputed
+        # from the exact raw credential to verify it, so a value that is
+        # used directly as that verification key -- as a bare hash of the
+        # credential would be -- offers no protection at all against a
+        # database-only leak (backup theft, SQL injection): the leaked
+        # value already IS usable key material. credential_key is normally
+        # the application's PINOC_SECRET_KEY, which -- like session
+        # cookies -- is intentionally never stored in the database or
+        # included in backup bundles (see backup.py's env-manifest, which
+        # records only .env key *names*), so a database-only leak yields
+        # ciphertext that cannot be used to forge signed agent requests.
+        self._fernet=Fernet(_fernet_key(credential_key or secrets.token_hex(32)))
         self.default_timeout=max(1,int(self.config.get("default_timeout_seconds",300)));self.max_timeout=max(self.default_timeout,min(1800,int(self.config.get("max_timeout_seconds",1800))))
         self.output_limit=max(1024,int(self.config.get("output_limit_bytes",262144)));self.file_limit=max(1024,int(self.config.get("file_read_limit_bytes",1048576)))
         self.artifact_file_limit=max(1024,int(self.config.get("artifact_file_limit_bytes",10*1024*1024)));self.artifact_total_limit=max(self.artifact_file_limit,int(self.config.get("artifact_total_limit_bytes",25*1024*1024)));self.artifact_count=max(1,min(100,int(self.config.get("artifact_count",20))))
         if db.available:db.execute("UPDATE development_jobs SET status='agent_lost',completed_at=?,error_type='agent_lost',summary='PiNOC restarted before agent reconciliation' WHERE status IN ('dispatched','running')",(utcnow(),))
+    def _encrypt_credential(self,secret):return self._fernet.encrypt(secret.encode()).decode()
+    def _decrypt_credential(self,token):
+        try:return self._fernet.decrypt(str(token).encode()).decode()
+        except (InvalidToken,ValueError,TypeError):return None
     def audit(self,identity,ip,device,action,target,params,auth,result=None,error=None):
         self.db.execute("INSERT INTO audit_records(timestamp,user,role,source_ip,device_id,action,target,parameters_json,authorization_result,execution_result,error) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(utcnow(),identity.get("username","agent"),identity.get("role","agent"),ip,device,action,target,json.dumps(redact(params or {}),sort_keys=True),auth,result,redact(error) if error else None))
     def enrollment_code(self,device,actor,ttl=600):
@@ -55,11 +77,11 @@ class DevelopmentGateway:
         version=str(body.get("agent_version",""))[:32];protocol=int(body.get("protocol_version",0));hostname=str(body.get("hostname",""))[:255]
         if not version or protocol!=PROTOCOL_VERSION:raise DevError("agent protocol incompatible","protocol_incompatible",409)
         agent_id=str(uuid.uuid4());credential=secrets.token_urlsafe(48);stamp=utcnow()
-        self.db.execute("INSERT INTO agents(agent_id,device_id,credential_hash,hostname,model,architecture,agent_version,protocol_version,status,capabilities_json,hardware_json,candidates_json,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(agent_id,row["device_id"],hash_token(credential),hostname,str(body.get("model",""))[:255],str(body.get("architecture",""))[:64],version,protocol,"connected",json.dumps(redact(body.get("capabilities",{}))),json.dumps(redact(body.get("hardware",{}))),json.dumps([]),stamp,stamp))
+        self.db.execute("INSERT INTO agents(agent_id,device_id,credential_hash,hostname,model,architecture,agent_version,protocol_version,status,capabilities_json,hardware_json,candidates_json,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(agent_id,row["device_id"],self._encrypt_credential(credential),hostname,str(body.get("model",""))[:255],str(body.get("architecture",""))[:64],version,protocol,"connected",json.dumps(redact(body.get("capabilities",{}))),json.dumps(redact(body.get("hardware",{}))),json.dumps([]),stamp,stamp))
         self.db.execute("UPDATE agent_enrollment_codes SET used_at=? WHERE code_id=?",(stamp,code_id));return {"agent_id":agent_id,"device_id":row["device_id"],"credential":credential,"protocol_version":PROTOCOL_VERSION}
     def rotate(self,agent_id):
         if not self.agent(agent_id):raise DevError("agent not found","agent_not_found",404)
-        secret=secrets.token_urlsafe(48);self.db.execute("UPDATE agents SET credential_hash=?,credential_revoked=0,enabled=1,credential_rotated_at=? WHERE agent_id=?",(hash_token(secret),utcnow(),agent_id));return secret
+        secret=secrets.token_urlsafe(48);self.db.execute("UPDATE agents SET credential_hash=?,credential_revoked=0,enabled=1,credential_rotated_at=? WHERE agent_id=?",(self._encrypt_credential(secret),utcnow(),agent_id));return secret
     def agent(self,agent_id):
         rows=self.db.rows("SELECT * FROM agents WHERE agent_id=?",(agent_id,));return self._agent(rows[0]) if rows else None
     def agents(self):return [self._agent(x) for x in self.db.rows("SELECT * FROM agents ORDER BY device_id")]
@@ -77,8 +99,9 @@ class DevelopmentGateway:
         except (ValueError,TypeError):stamp=0
         if not row or not row["enabled"] or row["credential_revoked"] or abs(time.time()-stamp)>60:raise DevError("agent credential rejected","agent_credential_rejected",401)
         if self.db.scalar("SELECT 1 FROM agent_request_nonces WHERE agent_id=? AND nonce=?",(agent_id,nonce)):raise DevError("replayed request","replay_rejected",409)
-        digest=hashlib.sha256(body).hexdigest();message=f"{agent_id}\n{stamp}\n{nonce}\n{digest}".encode();expected=hmac.new(bytes.fromhex(row["credential_hash"]),message,hashlib.sha256).hexdigest()
-        # Credentials are stored as SHA-256 material and used as the HMAC key.
+        credential=self._decrypt_credential(row["credential_hash"])
+        if credential is None:raise DevError("agent credential rejected","agent_credential_rejected",401)
+        digest=hashlib.sha256(body).hexdigest();message=f"{agent_id}\n{stamp}\n{nonce}\n{digest}".encode();expected=hmac.new(bytes.fromhex(hash_token(credential)),message,hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected,str(signature)):raise DevError("agent credential rejected","agent_credential_rejected",401)
         self.db.execute("INSERT INTO agent_request_nonces VALUES(?,?,?)",(agent_id,nonce,utcnow()));self.db.execute("DELETE FROM agent_request_nonces WHERE used_at<?",((datetime.now(timezone.utc)-timedelta(minutes=5)).isoformat(),));return row
     @staticmethod
