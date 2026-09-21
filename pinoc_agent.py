@@ -131,13 +131,23 @@ class Executor:
         return job.get("argv") or {"python":["python3","-m","compileall","."],"pytest":["python3","-m","pytest"],"npm_test":["npm","test"]}.get(kind,[])
     @staticmethod
     def collect(root,patterns,limits):
+        # Check the file's size (a stat(), not a read) against file_bytes
+        # *before* reading it. This runs directly in the long-running agent
+        # process (unlike subprocess children, which get RLIMIT_AS), so an
+        # artifact_patterns match against an oversized file (a runaway log,
+        # a core dump) must not be fully buffered into memory just to be
+        # discarded afterward -- that risks OOMing the whole agent, not a
+        # bounded per-job failure.
         result=[];total=0
         for pattern in patterns:
             for path in root.glob(pattern):
                 real=path.resolve()
                 if root not in real.parents or not real.is_file():continue
+                if len(result)>=limits["count"]:continue
+                try:size=real.stat().st_size
+                except OSError:continue
+                if size>limits["file_bytes"] or total+size>limits["total_bytes"]:continue
                 data=real.read_bytes()
-                if len(result)>=limits["count"] or len(data)>limits["file_bytes"] or total+len(data)>limits["total_bytes"]:continue
                 total+=len(data);result.append({"name":path.name,"data":base64.b64encode(data).decode(),"content_type":"application/octet-stream"})
         return result
     @staticmethod

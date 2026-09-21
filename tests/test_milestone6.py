@@ -246,6 +246,20 @@ def test_file_read_rejects_oversize_file_without_unbounded_read(tmp_path,monkeyp
  assert result["status"]=="failed" and result["error_type"]=="invalid_request"
  assert result["stderr"]=="file exceeds read limit"
 
+def test_collect_rejects_oversize_artifact_without_unbounded_read(tmp_path,monkeypatch):
+ root=tmp_path/"repo";root.mkdir();(root/"out").mkdir()
+ small=root/"out"/"small.png";small.write_bytes(b"x"*5)
+ large=root/"out"/"large.png";large.write_bytes(b"x"*50)
+ real_read_bytes=Path.read_bytes
+ def guarded(self):
+  if self.resolve()==large.resolve():pytest.fail("read_bytes must not buffer an oversized artifact")
+  return real_read_bytes(self)
+ monkeypatch.setattr(Path,"read_bytes",guarded)
+ # The oversized file must never reach read_bytes(); the small one still
+ # must be collected normally.
+ result=Executor.collect(root,["out/*.png"],{"count":10,"file_bytes":10,"total_bytes":1000})
+ assert [a["name"] for a in result]==["small.png"]
+
 def test_offline_read_only_timeout_cancel_artifacts_and_matrix(tmp_path):
  db,gw=setup(tmp_path);a=enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root,"read_only")
  with pytest.raises(DevError):gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"command","argv":["python3","-V"]})
