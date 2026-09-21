@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from pinoc.collectors.fleet import FleetCollector, parse_cpu, parse_memory, parse_services, parse_storage, parse_throttled
 from pinoc.device_config import DeviceConfigError, load_devices, parse_device
@@ -109,6 +110,31 @@ class ConcurrencyTest(unittest.TestCase):
             return subprocess.CompletedProcess(cmd,0,"__UPTIME__\n1 1\n__LOAD__\n0 0 0\n__CPU__\ncpu 1 0 1 8\n__MEM__\nMemTotal: 10 kB\nMemAvailable: 5 kB\n","")
         started=time.monotonic(); result=FleetCollector(devices,max_workers=2,runner=runner).collect()
         self.assertLess(time.monotonic()-started,.3); self.assertEqual({x.id for x in result},{"slow","good"})
+
+    def test_unexpected_bug_in_one_device_does_not_drop_it_or_abort_others(self):
+        # collect_device()'s except clause only catches known transport
+        # failures; a genuinely unexpected bug (a real parsing/logic error,
+        # not simulated here as any exception the health evaluator might
+        # raise) must not propagate out of future.result() in collect() and
+        # abort the whole cycle, nor silently drop the failing device from
+        # the returned list (state.publish(replace=True) would delete it).
+        devices=[parse_device({"id":x,"hostname":x},i) for i,x in enumerate(("broken","good"))]
+        def runner(cmd,**kwargs):
+            return subprocess.CompletedProcess(
+                cmd,0,"__UPTIME__\n1 1\n__LOAD__\n0 0 0\n__CPU__\ncpu 1 0 1 8\n"
+                "__MEM__\nMemTotal: 10 kB\nMemAvailable: 5 kB\n","")
+        collector=FleetCollector(devices,max_workers=2,runner=runner)
+        real_evaluate=evaluate; calls={"broken":0}
+        def flaky_evaluate(raw,thresholds):
+            if raw.get("id")=="broken" and calls["broken"]==0:
+                calls["broken"]+=1;raise ValueError("simulated unexpected bug")
+            return real_evaluate(raw,thresholds)
+        with mock.patch("pinoc.collectors.fleet.evaluate",side_effect=flaky_evaluate):
+            result=collector.collect()
+        by_id={d.id:d for d in result}
+        self.assertEqual(set(by_id),{"broken","good"})
+        self.assertIn("simulated unexpected bug",by_id["broken"].error)
+        self.assertEqual(by_id["good"].error,"")
 
 
 if __name__ == "__main__": unittest.main()
