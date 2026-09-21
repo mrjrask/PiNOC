@@ -58,6 +58,15 @@ class ActionError(ValueError):pass
 class ActionDispatcher:
     def __init__(self,db,state,coordinator=None,max_workers=2,runner=subprocess.run):
         self.db=db;self.state=state;self.coordinator=coordinator;self.runner=runner;self.queue=queue.Queue();self.stop_event=threading.Event();self.locks={};self.threads=[]
+        # Guards validate()'s "one pending action per device" check and the
+        # following INSERT as one atomic step; without it two concurrent
+        # enqueue() calls for the same device can both pass the check before
+        # either has inserted, queueing conflicting actions (e.g. reboot and
+        # shutdown) for the same device. Deliberately separate from the
+        # per-device locks below, which serialize execution, not enqueueing
+        # -- reusing those would make enqueue() block on a currently
+        # *running* action instead of rejecting the conflict immediately.
+        self.enqueue_lock=threading.Lock()
         self.registry={
           "device.refresh":ActionDefinition("device.refresh","Refresh now",timeout=10,conflict="refresh",handler=self._refresh),
           "device.reboot":ActionDefinition("device.reboot","Reboot device","device.power","strong",10,handler=self._power),
@@ -105,8 +114,9 @@ class ActionDispatcher:
         if running and definition.conflict!="refresh":raise ActionError("a conflicting device action is already pending")
         return definition,device
     def enqueue(self,action,device_id,target,actor,role,source_ip=None,parameters=None):
-        definition,_=self.validate(action,device_id,target);job_id=str(uuid.uuid4());stamp=utcnow();params=json.dumps(redact(parameters or {}),sort_keys=True)
-        self.db.execute("INSERT INTO action_jobs(job_id,device_id,action,target,parameters_json,requested_by,requested_role,source_ip,requested_at,status) VALUES(?,?,?,?,?,?,?,?,?,?)",(job_id,device_id,action,target,params,actor,role,source_ip,stamp,"queued"))
+        with self.enqueue_lock:
+            definition,_=self.validate(action,device_id,target);job_id=str(uuid.uuid4());stamp=utcnow();params=json.dumps(redact(parameters or {}),sort_keys=True)
+            self.db.execute("INSERT INTO action_jobs(job_id,device_id,action,target,parameters_json,requested_by,requested_role,source_ip,requested_at,status) VALUES(?,?,?,?,?,?,?,?,?,?)",(job_id,device_id,action,target,params,actor,role,source_ip,stamp,"queued"))
         self.audit(actor,role,source_ip,device_id,action,target,parameters,"allowed","queued")
         self.queue.put(job_id);return self.get(job_id)
     def audit(self,user,role,ip,device,action,target,params,auth,result=None,exit_code=None,duration=None,error=None):
