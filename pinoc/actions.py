@@ -40,7 +40,12 @@ def valid_log_path(path: Any, important_paths: Iterable[Any] = ()) -> bool:
         prefix = str(declared).rstrip("/")
         if prefix.startswith("/") and path.startswith(prefix + "/"):
             remainder = path[len(prefix) + 1:]
-            if remainder and ".." not in remainder and PATH_REMAINDER_RE.fullmatch(remainder):
+            # important_paths is shared with the read-only-mount health
+            # check, so a broadly declared entry (e.g. "/etc") must not by
+            # itself let logs.truncate zero out an arbitrary non-log file;
+            # the target must still look like a genuine log file.
+            if (remainder and ".." not in remainder and PATH_REMAINDER_RE.fullmatch(remainder)
+                    and LOG_NAME_RE.search(path)):
                 return True
     return False
 

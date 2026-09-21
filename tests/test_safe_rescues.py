@@ -163,6 +163,16 @@ class ValidationTest(unittest.TestCase):
         self.assertFalse(valid_log_path("x" * 300))
         self.assertFalse(valid_log_path(None))
 
+    def test_important_paths_cannot_target_a_non_log_file(self):
+        # important_paths is shared with the read-only-mount health check,
+        # so a broadly declared entry must not let logs.truncate zero out
+        # an arbitrary file just because it sits under that prefix.
+        self.assertFalse(valid_log_path("/etc/passwd", ["/etc"]))
+        self.assertFalse(valid_log_path("/srv/jonah/config.json", ["/srv/jonah"]))
+        self.assertFalse(valid_log_path("/srv/jonah/nested/id_rsa", ["/srv/jonah"]))
+        self.assertTrue(valid_log_path("/srv/jonah/nested/app.log", ["/srv/jonah"]))
+        self.assertTrue(valid_log_path("/srv/jonah/syslog", ["/srv/jonah"]))
+
 
 class ExecutorTest(unittest.TestCase):
     def setUp(self):
