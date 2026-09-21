@@ -159,7 +159,12 @@ def validate_config(value,base_dir=Path(".")):
     return value
 
 def atomic_save(path,value,backups=3):
-    path=Path(path);validate_config(value,path.parent.parent);path.parent.mkdir(parents=True,exist_ok=True)
+    # base_dir must be the directory *containing* config.json (where
+    # config/devices.json also lives), matching validate_config.py's own
+    # `root = Path.cwd()` -- not its parent, which would look one level too
+    # high and silently fall back to load_devices()'s empty in-config
+    # "devices" default instead of validating the real devices file.
+    path=Path(path);validate_config(value,path.parent);path.parent.mkdir(parents=True,exist_ok=True)
     for n in range(max(1,backups),1,-1):
         older=path.with_name(path.name+f".bak.{n-1}");newer=path.with_name(path.name+f".bak.{n}")
         if older.exists():os.replace(older,newer)
