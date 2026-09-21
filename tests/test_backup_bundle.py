@@ -82,7 +82,17 @@ class BuildVerifyTest(unittest.TestCase):
         for name, data in members.items():
             self.assertNotIn("topsecretvalue", data.decode("utf-8", "replace"))
             self.assertNotIn("another-value", data.decode("utf-8", "replace"))
-        # The database backup must be a valid copy containing the row.
+
+    def test_build_bundle_never_uses_the_insecure_mktemp(self):
+        # tempfile.mktemp() only returns a name; it never creates the file,
+        # leaving a window for another local process to create or symlink
+        # it first. The online-backup scratch file must use mkstemp()
+        # instead, which creates it atomically.
+        with mock.patch("tempfile.mktemp", side_effect=AssertionError(
+                "tempfile.mktemp() must not be used for the backup scratch file")):
+            metadata = self._bundle()
+        _, members = backup_module.read_bundle(Path(metadata["path"]))
+        # The database backup must still be a valid copy containing the row.
         restored = f"{self._tmp.name}/probe.sqlite"
         Path(restored).write_bytes(members["pinoc.db"])
         probe = Database(restored)

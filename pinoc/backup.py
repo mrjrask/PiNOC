@@ -141,7 +141,13 @@ def build_bundle(instance_dir: Path, destination: Path, db: Database,
     # Online backup API: the database never needs stopping.
     if not db.available and not db.initialize():
         raise BackupError(f"database unavailable: {db.error}")
-    database_path = Path(tempfile.mktemp(suffix=".db", prefix="pinoc-bundle-"))
+    # tempfile.mktemp() only generates a name -- it never creates the file,
+    # leaving a window where another local process could create or symlink
+    # that path first. mkstemp() creates the file atomically (O_EXCL) under
+    # a securely random name.
+    fd, database_name = tempfile.mkstemp(suffix=".db", prefix="pinoc-bundle-")
+    os.close(fd)
+    database_path = Path(database_name)
     try:
         db.backup(database_path)
         members["pinoc.db"] = _sized(database_path.read_bytes(), "pinoc.db", MAX_DATABASE_BYTES)
