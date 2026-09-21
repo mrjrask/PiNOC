@@ -457,7 +457,7 @@ class ScheduleService:
                 paused = 1 if (is_once or failures >= MAX_CONSECUTIVE_FAILURES) else 0
                 error = str(redact(job.get("error") or status))[:500]
             if paused and status != "succeeded":
-                self._emit_failure(row, error)
+                self._emit_failure(row, error, once=is_once)
             self.db.execute(
                 "UPDATE action_schedules SET last_status=?,last_error=?,consecutive_failures=?,"
                 "paused=?,next_run=?,updated_at=? WHERE schedule_id=?",
@@ -539,9 +539,14 @@ class ScheduleService:
             return None
         return target.isoformat() if target is not None else None
 
-    def _emit_failure(self, row: Dict[str, Any], error: Optional[str]) -> None:
+    def _emit_failure(self, row: Dict[str, Any], error: Optional[str], once: bool = False) -> None:
         device_id = row["device_id"]
-        message = (f"Scheduled {row['action']} on {device_id} paused after repeated failures"
+        # A one-shot schedule pauses after its single dispatched attempt
+        # fails to execute (there is no "next scheduled slot" to retry at),
+        # not after repeated failures -- say so accurately rather than
+        # always claiming a 3-strikes pause that did not happen.
+        reason = "paused after its one-shot attempt failed" if once else "paused after repeated failures"
+        message = (f"Scheduled {row['action']} on {device_id} {reason}"
                    + (f": {error}" if error else ""))[:500]
         metadata = {"schedule_id": row["schedule_id"], "action": row["action"],
                     "spec": row["spec"]}
