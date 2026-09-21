@@ -147,6 +147,23 @@ class SparklineForecastTest(unittest.TestCase):
         timestamps = [x["timestamp"] for x in sparkline]
         self.assertEqual(timestamps, sorted(timestamps))
 
+    def test_storage_forecast_fetches_all_top_mounts_in_one_query(self):
+        # The storage-forecast fan-out previously issued one query per
+        # top-used mount (up to 12) instead of a single batched query.
+        queries = []
+        real_rows = self.db.rows
+        def counting_rows(sql, params=()):
+            if "storage_metrics" in sql and "ROW_NUMBER" not in sql:
+                queries.append(sql)
+            return real_rows(sql, params)
+        self.db.rows = counting_rows
+        try:
+            result = fleet_aggregates(live_devices(), self.history)
+        finally:
+            self.db.rows = real_rows
+        self.assertEqual(result["storage_forecast"]["status"], "growing")
+        self.assertEqual(len(queries), 1)
+
     def test_storage_forecast_uses_shortest_growing_mount(self):
         result = fleet_aggregates(live_devices(), self.history)
         forecast = result["storage_forecast"]

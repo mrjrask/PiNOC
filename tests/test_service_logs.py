@@ -343,6 +343,24 @@ class LogsApiTest(unittest.TestCase):
         self.assertEqual(latest["last_timestamp"], "2026-01-01T01:00:00+00:00")
         self.assertEqual(latest["line_count"], 2)
 
+    def test_unit_summary_fetches_every_units_latest_sample_in_one_query(self):
+        # The unit-listing branch previously issued one extra query per
+        # service unit (N+1) just to compute a line count. This runs on
+        # every device-page load and every Refresh click.
+        queries = []
+        real_rows = self.db.rows
+        def counting_rows(sql, params=()):
+            if "service_logs" in sql:
+                queries.append(sql)
+            return real_rows(sql, params)
+        self.db.rows = counting_rows
+        try:
+            payload = self.client.get("/api/devices/pi/logs").get_json()
+        finally:
+            self.db.rows = real_rows
+        self.assertEqual([x["unit"] for x in payload["units"]], ["cockpit", "ssh"])
+        self.assertEqual(len(queries), 1)
+
     def test_unit_samples_are_redacted_on_read(self):
         payload = self.client.get("/api/devices/pi/logs?unit=ssh").get_json()
         self.assertEqual(payload["unit"], "ssh")
