@@ -4,7 +4,7 @@ Agents poll outbound.  They authenticate each request with a per-agent HMAC
 credential; development clients never receive that credential.
 """
 from __future__ import annotations
-import base64, hashlib, hmac, json, mimetypes, os, secrets, time, uuid
+import base64, hashlib, hmac, json, mimetypes, os, posixpath, secrets, time, uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
@@ -175,18 +175,34 @@ class DevelopmentGateway:
         if exe=="git":
             # Global options may precede the operation (for example,
             # ``git -C . reset``), so argv[1] is not always the subcommand.
-            value_options={"-C","--exec-path","--git-dir","--namespace","--super-prefix","--work-tree"}
+            # -C/--git-dir/--work-tree redirect git to operate on a
+            # different directory entirely, so their value must stay inside
+            # the approved workspace root -- otherwise an allowlisted "git"
+            # command becomes a way to read any directory the agent's OS
+            # user can access.  --exec-path/--namespace/--super-prefix have
+            # no legitimate use here and are rejected outright rather than
+            # path-validated.
+            confined_options={"-C","--git-dir","--work-tree"}
+            value_options=confined_options|{"--exec-path","--namespace","--super-prefix"}
+            root=posixpath.normpath(str(ws["path"]))
             index=1
             while index<len(argv) and argv[index].startswith("-"):
-                option=argv[index].split("=",1)[0]
+                token=argv[index];option=token.split("=",1)[0]
                 # Git configuration can define executable aliases.  It must
                 # never be accepted from an otherwise allowlisted command.
                 if option=="--config-env" or option=="-c" or (option.startswith("-c") and option!="-C"):
                     raise DevError("Git configuration options are forbidden","authorization_denied",403)
+                if option in value_options and option not in confined_options:
+                    raise DevError("Git global option is not permitted","authorization_denied",403)
+                value=token.split("=",1)[1] if "=" in token else None
                 index+=1
-                if option in value_options and "=" not in argv[index-1]:
+                if option in value_options and value is None:
                     if index>=len(argv):raise DevError("Git global option requires a value","authorization_denied",403)
-                    index+=1
+                    value=argv[index];index+=1
+                if option in confined_options:
+                    target=posixpath.normpath(value if posixpath.isabs(value) else posixpath.join(root,value))
+                    if target!=root and not target.startswith(root+"/"):
+                        raise DevError("Git global option escapes the workspace","authorization_denied",403)
             if index<len(argv) and argv[index] in FORBIDDEN_GIT:raise DevError("destructive Git operation is forbidden","authorization_denied",403)
         if any(x in {"--exec","-exec"} for x in argv):raise DevError("command option is forbidden","authorization_denied",403)
     def matrix(self,identity,body,ip=None):
