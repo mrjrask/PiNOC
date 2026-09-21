@@ -212,4 +212,39 @@ class ConcurrencyTest(unittest.TestCase):
         self.assertEqual(by_id["good"].error,"")
 
 
+class PerDevicePasswordTest(unittest.TestCase):
+    """A device's own password overrides the fleet-wide one -- compromising
+    one device's SSH credential must not expose every other password-auth
+    device's credential too."""
+
+    OUTPUT = ("__UPTIME__\n1 1\n__LOAD__\n0 0 0\n__CPU__\ncpu 1 0 1 8\n"
+             "__MEM__\nMemTotal: 10 kB\nMemAvailable: 5 kB\n")
+
+    def test_per_device_password_overrides_the_fleet_wide_password(self):
+        devices=[parse_device({"id":x,"hostname":x},i) for i,x in enumerate(("own","shared","keyed"))]
+        seen_env={}
+        def runner(cmd,**kwargs):
+            host=" ".join(cmd)
+            device_id=next(d.id for d in devices if d.address in host)
+            seen_env[device_id]=kwargs.get("env",{}).get("SSHPASS")
+            return subprocess.CompletedProcess(cmd,0,self.OUTPUT,"")
+        collector=FleetCollector(devices,runner=runner,password="fleet-wide",
+                                 passwords={"own":"own-secret"})
+        collector.collect()
+        self.assertEqual(seen_env["own"],"own-secret")
+        self.assertEqual(seen_env["shared"],"fleet-wide")
+        self.assertEqual(seen_env["keyed"],"fleet-wide")
+
+    def test_no_password_at_all_uses_key_based_batch_mode(self):
+        device=parse_device({"id":"pi","hostname":"pi"},0)
+        collector=FleetCollector([device])
+        self.assertNotIn("sshpass",collector._command(device))
+        self.assertIn("BatchMode=yes"," ".join(collector._command(device)))
+
+    def test_per_device_password_alone_still_triggers_sshpass_for_that_device(self):
+        device=parse_device({"id":"pi","hostname":"pi"},0)
+        collector=FleetCollector([device],passwords={"pi":"only-this-device"})
+        self.assertEqual(collector._command(device)[0],"sshpass")
+
+
 if __name__ == "__main__": unittest.main()

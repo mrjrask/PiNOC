@@ -140,6 +140,15 @@ Protect `.env` with mode `0600`. Do not put passwords in device JSON. The
 installer uses `CM5_SSH_PASS` only as a compatibility/provisioning fallback;
 normal SSH collection uses keys and `BatchMode=yes`.
 
+A device that needs password auth of its own, instead of sharing
+`CM5_SSH_PASS` with the rest of the fleet, can get its own credential: set
+`SSH_PASS_<DEVICE_ID>` in `.env` (the device's `id`, uppercased, with any
+run of non-alphanumeric characters collapsed to a single underscore --
+e.g. `cm5-file-server` becomes `SSH_PASS_CM5_FILE_SERVER`). A device with
+its own entry uses only that password; every other device keeps falling
+back to `CM5_SSH_PASS` if set. This keeps one compromised device's SSH
+credential from exposing every other password-auth device's too.
+
 ### Main configuration groups
 
 | Setting | Default | Purpose |

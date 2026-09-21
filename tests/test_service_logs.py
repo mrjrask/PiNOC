@@ -264,6 +264,23 @@ class CommandCadenceTest(unittest.TestCase):
         self.assertEqual(collector.log_tail_lines, 75)
         self.assertEqual(collector.password, "password")
 
+    def test_coordinator_builds_per_device_passwords_from_env(self):
+        from pinoc.device_config import parse_device
+        devices = [parse_device({"id": "has-own", "hostname": "has-own"}, 0),
+                  parse_device({"id": "shares-fleet", "hostname": "shares-fleet"}, 1)]
+
+        def fake_read_env_value(key):
+            values = {"CM5_SSH_PASS": "fleet-wide",
+                     pi_noc.device_ssh_password_env_key("has-own"): "device-secret"}
+            return values.get(key, "")
+
+        with patch.object(pi_noc, "load_devices", return_value=(devices, [])), \
+                patch.object(pi_noc, "read_env_value", side_effect=fake_read_env_value):
+            collector = pi_noc.SharedSnapshotCoordinator(PiNOCState()).fleet_collector
+
+        self.assertEqual(collector.password, "fleet-wide")
+        self.assertEqual(collector.passwords, {"has-own": "device-secret"})
+
 
 class HistoryLogStorageTest(unittest.TestCase):
     def test_ring_pruning_keeps_latest_per_unit(self):
