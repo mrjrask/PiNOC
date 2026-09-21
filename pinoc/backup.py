@@ -38,7 +38,6 @@ bundles beyond ``keep``.
 """
 from __future__ import annotations
 
-import getpass
 import hashlib
 import hmac
 import io
@@ -300,7 +299,7 @@ def restore_bundle(path: Path, instance_dir: Path, database_path: Path,
     if confirm is None:
         if not sys.stdin.isatty():
             raise BackupError("explicit confirmation required (pass --yes)")
-        confirm = getpass.input(
+        confirm = input(
             f"Type RESTORE to replace the configuration and database in {instance_dir}: ")
     if confirm != "RESTORE":
         raise BackupError("confirmation required")

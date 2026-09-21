@@ -167,6 +167,19 @@ class RestoreTest(unittest.TestCase):
         self.assertEqual((self.target / "config.json").read_text(),
                          json.dumps(CONFIG))
 
+    def test_interactive_confirmation_prompt(self):
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+             mock.patch("builtins.input", return_value="RESTORE") as mocked_input:
+            result = restore_bundle(self.bundle_path, self.target, self.target / "pinoc.db")
+        mocked_input.assert_called_once()
+        self.assertIn("restart", result["note"])
+
+    def test_interactive_confirmation_rejected(self):
+        with mock.patch("sys.stdin.isatty", return_value=True), \
+             mock.patch("builtins.input", return_value="nope"):
+            with self.assertRaises(BackupError):
+                restore_bundle(self.bundle_path, self.target, self.target / "pinoc.db")
+
     def test_missing_required_secret(self):
         (self.target / ".env").write_text("PINOC_WEB_PORT=9999\n")
         with self.assertRaises(BackupError) as ctx:
