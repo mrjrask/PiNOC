@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unprivileged outbound PiNOC agent with a deliberately small protocol."""
 from __future__ import annotations
-import argparse, base64, fnmatch, json, os, platform, resource, shutil, signal, subprocess, sys, threading, time, urllib.error, urllib.request
+import argparse, base64, fnmatch, json, os, platform, pwd, resource, shutil, signal, subprocess, sys, threading, time, urllib.error, urllib.request
 from pathlib import Path
 from pinoc.development import AGENT_VERSION,PROTOCOL_VERSION,DevelopmentGateway,SENSITIVE
 
@@ -63,6 +63,19 @@ class Executor:
     def execute(self,job):
         started=time.monotonic();jid=job["job_id"];kind=job["job_type"];ws=job.get("workspace") or {};limit=int(job["output_limit_bytes"])
         try:
+            # This agent is deliberately unprivileged (no root agent, no
+            # setuid helper): it cannot actually switch to a different OS
+            # user for one workspace's jobs. A configured execution_user
+            # that does not match the account this process already runs as
+            # must therefore fail the job loudly rather than silently
+            # execute it under the agent's own identity -- a workspace
+            # relying on this field for isolation must never get none.
+            required_user=ws.get("execution_user")
+            if required_user:
+                try:current_user=pwd.getpwuid(os.getuid()).pw_name
+                except (KeyError,OSError):current_user=None
+                if current_user!=required_user:
+                    raise ValueError(f"workspace requires execution_user {required_user!r} but this agent runs as {current_user!r}; per-workspace user switching is not supported")
             root=Path(ws.get("path","/")).resolve(strict=True)
             if kind=="file_read":
                 target=self.safe_path(root,job["request"].get("relative_path"),ws.get("sensitive_patterns",SENSITIVE));read_limit=int(job["file_limit_bytes"])
