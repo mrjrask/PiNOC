@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -61,6 +61,11 @@ CREATE INDEX action_schedules_run ON action_schedules(enabled,paused,next_run);"
 CREATE TABLE anomaly_previews(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,device_id TEXT NOT NULL,metric TEXT NOT NULL,value REAL,baseline_mean REAL,baseline_std REAL,z_score REAL,hour INTEGER NOT NULL DEFAULT -1);
 CREATE INDEX anomaly_previews_time ON anomaly_previews(timestamp);
 CREATE INDEX anomaly_previews_lookup ON anomaly_previews(device_id,metric);""",
+"""ALTER TABLE alerts ADD COLUMN cluster_id INTEGER;
+CREATE INDEX alerts_cluster ON alerts(cluster_id);
+CREATE TABLE alert_clusters(cluster_id INTEGER PRIMARY KEY,trigger_class TEXT NOT NULL,context_key TEXT NOT NULL,context_value TEXT NOT NULL,context_json TEXT NOT NULL DEFAULT '{}',severity TEXT NOT NULL,opened_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,resolved_at TEXT,notified_open INTEGER NOT NULL DEFAULT 0,notified_resolved INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX alert_clusters_open ON alert_clusters(resolved_at);
+CREATE INDEX alert_clusters_lookup ON alert_clusters(trigger_class,context_key,context_value,resolved_at);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

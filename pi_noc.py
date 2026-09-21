@@ -1412,7 +1412,7 @@ def main() -> None:
     )
     notifications = NotificationService(CONFIG.get("notifications", {}), state=state)
     history = HistoryManager(Database(database_path), history_config, state, notifier=notifications,
-                              anomalies=CONFIG.get("anomaly_detection"))
+                              anomalies=CONFIG.get("anomaly_detection"), correlation=CONFIG.get("alert_correlation"))
     state.add_publish_hook(history.submit)
     history.start()
     notifications.start()

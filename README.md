@@ -394,6 +394,47 @@ redacts secret-valued keys and restores them on save. Configuration changes
 apply after a restart. While a device is in maintenance, alert transitions
 are neither opened, resolved, nor notified.
 
+### Alert correlation & common-cause grouping
+
+A single shared cause — a Wi-Fi access point dropping, a switch reboot, a
+power blip — can open near-identical alerts on many devices at once. The
+history writer clusters open alerts that share a trigger class (e.g.
+"connectivity", "temperature", "power") and the same Wi-Fi SSID,
+gateway/WAN interface, or `/24` IP subnet, within a rolling time window.
+
+This is a grouping layer only: it is conservative by design and never
+merges, suppresses, or changes the lifecycle of an individual alert — every
+alert keeps its own row, and its own acknowledge/mute/resolve state. A
+cluster is a label (`alerts.cluster_id`) attached to alerts that appear to
+share a cause, exposed at `GET /api/alert-clusters` (`?state=all` includes
+resolved clusters) and shown on `/alerts` as a collapsible card listing the
+member devices and the specific shared context that grouped them (e.g.
+`Wi-Fi SSID "HomeWiFi"` or `gateway 192.168.1.1`). Notifications (see above)
+fire once per cluster transition instead of once per member: the first
+alert in a burst still notifies individually (nothing to correlate with
+yet), and subsequent members that join the cluster within the window are
+folded into that one notification instead of paging separately.
+
+Enabled by default with conservative settings; override via the optional
+`alert_correlation` section:
+
+```json
+{
+  "alert_correlation": {
+    "enabled": true,
+    "window_seconds": 300,
+    "min_members": 2
+  }
+}
+```
+
+- `window_seconds` (30–3600, default 300) — how close in time alerts must
+  be to correlate, and how long a cluster keeps accepting new members after
+  its last update.
+- `min_members` (2–100, default 2) — minimum distinct devices required
+  before alerts are presented as a cluster; below that they remain
+  ordinary, individually notified alerts.
+
 ## Integrations
 
 Roles activate sensible integration defaults:
@@ -571,6 +612,7 @@ GET /api/devices/<id>/logs[?unit=&samples=20]
 GET /api/devices/<id>/integrations/probe
 GET /api/devices/<id>/storage/forecast
 GET /api/alerts[?state=active]
+GET /api/alert-clusters[?state=all]
 GET /api/events
 GET /api/export/<kind>?device=&range=24h&format=csv&limit=10000
 GET /api/database/status
