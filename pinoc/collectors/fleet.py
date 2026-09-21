@@ -55,7 +55,15 @@ if [ "$kernel_log_status" -eq 0 ]; then printf '%s\n' "$kernel_log" | grep -iE "
 echo __IOERRORSTATUS__; if [ "$kernel_log_status" -eq 0 ]; then echo available; else echo unavailable; fi
 echo __ROUTE__; ip -j route show default 2>/dev/null; echo __ADDR__; ip -j address show 2>/dev/null
 echo __NET__; cat /proc/net/dev
-echo __IW__; command -v iw >/dev/null && iw dev 2>/dev/null; command -v iw >/dev/null && iw dev $(iw dev 2>/dev/null | awk '$1=="Interface"{print $2;exit}') link 2>/dev/null
+echo __IW__
+if command -v iw >/dev/null; then
+    iw dev 2>/dev/null
+    ifc=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2;exit}')
+    # "link" carries SSID/signal; channel/width only appear in "info"'s
+    # "channel N (freq MHz), width: W MHz, ..." line -- link never prints it.
+    [ -n "$ifc" ] && iw dev "$ifc" link 2>/dev/null
+    [ -n "$ifc" ] && iw dev "$ifc" info 2>/dev/null
+fi
 if [ "$1" = "__discover__" ]; then shift; discovered=$(systemctl list-unit-files --no-legend --no-pager 2>/dev/null | awk '{print $1}' | grep -E '^(cockpit|ssh|desk-display|piaware|dump1090|readsb|magicmirror|ics_modifier|pi-hotspot|temp-monitor|smb|smbd|nmbd|wg-quick)' | head -30); fi
 echo __SERVICES__; systemctl show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ActiveEnterTimestampMonotonic,NRestarts,MemoryCurrent "$@" $discovered 2>/dev/null
 echo __UNITS__; systemctl list-unit-files --no-legend --no-pager 2>/dev/null
