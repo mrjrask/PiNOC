@@ -341,6 +341,31 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(event["severity"], "critical")
         self.assertEqual(len(self.notifier.queued), 1)
 
+    def test_once_schedule_dispatch_failure_retries_then_pauses(self):
+        # A one-shot schedule must get the same retry-then-pause treatment
+        # as a recurring one on dispatch failure (e.g. a briefly offline
+        # device), not an immediate pause+abandon after a single failure.
+        past = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        sid = _insert_schedule(self.db, spec="once:2027-01-01T00:00", next_run=past)
+        self.fake.fail = MAX_CONSECUTIVE_FAILURES  # every dispatch attempt fails
+        for _ in range(MAX_CONSECUTIVE_FAILURES - 1):
+            self.db.execute("UPDATE action_schedules SET next_run=? WHERE schedule_id=?",
+                            (past, sid))
+            self.svc._fire_due()
+            row = self._row(sid)
+            self.assertEqual(row["last_status"], "dispatch_failed")
+            self.assertLess(row["consecutive_failures"], MAX_CONSECUTIVE_FAILURES)
+            self.assertFalse(row["paused"])
+            self.assertIsNotNone(row["next_run"])  # retried, not abandoned immediately
+
+        self.db.execute("UPDATE action_schedules SET next_run=? WHERE schedule_id=?",
+                        (past, sid))
+        self.svc._fire_due()
+        row = self._row(sid)
+        self.assertEqual(row["consecutive_failures"], MAX_CONSECUTIVE_FAILURES)
+        self.assertTrue(row["paused"])
+        self.assertIsNone(row["next_run"])
+
     # -- reconcile ---------------------------------------------------------
     def test_reconcile_success_resets_failures(self):
         sid = _insert_schedule(self.db, consecutive_failures=2)

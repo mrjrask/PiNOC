@@ -493,8 +493,12 @@ class ScheduleService:
 
         if job is None:
             failures += 1
-            paused = 1 if (is_once or failures >= MAX_CONSECUTIVE_FAILURES) else 0
-            if is_once or paused:
+            # A dispatch failure (offline device, no-longer-approved target,
+            # ...) always retries after RETRY_MINUTES, one-shot schedules
+            # included -- only MAX_CONSECUTIVE_FAILURES consecutive dispatch
+            # failures actually pause the schedule.
+            paused = 1 if failures >= MAX_CONSECUTIVE_FAILURES else 0
+            if paused:
                 next_run = None
             else:
                 next_run = (now + timedelta(minutes=RETRY_MINUTES)).isoformat()
