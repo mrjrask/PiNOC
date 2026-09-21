@@ -27,6 +27,30 @@ def workspace(gw,path,mode="development"):
 
 def identity(**kw):return {"username":"codex","role":"administrator","token":True,"token_id":"t","scopes":["dev:read","dev:test","dev:command","dev:artifacts","dev:cancel"],"devices":[],"workspaces":[],"job_types":[],**kw}
 
+def test_reenrolling_a_device_replaces_its_agent_row(tmp_path):
+    # device_id is UNIQUE; issuing a fresh enrollment code for a device
+    # that already has an agent (reimaged, credential lost, ...) is a
+    # legitimate admin-authorized flow -- it must replace the row, not
+    # raise sqlite3.IntegrityError.
+    db,gw=setup(tmp_path)
+    first=enroll(gw)
+    second_code=gw.enrollment_code("pi","admin")
+    second=gw.enroll({"enrollment_code":second_code,"hostname":"mock","model":"Pi",
+                      "architecture":"aarch64","agent_version":"1.0.0",
+                      "protocol_version":PROTOCOL_VERSION,"capabilities":{}})
+    assert second["agent_id"]!=first["agent_id"]
+    rows=db.rows("SELECT * FROM agents WHERE device_id='pi'")
+    assert len(rows)==1
+    assert rows[0]["agent_id"]==second["agent_id"]
+    assert (rows[0]["enabled"],rows[0]["credential_revoked"])==(1,0)
+    # The old credential no longer authenticates; the new one does.
+    body=b'{}';stamp=str(int(time.time()))
+    with pytest.raises(DevError):
+        gw.authenticate_agent(first["agent_id"],stamp,"n1",body,
+                              gw.sign(first["agent_id"],first["credential"],stamp,"n1",body))
+    assert gw.authenticate_agent(second["agent_id"],stamp,"n2",body,
+                                 gw.sign(second["agent_id"],second["credential"],stamp,"n2",body))["device_id"]=="pi"
+
 def test_schema_enrollment_replay_rotation_and_revocation(tmp_path):
  db,gw=setup(tmp_path);assert SCHEMA_VERSION==11;a=enroll(gw);body=b'{}';stamp=str(int(time.time()));nonce="unique";sig=gw.sign(a["agent_id"],a["credential"],stamp,nonce,body)
  assert gw.authenticate_agent(a["agent_id"],stamp,nonce,body,sig)["device_id"]=="pi"
