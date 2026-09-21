@@ -345,7 +345,19 @@ class FleetCollector:
                  password: str = "", runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
                  log_tail_seconds: float = 300.0, log_tail_lines: int = 50) -> None:
         self.devices=devices; self.max_workers=max(1,min(int(max_workers),16)); self.timeout=float(timeout)
-        self.password=password; self.runner=runner; self.previous_cpu={}; self.previous_net={}; self.snapshots={}
+        self.password=password; self.runner=runner
+        # previous_cpu/previous_net/snapshots/_last_jlogs are shared across
+        # every collect_device() call, which collect() dispatches to a
+        # ThreadPoolExecutor -- one worker thread per device. Safe today
+        # only because each device.id is ever read/written by the single
+        # worker thread processing that device (no two threads ever touch
+        # the same key), and every access here is a single dict item
+        # get/assignment, which is atomic under CPython's GIL. This is an
+        # invariant of *how these dicts are used*, not of the dicts
+        # themselves: a future change that reads-then-writes a key across
+        # more than one step (e.g. an in-place update instead of a
+        # wholesale replace) would need its own explicit synchronization.
+        self.previous_cpu={}; self.previous_net={}; self.snapshots={}
         self.log_tail_seconds=max(30.0,float(log_tail_seconds)); self.log_tail_lines=min(200,max(1,int(log_tail_lines)))
         self._last_jlogs: Dict[str, float] = {}
 

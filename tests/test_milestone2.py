@@ -105,6 +105,44 @@ class HealthTest(unittest.TestCase):
 
 
 class ConcurrencyTest(unittest.TestCase):
+    def test_concurrent_collection_does_not_cross_contaminate_per_device_state(self):
+        # previous_cpu/previous_net/snapshots/_last_jlogs are shared across
+        # every collect_device() call, which collect() dispatches to a
+        # ThreadPoolExecutor. With more devices than workers, the same
+        # worker thread handles multiple different devices over time --
+        # this stress-tests that each device's own prior CPU counters
+        # (used to compute its utilization delta) are never read from or
+        # overwritten by a different device's collection.
+        n = 9
+        devices = [parse_device({"id": f"d{i}", "hostname": f"d{i}"}, i) for i in range(n)]
+
+        def output_for(i, cycle):
+            if cycle == 1:
+                idle, busy = 1000, i * 100
+            else:
+                idle, busy = 2000 - 100 * (i + 1), 200 * i + 100
+            return (f"__UPTIME__\n1 1\n__LOAD__\n0 0 0\n"
+                   f"__CPU__\ncpu {busy} 0 0 {idle} 0\n"
+                   f"__MEM__\nMemTotal: 10 kB\nMemAvailable: 5 kB\n")
+
+        state = {"cycle": 1}
+        def runner(cmd, **kwargs):
+            host = " ".join(cmd)
+            i = next(idx for idx, d in enumerate(devices) if d.address in host)
+            return subprocess.CompletedProcess(cmd, 0, output_for(i, state["cycle"]), "")
+
+        collector = FleetCollector(devices, max_workers=6, runner=runner)
+        collector.collect()
+        state["cycle"] = 2
+        result = collector.collect()
+        by_id = {d.id: d for d in result}
+        for i in range(n):
+            # Each device's expected utilization is uniquely derived from
+            # its own prior counters (10%, 20%, ..., 90%); a wrong/shared
+            # previous value from another device would compute a different
+            # number here.
+            self.assertAlmostEqual(by_id[f"d{i}"].cpu["utilization_percent"], 10.0 * (i + 1), places=1)
+
     def test_failed_first_collection_keeps_maintenance_device_offline(self):
         device = parse_device({"hostname": "pi", "maintenance": True}, 0)
         def runner(*_args, **_kwargs):
