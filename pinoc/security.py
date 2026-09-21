@@ -11,7 +11,11 @@ from pinoc.database import utcnow
 ROLES={"viewer":0,"operator":1,"administrator":2}
 PERMISSIONS={"view":"viewer","history.read":"viewer","alerts.read":"viewer","alerts.write":"operator","actions.execute":"operator","maintenance.write":"operator","device.power":"administrator","config.write":"administrator","users.write":"administrator"}
 DEV_SCOPES={"dev:read","dev:test","dev:command","dev:artifacts","dev:cancel","dev:write","dev:hardware"}
-SECRET_KEYS=re.compile(r"password|passwd|secret|token|private.?key|credential|authorization|cookie",re.I)
+# "authorization" excludes the literal "authorization_result" column (a
+# benign allowed/denied classification, not a secret) via a negative
+# lookahead -- a bare substring match would otherwise redact the single
+# most security-relevant field in every audit row.
+SECRET_KEYS=re.compile(r"password|passwd|secret|token|private.?key|credential|authorization(?!_result)|cookie",re.I)
 
 def redact(value:Any)->Any:
     if isinstance(value,dict): return {str(k):("[REDACTED]" if SECRET_KEYS.search(str(k)) else redact(v)) for k,v in value.items()}
