@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -57,6 +57,10 @@ CREATE INDEX service_logs_device_unit_id ON service_logs(device_id,unit,id);
 CREATE INDEX service_logs_time ON service_logs(timestamp);""",
 """CREATE TABLE action_schedules(schedule_id TEXT PRIMARY KEY,device_id TEXT NOT NULL,action TEXT NOT NULL,target TEXT,spec TEXT NOT NULL,timezone TEXT NOT NULL DEFAULT 'UTC',enabled INTEGER NOT NULL DEFAULT 1,paused INTEGER NOT NULL DEFAULT 0,requested_by TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,next_run TEXT,last_run TEXT,last_job_id TEXT,last_status TEXT,last_error TEXT,consecutive_failures INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX action_schedules_run ON action_schedules(enabled,paused,next_run);""",
+"""CREATE TABLE metric_baselines(device_id TEXT NOT NULL,metric TEXT NOT NULL,hour INTEGER NOT NULL DEFAULT -1,ewma_mean REAL,ewma_var REAL,samples INTEGER NOT NULL DEFAULT 0,updated_at TEXT,PRIMARY KEY(device_id,metric,hour));
+CREATE TABLE anomaly_previews(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,device_id TEXT NOT NULL,metric TEXT NOT NULL,value REAL,baseline_mean REAL,baseline_std REAL,z_score REAL,hour INTEGER NOT NULL DEFAULT -1);
+CREATE INDEX anomaly_previews_time ON anomaly_previews(timestamp);
+CREATE INDEX anomaly_previews_lookup ON anomaly_previews(device_id,metric);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

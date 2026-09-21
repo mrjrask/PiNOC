@@ -495,6 +495,56 @@ POST   /api/schedules/<id>/run          queue one run immediately without
 DELETE /api/schedules/<id>              delete (already-queued jobs are left intact)
 ```
 
+## Anomaly detection (statistical baselines)
+
+Static thresholds structurally miss the gradual or below-threshold class of
+problems: a slow memory leak that climbs to 84%, a crypto miner idling at 60%
+CPU, or a nightly traffic spike three times the norm. The optional
+`anomaly_detection` section runs a statistical analyzer in the history writer:
+it keeps an EWMA mean/variance baseline per device and metric (plus
+hour-of-day buckets for seasonality) and flags samples that deviate from it by
+a configurable z-score.
+
+```json
+"anomaly_detection": {
+  "enabled": false,          /* master switch; off by default */
+  "alerting": false,         /* false = preview-only, true = real anomaly alerts */
+  "z_open": 3.5,             /* open when |z| is at least this */
+  "z_hysteresis": 2.5,       /* keep open while |z| is at least this */
+  "min_samples": 50,         /* baseline must see this many samples first */
+  "ewma_alpha": 0.03,        /* learning rate (0..1) */
+  "outlier_limit": 8.0,      /* |z| beyond this does not update the baseline */
+  "hourly_seasonality": true,
+  "max_baseline_age_seconds": 86400,
+  "severity": "warning",
+  "preview_keep": 200,
+  "metrics": {
+    "memory_percent": {"enabled": true, "z_open": 3.5, "z_hysteresis": 2.5},
+    "rx_rate_bps": {"enabled": false}
+  }
+}
+```
+
+Tracked metrics are CPU utilization, 1-minute load, CPU temperature, memory
+utilization, and network receive/transmit rates; each can be switched off or
+given its own z-scores in `metrics`. Detected deviations reuse the durable
+alert engine verbatim: a distinct `anomaly` alert type fingerprinted per
+device and metric, with hysteresis (a value that drifts back under
+`z_hysteresis` resolves the alert), the normal acknowledge/mute/resolve
+lifecycle, events, and notifications. Anomalies respect maintenance windows.
+
+Outlier rejection protects the always-live global baseline: a sample whose
+|z| against it reaches `outlier_limit` updates recency but not the global
+mean or variance, so a single spike cannot distort the primary reference.
+Hour-of-day buckets absorb every sample — their variance self-normalizes, so
+a genuinely different hour-of-day regime bootstraps and self-heals. Baselines
+not refreshed within `max_baseline_age_seconds` (a long device gap) re-learn
+before judging again. Start with `"enabled": true, "alerting": false`
+(preview): deviations are recorded in a bounded ring shown on the Settings
+page's Anomaly detection panel (`GET /api/anomalies`) with each baseline's
+sample maturity. Once the noise level looks acceptable, set `"alerting": true`
+(restart required) to open real alerts.
+
 ## Web console and APIs
 
 Primary pages are `/`, `/devices/<id>`, `/integrations`, `/adsb`, `/displays`,

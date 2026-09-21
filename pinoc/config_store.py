@@ -91,6 +91,44 @@ def validate_backups(value):
         if isinstance(port,bool) or not isinstance(port,int) or not 1<=port<=65535:
             raise ValueError("backups.destination.port must be between 1 and 65535")
 
+def validate_anomaly_detection(value):
+    section=value.get("anomaly_detection")
+    if section is None:return
+    if not isinstance(section,dict):raise ValueError("anomaly_detection must be an object")
+    from pinoc.anomalies import METRICS
+    for name in ("enabled","alerting","hourly_seasonality"):
+        if name in section and not isinstance(section.get(name),bool):raise ValueError(f"anomaly_detection.{name} must be a boolean")
+    for name,low,high in (("z_open",1,100),("z_hysteresis",0,100),("outlier_limit",1,100)):
+        setting=section.get(name)
+        if setting is not None and (isinstance(setting,bool) or not isinstance(setting,(int,float)) or not low<=setting<=high):
+            raise ValueError(f"anomaly_detection.{name} must be a number between {low} and {high}")
+    alpha=section.get("ewma_alpha")
+    if alpha is not None and (isinstance(alpha,bool) or not isinstance(alpha,(int,float)) or not 0<alpha<1):
+        raise ValueError("anomaly_detection.ewma_alpha must be a number between 0 and 1 (exclusive)")
+    minimum=section.get("min_samples")
+    if minimum is not None and (isinstance(minimum,bool) or not isinstance(minimum,int) or not 10<=minimum<=100000):
+        raise ValueError("anomaly_detection.min_samples must be an integer between 10 and 100000")
+    keep=section.get("preview_keep")
+    if keep is not None and (isinstance(keep,bool) or not isinstance(keep,int) or not 1<=keep<=10000):
+        raise ValueError("anomaly_detection.preview_keep must be an integer between 1 and 10000")
+    age=section.get("max_baseline_age_seconds")
+    if age is not None and (isinstance(age,bool) or not isinstance(age,(int,float)) or not 3600<=age<=86400*30):
+        raise ValueError("anomaly_detection.max_baseline_age_seconds must be between 3600 and 2592000")
+    severity=section.get("severity")
+    if severity is not None and severity not in ("info","warning","degraded","critical"):
+        raise ValueError("anomaly_detection.severity must be info, warning, degraded, or critical")
+    metrics=section.get("metrics")
+    if metrics is None:return
+    if not isinstance(metrics,dict):raise ValueError("anomaly_detection.metrics must be an object")
+    for name,entry in metrics.items():
+        if name not in METRICS:raise ValueError(f"unknown anomaly_detection.metrics entry: {name}")
+        if not isinstance(entry,dict):raise ValueError(f"anomaly_detection.metrics.{name} must be an object")
+        if "enabled" in entry and not isinstance(entry.get("enabled"),bool):raise ValueError(f"anomaly_detection.metrics.{name}.enabled must be a boolean")
+        for zname in ("z_open","z_hysteresis"):
+            setting=entry.get(zname)
+            if setting is not None and (isinstance(setting,bool) or not isinstance(setting,(int,float)) or not 0<=setting<=100):
+                raise ValueError(f"anomaly_detection.metrics.{name}.{zname} must be a number between 0 and 100")
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
@@ -102,6 +140,7 @@ def validate_config(value,base_dir=Path(".")):
     validate_backups(value)
     validate_playbooks(value.get("playbooks"))
     validate_notifications(value)
+    validate_anomaly_detection(value)
     _,errors=load_devices(value,Path(base_dir))
     if errors:raise ValueError("; ".join(errors))
     return value

@@ -239,4 +239,23 @@ async function schedules(){
   };
   await renderList();
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
+async function anomalies(){
+  const statusRoot=document.querySelector('#anomalies-status');
+  const previewsRoot=document.querySelector('#anomalies-previews');
+  if(!statusRoot&&!previewsRoot)return;
+  let data={};
+  try{data=await(await fetch('/api/anomalies?limit=100')).json()}catch(error){}
+  const s=data.status||{};
+  if(statusRoot){
+    if(!s.enabled){statusRoot.innerHTML='Anomaly detection is <strong>off</strong>. Add the <code>anomaly_detection</code> section to config.json (restart required); preview mode records deviations here without opening alerts.';
+      if(previewsRoot)previewsRoot.innerHTML='';return}
+    const enabled=(Object.values(s.metrics||{}).filter(m=>m.enabled).map(m=>m.label));
+    statusRoot.innerHTML=`Mode: <strong>${esc(s.mode)}</strong> · opens at ≥&thinsp;${s.z_open}σ, holds open ≥&thinsp;${s.z_hysteresis}σ · needs ${s.min_samples} baseline samples · tracking: ${enabled.length?enabled.map(esc).join(', '):'no metrics enabled'}`;
+  }
+  if(previewsRoot){
+    const rows=(data.previews||[]).map(p=>`<tr><td>${localTime(p.timestamp)}</td><td>${esc(p.device_id)}</td><td>${esc(p.metric)}</td><td>${Number(p.value).toFixed(2)}${p.metric&&p.metric.endsWith('_bps')?' B/s':''}</td><td>${Number(p.baseline_mean||0).toFixed(2)}</td><td>${Number(p.z_score).toFixed(1)}σ</td></tr>`);
+    const empty=s.mode==='preview'?'No deviations recorded yet — when a sample leaves its baseline it will appear here.':'No recent previewed deviations.';
+    previewsRoot.innerHTML=rows.length?table(['Time','Device','Metric','Value','Baseline mean','Z-score'],rows):`<p class="muted">${empty}</p>`;
+  }
+}
+return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,anomalies,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();

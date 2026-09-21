@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% block title %}Settings · PiNOC{% endblock %}
 {% block content %}<h1>Settings</h1><p class="muted">Administrator-only validated configuration. Secrets are never returned.</p>
-<div class="filters"><span>General</span><span>Devices</span><span>Polling</span><span>Health thresholds</span><span>Alerts</span><span>Integrations</span><span>Services</span><span>Actions</span><span>Authentication</span><span>Storage / History</span><span>Notifications</span><span>Backups</span></div>
+<div class="filters"><span>General</span><span>Devices</span><span>Polling</span><span>Health thresholds</span><span>Alerts</span><span>Integrations</span><span>Services</span><span>Actions</span><span>Authentication</span><span>Storage / History</span><span>Anomalies</span><span>Notifications</span><span>Backups</span></div>
 <section class="panel"><h2>Alert notifications</h2><p class="muted">Notify an ntfy topic, an SMTP mailbox, or an HTTP webhook when alerts open or resolve. Delivery is queued off the alert path; changes to this section apply after a restart.</p>
 <div id="notifications-status" class="muted">Loading notification status…</div>
 <label for="notifications-editor">Notifications JSON (config.json <code>notifications</code> section)</label>
@@ -26,6 +26,10 @@
 <span id="schedule-message" class="muted" role="status"></span>
 </form>
 </section>
+<section class="panel"><h2>Anomaly detection</h2><p class="muted">Statistical baselines (EWMA with hour-of-day seasonality) flag unusual-but-not-threshold values — slow memory growth, off-pattern traffic spikes, and the like. Disabled by default; add the <code>anomaly_detection</code> section to config.json (restart required). In preview mode (the default) deviations are recorded below without opening alerts, so you can judge the noise level before enabling real anomaly alerts.</p>
+<div id="anomalies-status" class="muted">Loading anomaly detection status…</div>
+<div id="anomalies-previews" class="muted">Loading recent deviations…</div>
+</section>
 <section class="panel"><p>Use the validated settings API or local configuration CLI. Changes currently require restart and are saved atomically with bounded backups.</p></section>
 {% endblock %}
-{% block scripts %}<script>PiNOC.settings();PiNOC.schedules();</script>{% endblock %}
+{% block scripts %}<script>PiNOC.settings();PiNOC.schedules();PiNOC.anomalies();</script>{% endblock %}
