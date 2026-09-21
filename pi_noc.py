@@ -20,9 +20,8 @@ import time
 import urllib.error
 import urllib.request
 import logging
-import copy
 from logging.handlers import RotatingFileHandler
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -1239,7 +1238,22 @@ class SharedSnapshotCoordinator:
     def _publish(self) -> None:
         with self.lock:
             self.snapshot.collected_at = time.time()
-            snapshot = copy.deepcopy(self.snapshot)
+            # A full deepcopy() of the whole snapshot tree -- recursing into
+            # remote.disks and temp_devices too -- is unnecessary and runs on
+            # every publish from every one of the 9 collectors. vpn, local,
+            # sensor, and temp_devices are always reassigned wholesale by
+            # their own collect_* method (e.g. self.snapshot.vpn = vpn),
+            # never mutated in place, so a shallow copy that shares them by
+            # reference is safe: state.publish() stores this snapshot object
+            # directly (PiNOCState.legacy_snapshot() deep-copies lazily on
+            # read instead), so the only field that needs decoupling here is
+            # one a *later* collector could mutate in place on the *same*
+            # object this publish just handed off. That is `remote`:
+            # collect_remote_health/services/storage do
+            # `current = self.snapshot.remote; current.online = ...` rather
+            # than reassigning self.snapshot.remote, so only it needs its
+            # own shallow copy.
+            snapshot = replace(self.snapshot, remote=replace(self.snapshot.remote))
             legacy = list(normalize_snapshot(snapshot, CONFIG))
             legacy_by_id = {device.id: device for device in legacy}
             fleet_ids = {device.id for device in self.fleet_devices}
