@@ -203,6 +203,7 @@ fields include:
 | `roles`, `tags`, `notes` | Classification, filtering, and operator context. |
 | `monitored_services`, `critical_services` | Observed systemd units; critical units are automatically monitored. |
 | `manageable_services` | Explicit allowlist for safe service actions. |
+| `allowed_actions` | Per-device allowlist for optional actions (package checks, disk rescues); none are enabled by default. |
 | `important_paths` | Paths whose read-only mounts are critical. |
 | `thresholds` | Per-device live health threshold overrides. |
 | `integrations` | Per-integration enablement and options. |
@@ -584,6 +585,30 @@ shell, and enforce configured service/integration allowlists. Device power is
 administrator-only and expected-offline state is cleared if dispatch fails.
 Audit records capture actor, role/token, source, target, authorization,
 outcome, duration, and redacted errors.
+
+### Disk rescue actions
+
+Five recovery actions close the loop on the most common physical pressure
+(filesystem nearly full, log or cache bloat). Each executes on the device
+through the same fixed-argv, no-shell executor, requires operator or higher
+(token scope `execute:safe_actions`), and — unlike the built-in service and
+power actions — must be explicitly allowlisted per device via
+`allowed_actions` in `config/devices.json`; none are enabled by default.
+
+| Action | Effect | Optional target | Confirmation |
+| --- | --- | --- | --- |
+| `apt.clean` | Removes cached package files (`apt-get clean`) | — | Confirm |
+| `apt.autoremove` | Simulates `apt-get autoremove` and reports the count; no changes | — | Confirm |
+| `logs.truncate` | Truncates one log file; without a target, the largest `*.log` under `/var/log` | A path under `/var/log` or a declared `important_paths` entry | Strong |
+| `journal.vacuum` | `journalctl --vacuum-size=…` / `--vacuum-time=…` (default `time:7d`) | e.g. `size:100M`, `time:7d` | Strong |
+| `cache.drop` | Writes 3 to `/proc/sys/vm/drop_caches` | — | Strong |
+
+Completed jobs record a bounded summary in `action_jobs` and the audit log —
+for example space freed from before/after `df` reads, the number of packages
+a simulation would remove, or the journal size before and after. Rescue
+buttons appear on a device's Safe actions panel (and in alert runbooks) only
+when the device allowlists the action, and strong actions require a typed
+confirmation before they are queued.
 
 ## Optional outbound agent and development gateway
 

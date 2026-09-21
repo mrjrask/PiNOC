@@ -24,7 +24,8 @@ ALERT_TYPE_PATTERN = re.compile(r"[a-z0-9_]{1,64}")
 ACTION_PATTERN = re.compile(
     r"^(?:device\.(?:refresh|reboot|shutdown)|service\.(?:start|stop|restart)"
     r"|wireguard\.restart|desk_display\.restart|magicmirror\.restart"
-    r"|pi_hotspot\.restart|package\.check)$"
+    r"|pi_hotspot\.restart|package\.check"
+    r"|apt\.(?:clean|autoremove)|logs\.truncate|journal\.vacuum|cache\.drop)$"
 )
 LINK_PATTERN = re.compile(r"^(?:https?://|/)[A-Za-z0-9._\-/?&=%~#+:@]*$")
 
