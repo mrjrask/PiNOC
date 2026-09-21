@@ -111,6 +111,15 @@ def test_operator_browser_session_can_read_the_action_registry(tmp_path):
  assert c.get("/api/actions/does-not-exist").status_code==404
  app.extensions["pinoc_actions"].stop()
 
+def test_only_administrator_browser_sessions_can_read_the_audit_log(tmp_path):
+ # /api/audit maps to the administrator-only "config.write" permission in
+ # TOKEN_SCOPE_PERMISSIONS, but -- like /api/actions above -- that mapping
+ # was only ever enforced for Bearer-token identities.
+ for role,expected in (("viewer",403),("operator",403),("administrator",200)):
+  app,db=fixture(tmp_path/role,role);c=app.test_client();assert login(c).status_code==302
+  assert c.get("/api/audit").status_code==expected
+  app.extensions["pinoc_actions"].stop()
+
 def test_overview_omits_alerts_and_events_without_their_scopes(tmp_path):
  app,db=fixture(tmp_path,"administrator");security=app.extensions["pinoc_security"]
  db.execute("INSERT INTO alerts(device_id,alert_type,severity,message,fingerprint,opened_at,last_seen_at,state) VALUES('pi','health','warning','alert','scope-alert','2026-09-14T00:00:00Z','2026-09-14T00:00:00Z','active')")
