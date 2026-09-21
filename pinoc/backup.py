@@ -465,9 +465,10 @@ class BackupService:
             remote = f"{user}@{host}:{self.destination['path']}"
             self.runner(["scp", "-P", str(port), "-o", "BatchMode=yes", str(staging), remote],
                         check=True, capture_output=True, text=True, timeout=600)
-            self.runner(["ssh", "-p", str(port), "-o", "BatchMode=yes", f"{user}@{host}",
-                         "ls", "-1t", str(self.destination["path"]), f"{BUNDLE_PREFIX}*.tar"],
-                        check=False, capture_output=True, text=True, timeout=60)
+            # _rotate(), called immediately after by run_backup(), does its
+            # own "ls -1t" listing and actually uses it for rotation --
+            # listing here too just paid for a wasted SSH round-trip whose
+            # result was never even read.
             return
         target = Path(self.destination["path"]) / name
         target.parent.mkdir(parents=True, exist_ok=True)

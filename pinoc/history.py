@@ -57,7 +57,20 @@ class HistoryManager:
             except Exception as exc:
                 self.db.available=False;self.db.error=str(exc)
                 LOG.exception("history snapshot failed for device %s; other devices this cycle are unaffected",d.get("id"))
+        self._prune_stale_device_state({d.get("id") for d in devices if d.get("id")})
         self._refresh_cache()
+    def _prune_stale_device_state(self,current_ids):
+        # previous/last_sample/cpu_since are populated per device on every
+        # poll but nothing ever removed an entry for a device_id that stops
+        # appearing here (removed from config/devices.json, or renamed/
+        # re-slugged) -- a long-running installation with device churn
+        # would otherwise grow these unboundedly. FleetCollector.collect()
+        # always returns one result per currently configured device (never
+        # silently drops one, even on failure), so `devices` here is
+        # reliably the full current roster, not a partial cycle.
+        for did in [k for k in self.previous if k not in current_ids]:self.previous.pop(did,None)
+        for key in [k for k in self.last_sample if k[0] not in current_ids]:self.last_sample.pop(key,None)
+        for did in [k for k in self.cpu_since if k not in current_ids]:self.cpu_since.pop(did,None)
     def _device(self,d,stamp):
         did=d["id"]; old=self.previous.get(did); ip=d.get("network",{}).get("ip") or d.get("ip") or ""
         operational=self.db.rows("SELECT * FROM device_operational_state WHERE device_id=?",(did,))
