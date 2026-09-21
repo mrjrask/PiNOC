@@ -1,10 +1,10 @@
 """SQLite history store with ordered, transactional migrations."""
 from __future__ import annotations
-import json, logging, sqlite3
+import json, logging, sqlite3, threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator
+from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
@@ -76,6 +76,7 @@ class Database:
         self.path=Path(path).expanduser(); self.busy_timeout_ms=busy_timeout_ms
         self.available=False; self.error=""; self.last_write=None
         self.last_aggregation=None; self.last_retention_cleanup=None
+        self._local = threading.local()
 
     def connect(self, readonly: bool=False) -> sqlite3.Connection:
         target=f"file:{self.path}?mode=ro" if readonly else str(self.path)
@@ -84,19 +85,59 @@ class Database:
         if not readonly: con.execute("PRAGMA journal_mode=WAL"); con.execute("PRAGMA foreign_keys=ON")
         return con
 
+    def _pooled(self, readonly: bool, attr: str) -> sqlite3.Connection:
+        # execute()/rows()/initialize()/backup() run far more often than the
+        # database file is ever replaced wholesale (a backup restore), so
+        # cache one connection per thread per mode instead of paying a fresh
+        # connect() + PRAGMA round-trip on every single call. Each thread
+        # gets its own connection -- sqlite3 connections must not be shared
+        # across threads -- and a cheap inode check (much cheaper than
+        # reconnecting) detects the rare case where the file at this path
+        # was replaced out from under an already-open connection, so a
+        # restore is picked up exactly as it was when every call reconnected
+        # fresh, without needing to wait for a service restart.
+        try:
+            current_ino: Optional[int] = self.path.stat().st_ino
+        except OSError:
+            current_ino = None
+        cached: Optional[Tuple[sqlite3.Connection, Optional[int]]] = getattr(self._local, attr, None)
+        if cached is not None and current_ino is not None and cached[1] == current_ino:
+            return cached[0]
+        if cached is not None:
+            try: cached[0].close()
+            except sqlite3.Error: pass
+        con = self.connect(readonly)
+        # The very first connection may create the file (it did not exist
+        # to stat() above, hence current_ino is None there), so re-stat
+        # afterward -- otherwise every later call would see a real inode
+        # that never matches the None it cached and reconnect needlessly.
+        try:
+            current_ino = self.path.stat().st_ino
+        except OSError:
+            current_ino = None
+        setattr(self._local, attr, (con, current_ino))
+        return con
+
     @contextmanager
     def _open(self, readonly: bool=False) -> Iterator[sqlite3.Connection]:
         # sqlite3.Connection's own context-manager protocol only commits/
-        # rolls back the transaction; it never closes the connection, so a
-        # bare "with self.connect() as con:" leaks an OS-level handle per
-        # call. Wrap it so every execute()/rows()/initialize()/backup() call
-        # still gets commit-on-success/rollback-on-error *and* a guaranteed
-        # close.
-        con=self.connect(readonly)
+        # rolls back the transaction; it never closes the connection. That's
+        # now what we want for the common case (the connection is pooled per
+        # thread, not closed after every call) -- but a connection that
+        # raised must not be handed back out again: drop it so the next call
+        # reconnects fresh, matching the resilience a fresh-connection-per-
+        # call design had against a transient error (a brief I/O hiccup, a
+        # connection the OS or SQLite itself decided to tear down).
+        attr = "_ro_con" if readonly else "_rw_con"
+        con=self._pooled(readonly, attr)
         try:
             with con: yield con
-        finally:
-            con.close()
+        except Exception:
+            try: con.close()
+            except sqlite3.Error: pass
+            if getattr(self._local, attr, None) is not None and getattr(self._local, attr)[0] is con:
+                setattr(self._local, attr, None)
+            raise
 
     def initialize(self) -> bool:
         try:
