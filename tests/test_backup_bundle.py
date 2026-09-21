@@ -134,6 +134,40 @@ class BuildVerifyTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any("digest mismatch" in i or "signature" in i for i in issues))
 
+    def test_read_bundle_rejects_an_oversized_member(self):
+        # build_bundle() enforces MAX_CONFIG_BYTES/MAX_DATABASE_BYTES on
+        # write, but nothing enforced the same limits on read before any
+        # trust decision (signature/digest) is made.
+        import io, tarfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bundle.tar"
+            oversized = b"x" * (backup_module.MAX_CONFIG_BYTES + 1)
+            members = {"config.json": b"{}", "env-manifest.txt": oversized,
+                      "pinoc.db": b"db", "bundle.json": json.dumps({"format": "pinoc-bundle"}).encode()}
+            with tarfile.open(path, "w") as tar:
+                for name, data in members.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    tar.addfile(info, io.BytesIO(data))
+
+            called_for = []
+            original_extractfile = tarfile.TarFile.extractfile
+            def spy_extractfile(self, member):
+                called_for.append(member.name)
+                return original_extractfile(self, member)
+            with mock.patch.object(tarfile.TarFile, "extractfile", spy_extractfile):
+                with self.assertRaises(BackupError) as ctx:
+                    backup_module.read_bundle(path)
+            self.assertIn("exceeds", str(ctx.exception))
+            # The oversized member's content must never be read into memory,
+            # even though a member inserted before it in the tar was.
+            self.assertIn("config.json", called_for)
+            self.assertNotIn("env-manifest.txt", called_for)
+
+            ok, _, issues = verify_bundle(path)
+            self.assertFalse(ok)
+            self.assertTrue(any("exceeds" in i for i in issues))
+
     def test_newer_schema_rejected(self):
         metadata = self._bundle()
         with mock.patch.object(backup_module, "SCHEMA_VERSION", 0):

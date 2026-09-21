@@ -194,6 +194,9 @@ def build_bundle(instance_dir: Path, destination: Path, db: Database,
     return metadata
 
 
+_MEMBER_SIZE_LIMITS = {"pinoc.db": MAX_DATABASE_BYTES}
+
+
 def read_bundle(path: Path) -> Tuple[Dict[str, Any], Dict[str, bytes]]:
     """Return (bundle.json metadata, {member name: bytes})."""
     members: Dict[str, bytes] = {}
@@ -201,6 +204,15 @@ def read_bundle(path: Path) -> Tuple[Dict[str, Any], Dict[str, bytes]]:
         for member in tar.getmembers():
             if not member.isreg() or member.name not in PAYLOAD_MEMBERS + ("bundle.sig",):
                 continue
+            # build_bundle() enforces MAX_CONFIG_BYTES/MAX_DATABASE_BYTES on
+            # write, but nothing enforced the same limits here before any
+            # trust decision (signature/digest) is made -- a corrupted or
+            # maliciously oversized member would be fully buffered into
+            # memory regardless. Check the tar header's declared size (cheap
+            # -- getmembers() already parsed it) before reading it.
+            limit = _MEMBER_SIZE_LIMITS.get(member.name, MAX_CONFIG_BYTES)
+            if member.size > limit:
+                raise BackupError(f"{member.name} is {member.size} bytes; exceeds the {limit}-byte backup limit")
             handle = tar.extractfile(member)
             if handle:
                 members[member.name] = handle.read()
