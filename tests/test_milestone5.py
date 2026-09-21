@@ -95,6 +95,22 @@ def test_bearer_read_scopes_are_enforced_per_endpoint(tmp_path):
  assert c.get("/api/actions",headers={"Authorization":"Bearer "+execute}).status_code==200
  app.extensions["pinoc_actions"].stop()
 
+def test_viewer_browser_session_cannot_read_the_action_registry(tmp_path):
+ # /api/actions and /api/actions/<id> map to the operator-only
+ # "actions.execute" permission in TOKEN_SCOPE_PERMISSIONS, but that
+ # mapping was only ever enforced for Bearer-token identities; a
+ # logged-in viewer-role browser session must be denied too.
+ app,db=fixture(tmp_path,"viewer");c=app.test_client();assert login(c).status_code==302
+ assert c.get("/api/actions").status_code==403
+ assert c.get("/api/actions/does-not-exist").status_code==403
+ app.extensions["pinoc_actions"].stop()
+
+def test_operator_browser_session_can_read_the_action_registry(tmp_path):
+ app,db=fixture(tmp_path,"operator");c=app.test_client();assert login(c).status_code==302
+ assert c.get("/api/actions").status_code==200
+ assert c.get("/api/actions/does-not-exist").status_code==404
+ app.extensions["pinoc_actions"].stop()
+
 def test_overview_omits_alerts_and_events_without_their_scopes(tmp_path):
  app,db=fixture(tmp_path,"administrator");security=app.extensions["pinoc_security"]
  db.execute("INSERT INTO alerts(device_id,alert_type,severity,message,fingerprint,opened_at,last_seen_at,state) VALUES('pi','health','warning','alert','scope-alert','2026-09-14T00:00:00Z','2026-09-14T00:00:00Z','active')")

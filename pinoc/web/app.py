@@ -831,9 +831,12 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         # optional target in the request body; the registry validates it.
         return submit_action(device_id,integration_action.replace("-","."),(request.get_json(silent=True) or {}).get("target"))
     @app.get("/api/actions")
-    def action_list():return jsonify({"actions":actions.list(min(200,max(1,request.args.get("limit",50,type=int))))}) if actions else (jsonify({"actions":[]}),503)
+    def action_list():
+        if security and not security.allowed(g.identity,"actions.execute"):return jsonify({"error":"permission denied"}),403
+        return jsonify({"actions":actions.list(min(200,max(1,request.args.get("limit",50,type=int))))}) if actions else (jsonify({"actions":[]}),503)
     @app.get("/api/actions/<job_id>")
     def action_result(job_id):
+        if security and not security.allowed(g.identity,"actions.execute"):return jsonify({"error":"permission denied"}),403
         job=actions.get(job_id) if actions else None;return jsonify(job) if job else (jsonify({"error":"action not found"}),404)
     @app.post("/api/devices/<device_id>/maintenance")
     def maintenance(device_id):
