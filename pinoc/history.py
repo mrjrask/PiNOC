@@ -64,7 +64,7 @@ class HistoryManager:
         operational=operational[0] if operational else {}
         now=datetime.fromisoformat(stamp);maintenance_until=operational.get("maintenance_until");expected_until=operational.get("expected_offline_until")
         if maintenance_until and datetime.fromisoformat(maintenance_until)<=now:
-            self.db.execute("UPDATE device_operational_state SET maintenance_until=NULL,maintenance_reason=NULL,expected_offline=0,expected_offline_reason=NULL,expected_offline_until=NULL,updated_at=?,updated_by='system' WHERE device_id=?",(stamp,did));operational={}
+            self.db.execute("UPDATE device_operational_state SET maintenance_until=NULL,maintenance_reason=NULL,expected_offline=0,expected_offline_reason=NULL,expected_offline_until=NULL,updated_at=?,updated_by='system' WHERE device_id=?",(stamp,did));operational={};maintenance_until=None
             self._write_event(did,"maintenance_ended","info","Maintenance window expired",{},stamp)
         if expected_until and datetime.fromisoformat(expected_until)<=now and not maintenance_until:
             self.db.execute("UPDATE device_operational_state SET expected_offline=0,expected_offline_reason=NULL,expected_offline_until=NULL,updated_at=?,updated_by='system' WHERE device_id=?",(stamp,did));operational["expected_offline"]=0
