@@ -1,7 +1,7 @@
 import base64,json,subprocess,threading,time
 from pathlib import Path
 import pytest
-from pinoc.database import Database,SCHEMA_VERSION
+from pinoc.database import Database,SCHEMA_VERSION,utcnow
 from pinoc.development import DevelopmentGateway,DevError,PROTOCOL_VERSION
 from pinoc.history import HistoryManager
 from pinoc.security import SecurityManager
@@ -77,6 +77,24 @@ def test_malformed_numeric_request_fields_raise_clean_devError(tmp_path):
         gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"git_status",
                               "lines":"a-lot"})
     assert (lines_error.value.error_type,lines_error.value.status)==("invalid_request",400)
+
+def test_late_result_does_not_resurrect_an_agent_lost_job(tmp_path):
+    # result()'s idempotency guard must treat every terminal status as
+    # final, including the two the server assigns on its own -- otherwise
+    # a late result from an agent that was actually still alive can
+    # silently overwrite a job an operator already treated as concluded.
+    db,gw=setup(tmp_path)
+    a=enroll(gw)
+    root=tmp_path/"repo";root.mkdir();workspace(gw,root)
+    job=gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"git_status"})
+    gw.claim("pi")
+    db.execute("UPDATE development_jobs SET status='agent_lost',completed_at=?,error_type='agent_lost',"
+              "summary='Agent disconnected during job' WHERE job_id=?",(utcnow(),job["job_id"]))
+    result=gw.result(gw.agent(a["agent_id"]),job["job_id"],
+                     {"status":"succeeded","exit_code":0,"stdout":"late",
+                      "artifacts":[{"name":"late.png","data":base64.b64encode(b"x").decode()}]})
+    assert result["status"]=="agent_lost"
+    assert gw.artifacts(job["job_id"])==[]
 
 def test_schema_enrollment_replay_rotation_and_revocation(tmp_path):
  db,gw=setup(tmp_path);assert SCHEMA_VERSION==11;a=enroll(gw);body=b'{}';stamp=str(int(time.time()));nonce="unique";sig=gw.sign(a["agent_id"],a["credential"],stamp,nonce,body)
