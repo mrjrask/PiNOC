@@ -16,6 +16,7 @@ APT_PACKAGES=(
   python3-venv
   python3-pip
   python3-dev
+  python3-cryptography
   build-essential
   git
   i2c-tools
@@ -139,9 +140,14 @@ setup_user_groups() {
 
 setup_venv() {
   log "Creating/updating Python virtual environment"
-  run_as_user python3 -m venv "$VENV_DIR"
+  # PiNOC intentionally uses Debian's native python3-cryptography package.
+  # --system-site-packages makes that package visible inside both new and
+  # existing venvs without forcing an unsupported PyPI source build on armhf.
+  run_as_user python3 -m venv --system-site-packages "$VENV_DIR"
   run_as_user "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
   run_as_user "$VENV_DIR/bin/python" -m pip install -r "${REPO_DIR}/requirements.txt"
+  run_as_user "$VENV_DIR/bin/python" -c 'from cryptography.fernet import Fernet, InvalidToken' \
+    || fail "python3-cryptography is installed but not importable from ${VENV_DIR}"
 }
 
 install_service() {
