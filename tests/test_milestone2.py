@@ -86,6 +86,21 @@ class ConcurrencyTest(unittest.TestCase):
         result = FleetCollector([device], runner=runner).collect_device(device)
         self.assertEqual((result.health, result.online), ("offline", False))
 
+    def test_empty_uptime_section_falls_back_instead_of_raising(self):
+        # A present-but-empty UPTIME section (data.get("UPTIME","0") returns
+        # "" rather than the "0" default) must not raise IndexError from
+        # "".split()[0]; it should fall back to zero uptime like a missing
+        # section would.
+        device = parse_device({"id": "pi", "hostname": "pi"}, 0)
+        def runner(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                cmd, 0,
+                "__UPTIME__\n__LOAD__\n0 0 0\n__CPU__\ncpu 1 0 1 8\n"
+                "__MEM__\nMemTotal: 10 kB\nMemAvailable: 5 kB\n", "")
+        result = FleetCollector([device], runner=runner).collect_device(device)
+        self.assertEqual(result.uptime_seconds, 0)
+        self.assertEqual(result.error, "")
+
     def test_slow_failure_does_not_prevent_healthy_result(self):
         devices=[parse_device({"id":x,"hostname":x},i) for i,x in enumerate(("slow","good"))]
         def runner(cmd,**kwargs):
