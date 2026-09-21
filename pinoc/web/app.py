@@ -806,8 +806,11 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         if security and not security.allowed(g.identity,"alerts.write"):return jsonify({"error":"permission denied"}),403
         body=request.get_json(silent=True) or {}; until=body.get("muted_until")
         if not until:
+            # An explicit JSON null for "seconds" (not just an omitted key)
+            # leaves body.get("seconds",3600) as None -- int(None) raises
+            # TypeError, not ValueError, so that must be caught too.
             try: until=(datetime.now(timezone.utc)+__import__('datetime').timedelta(seconds=min(86400,max(60,int(body.get("seconds",3600)))))).isoformat()
-            except ValueError:abort(400,"invalid mute duration")
+            except (TypeError,ValueError):abort(400,"invalid mute duration")
         history.mute(alert_id,until);return jsonify({"ok":True,"muted_until":until})
     @app.post("/api/alerts/<int:alert_id>/unmute")
     def unmute(alert_id):

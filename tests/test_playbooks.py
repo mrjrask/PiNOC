@@ -128,6 +128,28 @@ class PlaybookApiTest(unittest.TestCase):
         payload = self.client.get("/api/playbooks").get_json()
         self.assertEqual([p["id"] for p in payload["playbooks"]], ["service-failed", "critical-prefix"])
 
+    def _csrf(self):
+        with self.client.session_transaction() as session:
+            return session["csrf_token"]
+
+    def test_mute_rejects_explicit_null_seconds_instead_of_crashing(self):
+        # A client sending {"seconds": null} explicitly (not omitting the
+        # key) previously reached int(None), raising an uncaught TypeError
+        # (500) instead of the intended "invalid mute duration" 400.
+        self.seed_alert("service_failed", "ssh.service")
+        alert_id = self.client.get("/api/alerts").get_json()["alerts"][0]["alert_id"]
+        response = self.client.post(f"/api/alerts/{alert_id}/mute", json={"seconds": None},
+                                    headers={"X-CSRF-Token": self._csrf()})
+        self.assertEqual(response.status_code, 400)
+
+    def test_mute_defaults_seconds_when_omitted(self):
+        self.seed_alert("service_failed", "ssh.service")
+        alert_id = self.client.get("/api/alerts").get_json()["alerts"][0]["alert_id"]
+        response = self.client.post(f"/api/alerts/{alert_id}/mute", json={},
+                                    headers={"X-CSRF-Token": self._csrf()})
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.get_json()["muted_until"])
+
     def test_alerts_attach_matching_playbook(self):
         self.seed_alert("service_failed", "ssh.service")
         self.seed_alert("critical_disk_usage", "/")
