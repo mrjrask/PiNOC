@@ -19,5 +19,9 @@ def compare(receivers):
     ids=[set(x.get("data",{}).get("aircraft_ids",[])) for x in receivers]
     common=sorted(set.intersection(*ids)) if len(ids)>1 and all(ids) else []
     rows=[]
-    for index,item in enumerate(receivers): rows.append({"device_id":item.get("device_id"),"aircraft":item.get("data",{}).get("aircraft"),"messages_per_second":item.get("data",{}).get("messages_per_second"),"positions_per_second":item.get("data",{}).get("positions_per_second"),"maximum_range_nm":item.get("data",{}).get("maximum_range_nm"),"health":item.get("health"),"unique_aircraft":sorted(ids[index]-set().union(*(ids[:index]+ids[index+1:]))) if len(ids)>1 else []})
+    for index,item in enumerate(receivers):
+        # With no other receivers to compare against, every aircraft this
+        # one sees is trivially unique to it -- not an empty list.
+        others=set().union(*(ids[:index]+ids[index+1:])) if len(ids)>1 else set()
+        rows.append({"device_id":item.get("device_id"),"aircraft":item.get("data",{}).get("aircraft"),"messages_per_second":item.get("data",{}).get("messages_per_second"),"positions_per_second":item.get("data",{}).get("positions_per_second"),"maximum_range_nm":item.get("data",{}).get("maximum_range_nm"),"health":item.get("health"),"unique_aircraft":sorted(ids[index]-others)})
     return {"receivers":rows,"aircraft_seen_by_all":common,"receiver_count":len(rows)}
