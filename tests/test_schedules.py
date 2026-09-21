@@ -409,6 +409,28 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(row["consecutive_failures"], MAX_CONSECUTIVE_FAILURES)
         self.assertTrue(row["paused"])
         self.assertEqual(self.db.scalar("SELECT COUNT(*) FROM events"), 1)
+        event = self.db.rows("SELECT * FROM events")[0]
+        self.assertIn("repeated failures", event["message"])
+
+    def test_reconcile_once_schedule_pauses_after_a_single_execution_failure(self):
+        # A one-shot has no "next scheduled slot" to retry at, so it
+        # correctly pauses after just one execution failure -- but the
+        # event/notification message must say so accurately, not always
+        # claim a 3-strikes "repeated failures" pause that never happened.
+        sid = _insert_schedule(self.db, spec="once:2027-01-01T00:00")
+        job = self.fake.enqueue("device.refresh", "pi", None, "scheduler",
+                                "administrator", None, {"schedule_id": sid})
+        self.db.execute("UPDATE action_schedules SET last_job_id=?,last_status='queued' "
+                        "WHERE schedule_id=?", (job["job_id"], sid))
+        self.db.execute("UPDATE action_jobs SET status='failed',error='boom',completed_at=? "
+                        "WHERE job_id=?", (utcnow(), job["job_id"]))
+        self.svc._reconcile()
+        row = self._row(sid)
+        self.assertEqual(row["consecutive_failures"], 1)
+        self.assertTrue(row["paused"])
+        event = self.db.rows("SELECT * FROM events")[0]
+        self.assertIn("one-shot attempt failed", event["message"])
+        self.assertNotIn("repeated failures", event["message"])
 
     def test_reconcile_ignores_non_terminal(self):
         sid = _insert_schedule(self.db)
