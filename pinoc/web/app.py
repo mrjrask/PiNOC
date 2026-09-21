@@ -854,6 +854,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         history.db.execute("UPDATE device_operational_state SET expected_offline=0,expected_offline_reason=NULL,expected_offline_until=NULL,updated_at=?,updated_by=? WHERE device_id=?",(datetime.now(timezone.utc).isoformat(),g.identity["username"],device_id));return jsonify({"ok":True})
     @app.get("/api/audit")
     def api_audit():
+        if security and not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
         if not history:return jsonify({"audit":[]})
         page,limit=_page();where,args=["1=1"],[]
         for field,column in (("user","user"),("device","device_id"),("action","action"),("result","execution_result")):
