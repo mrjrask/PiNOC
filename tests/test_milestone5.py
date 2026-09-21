@@ -70,6 +70,10 @@ def test_maintenance_persistence_redaction_and_atomic_backup(tmp_path):
  assert dispatcher.set_maintenance("pi","person","password=hidden",1800)["expected_offline"]==1
  assert Database(str(tmp_path/"db.sqlite")).initialize()
  assert redact({"token":"x","nested":{"private_key":"y"}})=={"token":"[REDACTED]","nested":{"private_key":"[REDACTED]"}}
+ # authorization_result is a benign allowed/denied classification on every
+ # audit row, not a secret; a bare substring match on "authorization"
+ # must not redact it, while a genuine Authorization-style key still is.
+ assert redact({"authorization_result":"denied","Authorization":"Bearer x"})=={"authorization_result":"denied","Authorization":"[REDACTED]"}
  path=tmp_path/"config.json";atomic_save(path,{"devices":[],"polling":{"fleet_seconds":10}});atomic_save(path,{"devices":[],"polling":{"fleet_seconds":20}})
  assert path.with_name("config.json.bak.1").exists()
  dispatcher.stop()
