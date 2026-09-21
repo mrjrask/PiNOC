@@ -52,13 +52,15 @@ class ProbeCollector:
     def _collect_device(self, device: DeviceConfig, now: float) -> None:
         configured = (device.integrations or {}).get("probe")
         if isinstance(configured, bool):
-            if not configured:
-                return
-            configured = {}
-        if not (configured or {}).get("enabled", True):
-            return
-        checks = [check for check in (configured or {}).get("checks", [])
-                  if check.get("enabled", True)]
+            configured = {} if configured else None
+        enabled = configured is not None and (configured or {}).get("enabled", True)
+        checks = ([check for check in (configured or {}).get("checks", []) if check.get("enabled", True)]
+                  if enabled else [])
+        # A check removed, renamed, disabled, or the whole probe integration
+        # turned off in config must not leave its stale result/run-timestamp
+        # in memory indefinitely -- reconcile against the currently
+        # configured check names on every cycle, even down to none left.
+        self._prune_stale_checks(device.id, {check["name"] for check in checks})
         if not checks:
             return
         ran_any = False
@@ -89,4 +91,14 @@ class ProbeCollector:
     def reset_device(self, device_id: str) -> None:
         """Force all of a device's checks to re-run on the next cycle."""
         for key in [key for key in self._last_run if key[0] == device_id]:
+            del self._last_run[key]
+
+    def _prune_stale_checks(self, device_id: str, current_names: "set[str]") -> None:
+        results = self._last_results.get(device_id)
+        if results:
+            for name in [name for name in results if name not in current_names]:
+                del results[name]
+            if not results:
+                del self._last_results[device_id]
+        for key in [key for key in self._last_run if key[0] == device_id and key[1] not in current_names]:
             del self._last_run[key]

@@ -265,6 +265,48 @@ class CollectorTest(unittest.TestCase):
         collector.collect()
         self.assertNotIn("probe", state.device("pi")["integrations"])
 
+    def test_removed_or_renamed_checks_are_pruned_from_memory(self):
+        # _last_results/_last_run only ever grew -- a check removed or
+        # renamed in config left its stale entry in memory for the life of
+        # the process.
+        state = PiNOCState()
+        state.publish([DeviceState(id="pi", hostname="pi", friendly_name="Pi",
+                                   online=True, collection_method="local")], replace=True)
+        checks = [valid_http_check(interval_seconds=60), valid_tcp_check(name="db", interval_seconds=60)]
+        device = DeviceConfig(id="pi", hostname="pi", friendly_name="Pi", address="pi.local",
+                              collection_method="local",
+                              integrations={"probe": {"enabled": True, "checks": checks}})
+
+        def runner(check, **kwargs):
+            return {"name": check["name"], "kind": check["kind"], "ok": True, "status": 200,
+                    "latency_ms": 3.0, "error": None, "checked_at": utcnow()}
+
+        devices_holder = {"device": device}
+        collector = ProbeCollector(state, lambda: [devices_holder["device"]], runner=runner,
+                                   clock=lambda: 1000.0)
+        collector.collect()
+        self.assertEqual(set(collector._last_results["pi"]), {"api", "db"})
+        self.assertEqual({key for key in collector._last_run if key[0] == "pi"},
+                         {("pi", "api"), ("pi", "db")})
+
+        # "db" is removed from config on the next cycle.
+        devices_holder["device"] = DeviceConfig(
+            id="pi", hostname="pi", friendly_name="Pi", address="pi.local", collection_method="local",
+            integrations={"probe": {"enabled": True, "checks": [valid_http_check(interval_seconds=60)]}})
+        collector.clock = lambda: 2000.0
+        collector.collect()
+        self.assertEqual(set(collector._last_results["pi"]), {"api"})
+        self.assertEqual({key for key in collector._last_run if key[0] == "pi"}, {("pi", "api")})
+
+        # The probe integration is disabled entirely on the next cycle.
+        devices_holder["device"] = DeviceConfig(
+            id="pi", hostname="pi", friendly_name="Pi", address="pi.local", collection_method="local",
+            integrations={"probe": {"enabled": False, "checks": [valid_http_check(interval_seconds=60)]}})
+        collector.clock = lambda: 3000.0
+        collector.collect()
+        self.assertNotIn("pi", collector._last_results)
+        self.assertEqual({key for key in collector._last_run if key[0] == "pi"}, set())
+
     def test_runner_exception_is_isolated(self):
         state = PiNOCState()
         state.publish([DeviceState(id="pi", hostname="pi", friendly_name="Pi",
