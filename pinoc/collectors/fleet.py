@@ -435,24 +435,43 @@ class FleetCollector:
             health,reasons,stale=evaluate(raw,device.thresholds); raw.update(health=health,health_reasons=reasons,stale=stale)
             result=DeviceState.from_dict(raw); self.snapshots[device.id]=result; return result
         except (subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
-            LOG.warning("[%s] collection failed: %s",device.id,exc)
-            raw=old.to_dict() if old else {"id":device.id,"hostname":device.hostname,"friendly_name":device.friendly_name,
-                "address":device.address,"roles":list(device.roles),"tags":list(device.tags),"collection_method":device.collection_method,
-                "ssh_user":device.ssh_user,"ssh_port":device.ssh_port,"monitored_services":list(device.monitored_services),
-                "critical_services":list(device.critical_services),"manageable_services":list(device.manageable_services),
-                "allowed_actions":list(device.allowed_actions),
-                "notes":device.notes,"cockpit_url":device.cockpit_url,"maintenance":device.maintenance}
-            raw.update(last_collection_attempt=attempted,error=str(exc),collector_status={"transport":{"status":"error","error":str(exc)}})
-            health,reasons,stale=evaluate(raw,device.thresholds)
-            collected = raw.get("last_successful_collection") or raw.get("last_seen")
-            raw.update(health=health,health_reasons=reasons,stale=stale,
-                       online=bool(collected) and health != "offline")
-            result=DeviceState.from_dict(raw); self.snapshots[device.id]=result; return result
+            return self._failure_result(device,old,attempted,exc)
+
+    def _failure_result(self, device: DeviceConfig, old: Optional[DeviceState], attempted: str, exc: BaseException) -> DeviceState:
+        LOG.warning("[%s] collection failed: %s",device.id,exc)
+        raw=old.to_dict() if old else {"id":device.id,"hostname":device.hostname,"friendly_name":device.friendly_name,
+            "address":device.address,"roles":list(device.roles),"tags":list(device.tags),"collection_method":device.collection_method,
+            "ssh_user":device.ssh_user,"ssh_port":device.ssh_port,"monitored_services":list(device.monitored_services),
+            "critical_services":list(device.critical_services),"manageable_services":list(device.manageable_services),
+            "allowed_actions":list(device.allowed_actions),
+            "notes":device.notes,"cockpit_url":device.cockpit_url,"maintenance":device.maintenance}
+        raw.update(last_collection_attempt=attempted,error=str(exc),collector_status={"transport":{"status":"error","error":str(exc)}})
+        health,reasons,stale=evaluate(raw,device.thresholds)
+        collected = raw.get("last_successful_collection") or raw.get("last_seen")
+        raw.update(health=health,health_reasons=reasons,stale=stale,
+                   online=bool(collected) and health != "offline")
+        result=DeviceState.from_dict(raw); self.snapshots[device.id]=result; return result
 
     def collect(self) -> List[DeviceState]:
         with ThreadPoolExecutor(max_workers=self.max_workers,thread_name_prefix="fleet-device") as pool:
             futures={pool.submit(self.collect_device,d):d for d in self.devices}
-            return [future.result() for future in as_completed(futures)]
+            results=[]
+            for future in as_completed(futures):
+                device=futures[future]
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    # collect_device() already handles expected transport
+                    # failures gracefully; reaching here means something
+                    # unexpected went wrong in one device's collection. It
+                    # must not silently drop that device from the fleet
+                    # (state.publish(replace=True) deletes devices missing
+                    # from this result) or abort every other device's
+                    # result for the cycle.
+                    results.append(self._failure_result(
+                        device,self.snapshots.get(device.id),
+                        datetime.now(timezone.utc).isoformat(),exc))
+            return results
 
 
 def parse_network(data: Dict[str,str]) -> Dict[str,Any]:
