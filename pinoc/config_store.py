@@ -129,6 +129,18 @@ def validate_anomaly_detection(value):
             if setting is not None and (isinstance(setting,bool) or not isinstance(setting,(int,float)) or not 0<=setting<=100):
                 raise ValueError(f"anomaly_detection.metrics.{name}.{zname} must be a number between 0 and 100")
 
+def validate_alert_correlation(value):
+    section=value.get("alert_correlation")
+    if section is None:return
+    if not isinstance(section,dict):raise ValueError("alert_correlation must be an object")
+    if "enabled" in section and not isinstance(section.get("enabled"),bool):raise ValueError("alert_correlation.enabled must be a boolean")
+    window=section.get("window_seconds")
+    if window is not None and (isinstance(window,bool) or not isinstance(window,(int,float)) or not 30<=window<=3600):
+        raise ValueError("alert_correlation.window_seconds must be a number between 30 and 3600")
+    minimum=section.get("min_members")
+    if minimum is not None and (isinstance(minimum,bool) or not isinstance(minimum,int) or not 2<=minimum<=100):
+        raise ValueError("alert_correlation.min_members must be an integer between 2 and 100")
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
@@ -141,6 +153,7 @@ def validate_config(value,base_dir=Path(".")):
     validate_playbooks(value.get("playbooks"))
     validate_notifications(value)
     validate_anomaly_detection(value)
+    validate_alert_correlation(value)
     _,errors=load_devices(value,Path(base_dir))
     if errors:raise ValueError("; ".join(errors))
     return value

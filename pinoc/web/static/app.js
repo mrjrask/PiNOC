@@ -51,9 +51,25 @@ const table=(headers,rows)=>`<div class="table-wrap"><table><thead><tr>${headers
 // Mirrors the safe-action registry confirmation levels: simple actions queue on click,
 // strong actions (reboot, shutdown, service stop, disk rescues) require confirmation first.
 const runbookGate=(action,deviceId,resource)=>action==='device.reboot'?{type:'confirm',text:`Reboot ${deviceId}?`}:action==='device.shutdown'?{type:'prompt',match:deviceId,text:`Type ${deviceId} to confirm shutdown`}:action==='service.stop'?{type:'prompt',match:resource,text:`Type ${resource} to confirm stopping it on ${deviceId}`}:action==='apt.clean'?{type:'confirm',text:`Clean the apt cache on ${deviceId}?`}:action==='apt.autoremove'?{type:'confirm',text:`Preview package autoremove on ${deviceId}? (no changes are made)`}:action==='logs.truncate'?{type:'prompt',match:'truncate',text:`Type \u0022truncate\u0022 to confirm truncating logs on ${deviceId}`}:action==='journal.vacuum'?{type:'prompt',match:'vacuum',text:`Type \u0022vacuum\u0022 to confirm a journal vacuum on ${deviceId}`}:action==='cache.drop'?{type:'prompt',match:'drop',text:`Type \u0022drop\u0022 to confirm dropping page caches on ${deviceId}`}:null;
+// One card per shared-cause cluster (same trigger class + Wi-Fi SSID, gateway,
+// or IP subnet) instead of a row per member -- see pinoc/correlation.py.
+async function loadClusters(){
+  let root=document.querySelector('#alert-clusters');if(!root)return;
+  let response=await fetch('/api/alert-clusters');if(!response.ok){root.innerHTML='';return}
+  let [cd,dd]=await Promise.all([response.json(),fetch('/api/devices').then(r=>r.json()).catch(()=>({}))]);
+  let names=Object.fromEntries((dd.devices||[]).map(d=>[d.id,d.friendly_name||d.hostname||d.id]));
+  let clusters=cd.clusters||[];
+  if(!clusters.length){root.innerHTML='';return}
+  root.innerHTML=clusters.map(c=>{
+    let members=c.members||[];
+    let rows=members.map(m=>`<tr class="severity-${esc(m.severity)}"><td><a href="/devices/${encodeURIComponent(m.device_id)}">${esc(names[m.device_id]||m.device_id)}</a></td><td>${esc(m.alert_type)}</td><td>${esc(m.message)}</td><td>${m.resolved_at?'resolved':'active'}</td></tr>`);
+    return `<section class="panel cluster-card sev-${esc(c.severity)}"><div class="cluster-head"><span class="dot ${esc(c.severity)}"></span><div><h3>${esc(c.context_label)}</h3><p class="muted">${c.open_member_count} of ${c.member_count} device${c.member_count===1?'':'s'} affected · ${esc(c.trigger_class)} correlation · opened ${localTime(c.opened_at)}${c.resolved_at?` · resolved ${localTime(c.resolved_at)}`:''}</p></div></div><details><summary>${members.length} member device${members.length===1?'':'s'} (expand)</summary>${table(['Device','Type','Message','State'],rows)}</details></section>`;
+  }).join('');
+}
 async function alerts(){
   let state='active',filters=['active','acknowledged','muted','resolved','all'],root=document.querySelector('#alerts-table'),runbookPanel=document.querySelector('#alert-runbook'),lastAlerts=[];
   document.querySelector('#alert-filters').innerHTML=filters.map(x=>`<button class="filter ${x==='active'?'selected':''}" data-state="${x}">${x}</button>`).join('');
+  loadClusters();
   const actionUrl=(a,action,target)=>{const id=encodeURIComponent(a.device_id||'');if(action==='device.refresh')return `/api/devices/${id}/refresh`;if(action==='device.reboot')return `/api/devices/${id}/reboot`;if(action==='device.shutdown')return `/api/devices/${id}/shutdown`;if(action.startsWith('service.'))return target?`/api/devices/${id}/services/${encodeURIComponent(target)}/${action.split('.')[1]}`:null;return `/api/devices/${id}/actions/${action.replace('.','-')}`};
   function showRunbook(a){
     const pb=a.playbook,panel=runbookPanel;
@@ -258,4 +274,13 @@ async function anomalies(){
     previewsRoot.innerHTML=rows.length?table(['Time','Device','Metric','Value','Baseline mean','Z-score'],rows):`<p class="muted">${empty}</p>`;
   }
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,anomalies,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
+async function correlationStatus(){
+  const root=document.querySelector('#correlation-status');if(!root)return;
+  let data={};
+  try{data=await(await fetch('/api/alert-clusters')).json()}catch(error){}
+  const s=data.status||{};
+  if(!s.enabled){root.innerHTML='Alert correlation is <strong>off</strong> (<code>alert_correlation.enabled: false</code>).';return}
+  const open=(data.clusters||[]).length;
+  root.innerHTML=`<strong>On</strong> · groups within ${s.window_seconds}s of each other · needs ${s.min_members}+ devices to form a cluster · ${open} open cluster${open===1?'':'s'} right now`;
+}
+return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,anomalies,correlationStatus,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();

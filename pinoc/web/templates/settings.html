@@ -26,10 +26,13 @@
 <span id="schedule-message" class="muted" role="status"></span>
 </form>
 </section>
+<section class="panel"><h2>Alert correlation</h2><p class="muted">Groups open alerts that share a trigger class and network context (same Wi-Fi SSID, gateway, or IP subnet) within a rolling window into one explainable cluster card on <a href="/alerts">Alerts</a>, and batches their notifications. Grouping only — no alert is ever merged or suppressed. Enabled by default; override with the <code>alert_correlation</code> section in config.json (restart required).</p>
+<div id="correlation-status" class="muted">Loading alert correlation status…</div>
+</section>
 <section class="panel"><h2>Anomaly detection</h2><p class="muted">Statistical baselines (EWMA with hour-of-day seasonality) flag unusual-but-not-threshold values — slow memory growth, off-pattern traffic spikes, and the like. Disabled by default; add the <code>anomaly_detection</code> section to config.json (restart required). In preview mode (the default) deviations are recorded below without opening alerts, so you can judge the noise level before enabling real anomaly alerts.</p>
 <div id="anomalies-status" class="muted">Loading anomaly detection status…</div>
 <div id="anomalies-previews" class="muted">Loading recent deviations…</div>
 </section>
 <section class="panel"><p>Use the validated settings API or local configuration CLI. Changes currently require restart and are saved atomically with bounded backups.</p></section>
 {% endblock %}
-{% block scripts %}<script>PiNOC.settings();PiNOC.schedules();PiNOC.anomalies();</script>{% endblock %}
+{% block scripts %}<script>PiNOC.settings();PiNOC.schedules();PiNOC.anomalies();PiNOC.correlationStatus();</script>{% endblock %}

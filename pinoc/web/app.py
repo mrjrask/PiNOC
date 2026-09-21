@@ -1,7 +1,7 @@
 """Flask application backed exclusively by the shared state cache."""
 from __future__ import annotations
 
-import csv, io, logging, os, secrets, shutil, time
+import csv, io, json, logging, os, secrets, shutil, time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -19,6 +19,7 @@ from pinoc.development import DevelopmentGateway, DevError, PROTOCOL_VERSION
 from pinoc.config_store import atomic_save, validate_config
 from pinoc.playbooks import load_playbooks, match as match_playbook
 from pinoc.history import storage_forecast
+from pinoc.correlation import describe_context
 
 PROMETHEUS_HEALTH = {"healthy": 0, "maintenance": 0, "warning": 1, "degraded": 2, "critical": 3, "offline": 4}
 
@@ -261,7 +262,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         "api_notifications":"config.write","api_notifications_test":"config.write",
         "api_device_integrations":"view","api_device_integration":"view","api_adsb":"view","api_displays":"view",
         "api_deployments":"view","api_software":"view","api_network_inventory":"view","api_services":"view",
-        "api_alerts":"alerts.read","api_alert":"alerts.read",
+        "api_alerts":"alerts.read","api_alert":"alerts.read","api_alert_clusters":"alerts.read",
         "api_events":"history.read","device_events":"history.read","metrics":"history.read","forecast":"history.read","device_logs":"history.read",
         "action_list":"actions.execute","action_result":"actions.execute","api_audit":"config.write","database_status":"config.write",
         "api_schedules":"config.write","api_anomalies":"history.read",
@@ -763,6 +764,23 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         rows=history.db.rows("SELECT * FROM alerts WHERE alert_id=?",(alert_id,)) if history else []
         if not rows:return jsonify({"error":"alert not found"}),404
         return jsonify({**rows[0],"playbook":match_playbook(playbooks,rows[0].get("alert_type"))})
+
+    @app.get("/api/alert-clusters")
+    def api_alert_clusters():
+        if not history:return jsonify({"clusters":[],"status":{"enabled":False}})
+        status={"enabled":history.correlation.enabled,"window_seconds":history.correlation.window_seconds,"min_members":history.correlation.min_members}
+        include_resolved=request.args.get("state")=="all"
+        where="" if include_resolved else "WHERE resolved_at IS NULL"
+        clusters=history.db.rows(f"SELECT * FROM alert_clusters {where} ORDER BY CASE severity WHEN 'critical' THEN 3 WHEN 'degraded' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END DESC, opened_at DESC")
+        result=[]
+        for cluster in clusters:
+            members=history.db.rows("SELECT * FROM alerts WHERE cluster_id=? ORDER BY severity DESC, opened_at",(cluster["cluster_id"],))
+            try:label=json.loads(cluster.get("context_json") or "{}").get("label")
+            except (TypeError,ValueError):label=None
+            result.append({**cluster,"context_label":describe_context(cluster["context_key"],cluster["context_value"],label),
+                           "members":members,"member_count":len(members),
+                           "open_member_count":sum(1 for m in members if not m.get("resolved_at"))})
+        return jsonify({"clusters":result,"status":status})
 
     @app.get("/api/playbooks")
     def api_playbooks():

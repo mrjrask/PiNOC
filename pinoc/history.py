@@ -4,15 +4,17 @@ import json, logging, queue, threading, time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from .anomalies import BaselineTracker
+from .correlation import CorrelationEngine, describe_context
 from .database import Database, utcnow
 
 LOG=logging.getLogger("pinoc.history"); UTC=timezone.utc
 SEVERITY_RANK={"info":0,"warning":1,"degraded":2,"critical":3}
 
 class HistoryManager:
-    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None,notifier:Any=None,anomalies:Optional[Dict[str,Any]]=None):
+    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None,notifier:Any=None,anomalies:Optional[Dict[str,Any]]=None,correlation:Optional[Dict[str,Any]]=None):
         self.db=db; self.config=config or {}; self.enabled=bool(self.config.get("enabled",True)); self.notifier=notifier
         self.anomaly=BaselineTracker(db,anomalies)
+        self.correlation=CorrelationEngine(db,correlation)
         self.queue:queue.Queue=queue.Queue(maxsize=int(self.config.get("queue_size",1000)))
         self.stop_event=threading.Event(); self.thread=threading.Thread(target=self._run,name="pinoc-history",daemon=True)
         self.previous={}; self.last_sample={}; self.cpu_since={}; self.dropped=0
@@ -82,7 +84,10 @@ class HistoryManager:
             if (old.get("boot_time") and d.get("boot_time") and old["boot_time"]!=d["boot_time"] and d.get("uptime_seconds",0)<old.get("uptime_seconds",0)):
                 self._write_event(did,"device_rebooted","info","Device reboot detected",{"boot_time":d.get("boot_time")},stamp)
             self._service_transitions(did,old,d,stamp); self._hardware_events(did,old,d,stamp)
-        self._sample(d,stamp); self._alerts(d,stamp); self.previous[did]=d
+        self._sample(d,stamp)
+        opened,resolved=self._alerts(d,stamp)
+        self.previous[did]=d
+        self._correlate(opened,resolved,stamp)
 
     def _due(self,did,kind,stamp):
         now=datetime.fromisoformat(stamp); key=(did,kind); last=self.last_sample.get(key)
@@ -131,7 +136,7 @@ class HistoryManager:
         did=d["id"]; active={}; c,m,h=d.get("cpu",{}),d.get("memory",{}),d.get("hardware",{}); t={"temperature_warning":70,"temperature_critical":80,"temperature_hysteresis":3,"cpu_warning":90,"cpu_duration_seconds":300,"memory_warning":85,"disk_warning":80,"disk_critical":95,"disk_hysteresis":2,**self.config.get("thresholds",{})}
         # Preserve conditions/history during maintenance without opening,
         # resolving, or notifying on transient maintenance observations.
-        if d.get("maintenance"):return
+        if d.get("maintenance"):return [],[]
         open_types={x["alert_type"] for x in self.db.rows("SELECT alert_type FROM alerts WHERE device_id=? AND resolved_at IS NULL",(did,))}
         if not d.get("online") and not d.get("expected_offline"):active["device_offline"]=("critical","Device is offline","")
         temp=c.get("temperature_c")
@@ -185,11 +190,11 @@ class HistoryManager:
                 (did,f"{prefix}%")) if row["fingerprint"].startswith(prefix)}
             for a in self.anomaly.observe(d,stamp,open_metrics):
                 active[f"anomaly:{a['metric']}"]=(a["severity"],a["message"],a["metric"])
-        self._reconcile(d,did,active,stamp,preserve)
+        return self._reconcile(d,did,active,stamp,preserve)
     def _reconcile(self,d,did,active,stamp,preserve=None):
         preserve=preserve or set()
         existing={x["fingerprint"]:x for x in self.db.rows("SELECT * FROM alerts WHERE device_id=? AND resolved_at IS NULL",(did,))}
-        seen=set()
+        seen=set(); opened=[]; resolved=[]
         for key,(sev,msg,resource) in active.items():
             typ=key.split(":",1)[0]; fp=f"{did}:{typ}:{resource}";seen.add(fp)
             if fp in existing:
@@ -200,17 +205,56 @@ class HistoryManager:
                 if mute_expired:self.db.execute("UPDATE alerts SET last_seen_at=?,severity=?,message=?,muted_until=NULL,state=? WHERE alert_id=?",(stamp,sev,msg,state,row["alert_id"]))
                 else:self.db.execute("UPDATE alerts SET last_seen_at=?,severity=?,message=? WHERE alert_id=?",(stamp,sev,msg,row["alert_id"]))
             else:
-                self.db.execute("INSERT INTO alerts(device_id,alert_type,severity,message,fingerprint,opened_at,last_seen_at,state,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)",(did,typ,sev,msg,fp,stamp,stamp,"active",json.dumps({"resource":resource})))
-                self._notify(d,did,"open",{"device_id":did,"alert_type":typ,"severity":sev,"message":msg})
+                alert_id=self.db.execute("INSERT INTO alerts(device_id,alert_type,severity,message,fingerprint,opened_at,last_seen_at,state,metadata_json) VALUES(?,?,?,?,?,?,?,?,?)",(did,typ,sev,msg,fp,stamp,stamp,"active",json.dumps({"resource":resource})))
+                opened.append({"alert_id":alert_id,"device_id":did,"alert_type":typ,"severity":sev,"message":msg})
         for fp,row in existing.items():
             if fp not in seen and fp not in preserve:
                 self.db.execute("UPDATE alerts SET resolved_at=?,state='resolved' WHERE alert_id=?",(stamp,row["alert_id"]));self._write_event(did,"alert_resolved","info",f"Recovered: {row['message']}",{"alert_id":row["alert_id"]},stamp)
-                self._notify(d,did,"resolve",row)
+                resolved.append(row)
+        return opened,resolved
+    def _correlate(self,opened,resolved,stamp):
+        outcome=None
+        if self.correlation.enabled and (opened or resolved):
+            try:outcome=self.correlation.reconcile({a["alert_id"] for a in opened},resolved,self.previous,stamp)
+            except Exception as exc:LOG.warning("alert correlation failed; falling back to per-alert notifications: %s",exc)
+        absorbed_open=outcome.absorbed_open if outcome else set()
+        absorbed_resolve=outcome.absorbed_resolve if outcome else set()
+        for alert in opened:
+            if alert["alert_id"] not in absorbed_open:
+                self._notify(self.previous.get(alert["device_id"],{}),alert["device_id"],"open",alert)
+        for row in resolved:
+            if row["alert_id"] not in absorbed_resolve:
+                self._notify(self.previous.get(row["device_id"],{}),row["device_id"],"resolve",row)
+        if outcome:
+            for event in outcome.events:self._notify_cluster(event)
     def _notify(self,d,did,transition,row):
         if self.notifier is None:return
         name=d.get("friendly_name") or d.get("hostname") or did
         try:self.notifier.enqueue(transition,row,name)
         except Exception as exc:LOG.warning("notification enqueue failed: %s",exc)
+    def _notify_cluster(self,event):
+        if self.notifier is None:return
+        transition=event.get("type")
+        if transition not in ("open","resolve"):return
+        cluster=event["cluster"]
+        members=self.db.rows("SELECT device_id FROM alerts WHERE cluster_id=?",(cluster["cluster_id"],))
+        names=[]
+        for member in members:
+            info=self.previous.get(member["device_id"],{})
+            names.append(info.get("friendly_name") or info.get("hostname") or member["device_id"])
+        try:label=json.loads(cluster.get("context_json") or "{}").get("label")
+        except (TypeError,ValueError):label=None
+        context=describe_context(cluster["context_key"],cluster["context_value"],label)
+        if transition=="open":
+            shown=", ".join(names[:6])+(f" +{len(names)-6} more" if len(names)>6 else "")
+            message=f"{len(names)} devices share {context}: {shown}"
+        else:
+            message=f"Cluster recovered ({len(names)} devices) — {context}"
+        synthetic={"device_id":None,"alert_type":f"cluster_{cluster['trigger_class']}","severity":cluster["severity"],"message":message}
+        try:self.notifier.enqueue(transition,synthetic,f"{cluster['trigger_class'].title()} cluster · {context}")
+        except Exception as exc:LOG.warning("cluster notification enqueue failed: %s",exc);return
+        flag="notified_open" if transition=="open" else "notified_resolved"
+        self.db.execute(f"UPDATE alert_clusters SET {flag}=1 WHERE cluster_id=?",(cluster["cluster_id"],))
     def _write_event(self,did,typ,sev,msg,metadata,stamp):self.db.execute("INSERT INTO events(timestamp,device_id,event_type,severity,message,metadata_json) VALUES(?,?,?,?,?,?)",(stamp,did,typ,sev,msg,json.dumps(metadata)))
     def _refresh_cache(self):
         if self.state:
