@@ -16,6 +16,7 @@ import logging
 import queue
 import smtplib
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote
@@ -106,19 +107,30 @@ class NotificationService:
 
     # -- worker ----------------------------------------------------------
     def _run(self) -> None:
-        while not self.stop_event.is_set() or not self.queue.empty():
-            try:
-                message = self.queue.get(timeout=0.25)
-            except queue.Empty:
-                continue
-            try:
-                for channel in self._channels:
-                    if not channel.get("enabled", True):
-                        continue
-                    ok, error = self._send(channel, message)
-                    self._record(channel, message, ok, error)
-            finally:
-                self.queue.task_done()
+        # Sending to every channel sequentially means one slow/unreachable
+        # channel (up to its full `timeout`) delays every other channel for
+        # this message, and every subsequent queued message, behind it --
+        # exactly the kind of burst this feature exists to alert on can push
+        # throughput down to ~1 message per timeout*channel_count seconds.
+        # Fan sends for a message out across channels concurrently instead;
+        # one message's total delivery time is then bounded by the slowest
+        # single channel, not their sum, and a stuck channel no longer
+        # blocks channels or messages behind it.
+        with ThreadPoolExecutor(max_workers=max(1, len(self._channels)),
+                                thread_name_prefix="pinoc-notify-send") as executor:
+            while not self.stop_event.is_set() or not self.queue.empty():
+                try:
+                    message = self.queue.get(timeout=0.25)
+                except queue.Empty:
+                    continue
+                try:
+                    channels = [channel for channel in self._channels if channel.get("enabled", True)]
+                    futures = [executor.submit(self._send, channel, message) for channel in channels]
+                    for channel, future in zip(channels, futures):
+                        ok, error = future.result()
+                        self._record(channel, message, ok, error)
+                finally:
+                    self.queue.task_done()
 
     def _send(self, channel: Dict[str, Any], message: Dict[str, Any]) -> "tuple[bool, Optional[str]]":
         try:

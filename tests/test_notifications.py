@@ -132,8 +132,10 @@ class DeliveryTest(ChannelServer, unittest.TestCase):
         finally:
             service.stop()
         self.assertEqual(len(RecordingHandler.records), 2)
-        ntfy, webhook = RecordingHandler.records
-        self.assertEqual(ntfy["path"], "/pinoc%20ops")
+        # Channels are now sent to concurrently, so the two requests can
+        # arrive in either order -- match by path instead of position.
+        by_path = {record["path"]: record for record in RecordingHandler.records}
+        ntfy, webhook = by_path["/pinoc%20ops"], by_path["/hook"]
         # Headers are latin-1: the em dash degrades, the body keeps full UTF-8.
         self.assertEqual(ntfy["headers"].get("X-Title"), "PiNOC open: Pi One ? high_memory")
         self.assertEqual(ntfy["body"], "Pi One: Memory utilization is 90.0%")
@@ -159,6 +161,37 @@ class DeliveryTest(ChannelServer, unittest.TestCase):
         finally:
             service.stop()
         self.assertEqual(RecordingHandler.records[0]["headers"].get("X-Priority"), "high")
+
+
+class ConcurrentFanOutTest(unittest.TestCase):
+    def test_a_slow_channel_does_not_delay_delivery_to_other_channels(self):
+        # Sequential per-channel sends previously meant a slow/unreachable
+        # channel's full latency was paid before the next channel (or the
+        # next queued message) was even attempted.
+        release_slow = threading.Event()
+        started = {"slow": threading.Event(), "fast": threading.Event()}
+
+        def sender(kind, channel, message):
+            started[channel["id"]].set()
+            if channel["id"] == "slow":
+                release_slow.wait(5)
+            return True, None
+
+        service = NotificationService(
+            {"enabled": True, "channels": [{"id": "slow", "kind": "ntfy"}, {"id": "fast", "kind": "ntfy"}]},
+            sender=sender)
+        service.enqueue("open", {"device_id": "pi", "alert_type": "x", "severity": "info", "message": "x"}, "Pi")
+        service.start()
+        try:
+            self.assertTrue(started["slow"].wait(5))
+            # The fast channel must start (and, since sender() is
+            # synchronous, finish) while the slow channel is still blocked
+            # -- proving the two sends ran concurrently, not one after the
+            # other.
+            self.assertTrue(started["fast"].wait(5))
+        finally:
+            release_slow.set()
+            service.stop()
 
 
 class SmtpSendTest(unittest.TestCase):
