@@ -191,6 +191,20 @@ class Snapshot:
 # Configuration and command helpers
 # ---------------------------------------------------------------------------
 
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge override into base, recursing into nested dicts on both sides
+    instead of replacing a whole section wholesale. A config.json that only
+    overrides one sub-key of e.g. "polling" or "remote_temp_monitor" must
+    still keep every other sub-key's default, not lose the section entirely."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config() -> Dict[str, Any]:
     if not CONFIG_FILE.exists():
         CONFIG_FILE.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n")
@@ -201,9 +215,7 @@ def load_config() -> Dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Unable to read {CONFIG_FILE}: {exc}") from exc
 
-    config = dict(DEFAULT_CONFIG)
-    config.update(user_config)
-    return config
+    return _deep_merge(DEFAULT_CONFIG, user_config)
 
 
 CONFIG = load_config()
