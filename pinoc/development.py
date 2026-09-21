@@ -77,7 +77,14 @@ class DevelopmentGateway:
         version=str(body.get("agent_version",""))[:32];protocol=int(body.get("protocol_version",0));hostname=str(body.get("hostname",""))[:255]
         if not version or protocol!=PROTOCOL_VERSION:raise DevError("agent protocol incompatible","protocol_incompatible",409)
         agent_id=str(uuid.uuid4());credential=secrets.token_urlsafe(48);stamp=utcnow()
-        self.db.execute("INSERT INTO agents(agent_id,device_id,credential_hash,hostname,model,architecture,agent_version,protocol_version,status,capabilities_json,hardware_json,candidates_json,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(agent_id,row["device_id"],self._encrypt_credential(credential),hostname,str(body.get("model",""))[:255],str(body.get("architecture",""))[:64],version,protocol,"connected",json.dumps(redact(body.get("capabilities",{}))),json.dumps(redact(body.get("hardware",{}))),json.dumps([]),stamp,stamp))
+        # device_id is UNIQUE, so re-enrolling a device that already has an
+        # agent row (a legitimate, admin-authorized flow -- only an
+        # administrator can mint an enrollment code for a given device_id)
+        # must replace that row rather than raise an IntegrityError.
+        self.db.execute(
+            "INSERT INTO agents(agent_id,device_id,credential_hash,hostname,model,architecture,agent_version,protocol_version,status,capabilities_json,hardware_json,candidates_json,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(device_id) DO UPDATE SET agent_id=excluded.agent_id,credential_hash=excluded.credential_hash,hostname=excluded.hostname,model=excluded.model,architecture=excluded.architecture,agent_version=excluded.agent_version,protocol_version=excluded.protocol_version,status=excluded.status,enabled=1,credential_revoked=0,capabilities_json=excluded.capabilities_json,hardware_json=excluded.hardware_json,candidates_json=excluded.candidates_json,created_at=excluded.created_at,last_seen=excluded.last_seen,credential_rotated_at=NULL",
+            (agent_id,row["device_id"],self._encrypt_credential(credential),hostname,str(body.get("model",""))[:255],str(body.get("architecture",""))[:64],version,protocol,"connected",json.dumps(redact(body.get("capabilities",{}))),json.dumps(redact(body.get("hardware",{}))),json.dumps([]),stamp,stamp))
         self.db.execute("UPDATE agent_enrollment_codes SET used_at=? WHERE code_id=?",(stamp,code_id));return {"agent_id":agent_id,"device_id":row["device_id"],"credential":credential,"protocol_version":PROTOCOL_VERSION}
     def rotate(self,agent_id):
         if not self.agent(agent_id):raise DevError("agent not found","agent_not_found",404)
