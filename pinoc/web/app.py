@@ -209,16 +209,26 @@ def fleet_aggregates(devices: List[Dict[str, Any]], history: Any = None) -> Dict
     # Fleet storage growth: the shortest forecast across the highest-use mounts.
     days: List[float] = []
     statuses: List[str] = []
-    for device_id, mount, used in sorted(mounts, key=lambda item: -item[2])[:12]:
-        if not mount:
-            continue
-        rows = history.db.rows(
-            "SELECT timestamp, used_bytes, total_bytes FROM storage_metrics WHERE device_id=? AND mount_point=? AND timestamp>=? ORDER BY timestamp",
-            (device_id, mount, (now - timedelta(days=30)).isoformat()))
-        forecast = storage_forecast(rows)
-        statuses.append(forecast["status"])
-        if forecast.get("estimated_days_remaining") is not None:
-            days.append(forecast["estimated_days_remaining"])
+    top_mounts = [(device_id, mount) for device_id, mount, _used in sorted(mounts, key=lambda item: -item[2])[:12] if mount]
+    if top_mounts:
+        # One query for every mount's 30-day history instead of one query
+        # per mount (up to 12 round-trips) -- fetch all of the involved
+        # devices' storage_metrics rows in this window at once, then group
+        # by (device_id, mount_point) in Python before forecasting each.
+        device_ids = sorted({device_id for device_id, _mount in top_mounts})
+        placeholders = ",".join("?" * len(device_ids))
+        window_start = (now - timedelta(days=30)).isoformat()
+        rows_by_pair: Dict[tuple, List[Dict[str, Any]]] = {}
+        for row in history.db.rows(
+                f"SELECT device_id,mount_point,timestamp,used_bytes,total_bytes FROM storage_metrics "
+                f"WHERE device_id IN ({placeholders}) AND timestamp>=? ORDER BY device_id,mount_point,timestamp",
+                (*device_ids, window_start)):
+            rows_by_pair.setdefault((row["device_id"], row["mount_point"]), []).append(row)
+        for device_id, mount in top_mounts:
+            forecast = storage_forecast(rows_by_pair.get((device_id, mount), []))
+            statuses.append(forecast["status"])
+            if forecast.get("estimated_days_remaining") is not None:
+                days.append(forecast["estimated_days_remaining"])
     if days:
         status = "growing"
     elif "stable" in statuses:
@@ -783,9 +793,18 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         include_resolved=request.args.get("state")=="all"
         where="" if include_resolved else "WHERE resolved_at IS NULL"
         clusters=history.db.rows(f"SELECT * FROM alert_clusters {where} ORDER BY CASE severity WHEN 'critical' THEN 3 WHEN 'degraded' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END DESC, opened_at DESC")
+        # One query for every cluster's members instead of one per cluster
+        # (N+1): a fleet-wide outage -- the exact scenario alert_clusters
+        # targets -- can return many simultaneous clusters.
+        cluster_ids=[c["cluster_id"] for c in clusters]
+        members_by_cluster:Dict[int,List[Dict[str,Any]]]={cid:[] for cid in cluster_ids}
+        if cluster_ids:
+            placeholders=",".join("?"*len(cluster_ids))
+            for alert in history.db.rows(f"SELECT * FROM alerts WHERE cluster_id IN ({placeholders}) ORDER BY severity DESC, opened_at",cluster_ids):
+                members_by_cluster.setdefault(alert["cluster_id"],[]).append(alert)
         result=[]
         for cluster in clusters:
-            members=history.db.rows("SELECT * FROM alerts WHERE cluster_id=? ORDER BY severity DESC, opened_at",(cluster["cluster_id"],))
+            members=members_by_cluster.get(cluster["cluster_id"],[])
             try:label=json.loads(cluster.get("context_json") or "{}").get("label")
             except (TypeError,ValueError):label=None
             result.append({**cluster,"context_label":describe_context(cluster["context_key"],cluster["context_value"],label),
@@ -924,11 +943,18 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         except ValueError:samples=20
         unit=(request.args.get("unit") or "").strip()[:128]
         if not unit:
-            units=[]
-            for row in history.db.rows("SELECT unit,MAX(timestamp) AS last_timestamp FROM service_logs WHERE device_id=? GROUP BY unit ORDER BY last_timestamp DESC,unit LIMIT 50",(device_id,)):
-                latest=history.db.rows("SELECT lines FROM service_logs WHERE device_id=? AND unit=? ORDER BY timestamp DESC,id DESC LIMIT 1",(device_id,row["unit"]))
-                line_count=len(latest[0]["lines"].splitlines()) if latest else 0
-                units.append({"unit":row["unit"],"last_timestamp":row["last_timestamp"],"line_count":line_count})
+            # One query for every unit's latest sample (via a window
+            # function to pick the latest row per unit) instead of one
+            # extra round-trip per unit (N+1) just to compute a line count.
+            # This runs on every device-page load and every Refresh click.
+            latest_per_unit=history.db.rows(
+                "SELECT unit,timestamp AS last_timestamp,lines FROM ("
+                "SELECT unit,timestamp,lines,"
+                "ROW_NUMBER() OVER (PARTITION BY unit ORDER BY timestamp DESC,id DESC) AS rn "
+                "FROM service_logs WHERE device_id=?) WHERE rn=1 "
+                "ORDER BY last_timestamp DESC,unit LIMIT 50",(device_id,))
+            units=[{"unit":row["unit"],"last_timestamp":row["last_timestamp"],
+                   "line_count":len(row["lines"].splitlines())} for row in latest_per_unit]
             return jsonify({"device_id":device_id,"unit":None,"units":units})
         # Log lines were redacted when stored; redact again on the read path
         # so previously persisted samples stay safe if the rules ever tighten.

@@ -200,6 +200,44 @@ class ApiTest(unittest.TestCase):
         empty = self.client.get("/api/alert-clusters?state=all").get_json()
         self.assertGreaterEqual(len(empty["clusters"]), 1)
 
+    def test_alert_clusters_endpoint_fetches_members_in_one_query(self):
+        # api_alert_clusters() previously issued one "SELECT ... FROM
+        # alerts WHERE cluster_id=?" per cluster (N+1) -- with several
+        # simultaneous clusters (a fleet-wide outage, the exact scenario
+        # this feature targets), it should fetch every cluster's members
+        # in a single query instead.
+        now = datetime.now(UTC)
+
+        def device(device_id, ssid, gateway, online):
+            return {"id": device_id, "hostname": device_id, "friendly_name": device_id.title(),
+                    "online": online, "maintenance": False,
+                    "cpu": {"utilization_percent": 10.0, "temperature_c": 45.0}, "memory": {"percent": 30.0},
+                    "storage": [], "media": [], "services": [], "integrations": {}, "hardware": {},
+                    "uptime_seconds": 3600, "network": {"ssid": ssid, "default_gateway": gateway, "ip": f"{gateway[:-1]}10"}}
+
+        groups = [("a1", "a2", "NetA", "192.168.1.1"), ("b1", "b2", "NetB", "192.168.2.1"),
+                 ("c1", "c2", "NetC", "192.168.3.1")]
+        for x, y, ssid, gw in groups:
+            self.history._device(device(x, ssid, gw, True), now.isoformat())
+            self.history._device(device(y, ssid, gw, True), now.isoformat())
+        for offset, (x, y, ssid, gw) in enumerate(groups):
+            self.history._device(device(x, ssid, gw, False), (now + timedelta(seconds=10 + offset)).isoformat())
+            self.history._device(device(y, ssid, gw, False), (now + timedelta(seconds=20 + offset)).isoformat())
+
+        queries = []
+        real_rows = self.db.rows
+        def counting_rows(sql, params=()):
+            if "FROM alerts" in sql and "cluster_id" in sql:
+                queries.append(sql)
+            return real_rows(sql, params)
+        self.db.rows = counting_rows
+        try:
+            body = self.client.get("/api/alert-clusters").get_json()
+        finally:
+            self.db.rows = real_rows
+        self.assertEqual(len(body["clusters"]), 3)
+        self.assertEqual(len(queries), 1)
+
 
 class ConfigValidationTest(unittest.TestCase):
     def test_alert_correlation_section_is_validated(self):
