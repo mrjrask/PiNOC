@@ -244,8 +244,12 @@ class DevelopmentGateway:
         if status not in {"running","succeeded","failed","timed_out","cancelled"}:raise DevError("invalid job status")
         # A lost HTTP response causes the agent to retry the terminal payload.
         # Acknowledge an already committed result without storing its artifacts
-        # again (or allowing a retry to rewrite the terminal outcome).
-        if job["status"] in {"succeeded","failed","timed_out","cancelled"}:return job
+        # again (or allowing a retry to rewrite the terminal outcome). Every
+        # terminal status counts here, including the two the server assigns
+        # on its own (agent_lost on restart/staleness, rejected on approval
+        # denial) -- otherwise a late result from an agent that was actually
+        # still alive can resurrect a job already reported lost or rejected.
+        if job["status"] in {"succeeded","failed","timed_out","cancelled","agent_lost","rejected"}:return job
         if status=="running":self.db.execute("UPDATE development_jobs SET status='running',started_at=COALESCE(started_at,?) WHERE job_id=?",(utcnow(),job_id));return self.job(job_id)
         stdout=str(redact(body.get("stdout","")))[:self.output_limit];stderr=str(redact(body.get("stderr","")))[:self.output_limit];done=utcnow()
         for item in body.get("artifacts",[])[:self.artifact_count]:self._store_artifact(job_id,item,status)
