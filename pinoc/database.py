@@ -1,9 +1,10 @@
 """SQLite history store with ordered, transactional migrations."""
 from __future__ import annotations
 import json, logging, sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Iterator
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
@@ -83,10 +84,24 @@ class Database:
         if not readonly: con.execute("PRAGMA journal_mode=WAL"); con.execute("PRAGMA foreign_keys=ON")
         return con
 
+    @contextmanager
+    def _open(self, readonly: bool=False) -> Iterator[sqlite3.Connection]:
+        # sqlite3.Connection's own context-manager protocol only commits/
+        # rolls back the transaction; it never closes the connection, so a
+        # bare "with self.connect() as con:" leaks an OS-level handle per
+        # call. Wrap it so every execute()/rows()/initialize()/backup() call
+        # still gets commit-on-success/rollback-on-error *and* a guaranteed
+        # close.
+        con=self.connect(readonly)
+        try:
+            with con: yield con
+        finally:
+            con.close()
+
     def initialize(self) -> bool:
         try:
             self.path.parent.mkdir(parents=True,exist_ok=True)
-            with self.connect() as con:
+            with self._open() as con:
                 con.execute("CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL)")
                 row=con.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
                 version=int(row[0]) if row else 0
@@ -101,13 +116,13 @@ class Database:
             self.available=False; self.error=str(exc); LOG.exception("history database unavailable; live monitoring continues: %s",exc); return False
 
     def execute(self, sql: str, params: Iterable[Any]=()) -> int:
-        with self.connect() as con:
+        with self._open() as con:
             cur=con.execute(sql,tuple(params)); self.last_write=utcnow(); self.available=True; return int(cur.lastrowid or 0)
 
     def rows(self, sql: str, params: Iterable[Any]=()) -> list[Dict[str,Any]]:
         if not self.available: return []
         try:
-            with self.connect(True) as con: return [dict(x) for x in con.execute(sql,tuple(params)).fetchall()]
+            with self._open(True) as con: return [dict(x) for x in con.execute(sql,tuple(params)).fetchall()]
         except Exception as exc: self.error=str(exc); return []
 
     def status(self) -> Dict[str,Any]:
@@ -122,7 +137,10 @@ class Database:
         rows=self.rows(sql,params); return next(iter(rows[0].values())) if rows else None
 
     def backup(self,destination:str) -> None:
-        with self.connect(True) as source, sqlite3.connect(destination) as dest: source.backup(dest)
+        with self._open(True) as source:
+            dest=sqlite3.connect(destination)
+            try: source.backup(dest)
+            finally: dest.close()
 
 def main() -> int:
     import argparse, os
