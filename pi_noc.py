@@ -1437,6 +1437,18 @@ def main() -> None:
         "DEV_ARTIFACT_ROOT":str(APP_DIR/CONFIG.get("development_gateway",{}).get("artifact_root","data/jobs")),
         "PINOC_CONFIG":CONFIG,"CONFIG_PATH":str(APP_DIR/"config.json"),"APP_DIR":str(APP_DIR)}, history, coordinator, notifications, backups)
 
+    # The cron-style action scheduler rides the ActionDispatcher created above;
+    # it only fires schedules an administrator has created, so it is a no-op
+    # until one exists.  Wired after create_app because it needs that dispatcher.
+    from pinoc.schedules import ScheduleService
+    schedules = None
+    extensions = getattr(web_app, "extensions", {})
+    if extensions.get("pinoc_actions") is not None:
+        schedules = ScheduleService(history.db, extensions["pinoc_actions"],
+                                    state=state, notifier=notifications)
+        schedules.start()
+        extensions["pinoc_schedules"] = schedules
+
     previous_signal_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
     }
@@ -1457,6 +1469,8 @@ def main() -> None:
         try:
             coordinator.stop()
             backups.stop()
+            if schedules is not None:
+                schedules.stop()
             notifications.stop()
             history.stop()
         finally:

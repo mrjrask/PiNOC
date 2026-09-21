@@ -11,6 +11,21 @@
 <div id="backup-status" class="muted">Loading backup status…</div>
 <div class="toolbar" style="margin-top:.5rem"><button id="backup-download" class="primary">Download backup</button><button id="backup-run-now">Run backup now</button><span id="backup-message" class="muted" role="status"></span></div>
 </section>
+<section class="panel"><h2>Scheduled actions</h2><p class="muted">Run an allowlisted action on a cron schedule or as a one-shot. Firing is automatic; a schedule that fails repeatedly is auto-paused and raises a critical alert. Cron example <code>0 3 * * *</code> (03:00 daily), aliases <code>@daily</code> / <code>@weekly</code>, or <code>once:2026-10-01T03:00</code>.</p>
+<div id="schedules-status" class="muted">Loading schedule status…</div>
+<div id="schedules-list" class="muted">Loading schedules…</div>
+<form id="schedule-create">
+<div class="schedule-grid">
+<label>Device<select id="schedule-device" required></select></label>
+<label>Action<select id="schedule-action" required></select></label>
+<label>Cron / one-shot<input id="schedule-spec" placeholder="0 3 * * *  ·  @daily  ·  once:2026-10-01T03:00" required></label>
+<label>Target (optional)<input id="schedule-target" placeholder="foo.service · /var/log/syslog · size:100M"></label>
+<label>Timezone<input id="schedule-tz" value="UTC" placeholder="UTC"></label>
+</div>
+<button type="submit" class="primary">Add schedule</button>
+<span id="schedule-message" class="muted" role="status"></span>
+</form>
+</section>
 <section class="panel"><p>Use the validated settings API or local configuration CLI. Changes currently require restart and are saved atomically with bounded backups.</p></section>
 {% endblock %}
-{% block scripts %}<script>PiNOC.settings();</script>{% endblock %}
+{% block scripts %}<script>PiNOC.settings();PiNOC.schedules();</script>{% endblock %}

@@ -446,6 +446,55 @@ latency plus failure counts are sampled into `integration_metrics`.
 `integration_polling.probe_seconds` (default 30) is the base scheduler tick;
 individual checks still honor their own `interval_seconds`.
 
+## Scheduled actions (cron-style)
+
+Administrators can queue any action from the safe-action registry to run on a
+schedule: weekly service restarts, daily package checks, log truncation, and
+so on. Schedules live in the history database (`action_schedules`) and are
+managed in the **Scheduled actions** panel on the Settings page. A background
+thread ticks every 30 seconds, reconciles the outcomes of previously queued
+jobs, and dispatches any schedule whose next run has passed through the same
+action queue as manually requested actions — with the same registry checks,
+target approval, and audit trail. Scheduler dispatches are recorded as
+`scheduler`/administrator; a manual Run-now is recorded under the requesting
+operator.
+
+Firing specs accept three forms:
+
+- standard five-field cron — `minute hour day-of-month month day-of-week`,
+  supporting `*`, `*/n`, ranges, and comma lists (e.g. `0 3 * * *` for 03:00
+daily);
+- aliases — `@hourly`, `@daily`/`@midnight`, `@weekly`, `@monthly`, `@yearly`;
+- a one-shot — `once:<ISO-8601 timestamp>`, which fires a single time and is
+then consumed.
+
+Each schedule carries its own IANA timezone (default `UTC`); the spec is
+evaluated in that zone. Creation and updates validate the action against the
+registry, the device's approval for its target, the spec's syntax, and that
+the spec fires within two years.
+
+Failure handling: a dispatch failure (for example an offline device or a
+target that is no longer approved) retries after 5 minutes; a job that ends in
+a non-success state is re-evaluated at the next scheduled slot — destructive
+actions are never retried in a tight loop. Three consecutive failures
+automatically pause the schedule, record a critical `schedule_failed` event,
+and enqueue a notification; the counter resets on the first success. A paused
+schedule never dispatches on its own until an administrator resumes it, but it
+can always be run manually.
+
+All routes require the `config.write` permission (administrator) and are
+audited:
+
+```text
+GET    /api/schedules                   list schedules and scheduler status
+POST   /api/schedules                   create {device_id, action, spec, target?, timezone?}
+PUT    /api/schedules/<id>              pause/resume, or change spec/target
+                                         (resuming or changing the spec resets the failure counter)
+POST   /api/schedules/<id>/run          queue one run immediately without
+                                         touching the next scheduled slot
+DELETE /api/schedules/<id>              delete (already-queued jobs are left intact)
+```
+
 ## Web console and APIs
 
 Primary pages are `/`, `/devices/<id>`, `/integrations`, `/adsb`, `/displays`,
