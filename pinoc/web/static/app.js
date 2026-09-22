@@ -396,4 +396,151 @@ async function correlationStatus(){
   const open=(data.clusters||[]).length;
   root.innerHTML=`<strong>On</strong> · groups within ${s.window_seconds}s of each other · needs ${s.min_members}+ devices to form a cluster · ${open} open cluster${open===1?'':'s'} right now`;
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
+// ---------------------------------------------------------------------
+// Customizable dashboards, saved views, and the Glance page (enhancement
+// #13). One shared tile renderer (cardTile) is used by both the dashboard
+// composer's live preview and the chrome-free Glance page, driven entirely
+// by resolved card data from /api/dashboards/*/data, /api/dashboards/preview,
+// and /api/glance -- see pinoc/dashboards.py for the card-type library and
+// resolution logic this mirrors on the client.
+function cardTile(rc){
+  let body;
+  if(rc.error){body=`<p class="card-error">${esc(rc.error)}</p>`}
+  else switch(rc.type){
+    case 'device_health':{let d=rc.data||{};body=`<div class="glance-tile-value"><span class="dot ${esc(d.health)}"></span>${esc(d.friendly_name||d.device_id)}</div><div class="glance-tile-sub">${esc(d.stale?'stale':d.health||'—')} · ${d.online?'online':'offline'}</div>`;break}
+    case 'device_metric':{let d=rc.data||{};body=`<div class="glance-tile-value">${esc(humanValue(d.metric,d.value))}</div><div class="glance-tile-sub">${esc(d.friendly_name||d.device_id||'')} · ${esc((d.metric||'').replaceAll('_',' '))}</div>`;break}
+    case 'fleet_summary':{let d=rc.data||{};body=`<div class="glance-tile-value">${esc(d.online??0)} / ${esc(d.devices??0)} online</div><div class="glance-tile-sub">${esc(d.warning??0)} warning · ${esc(d.degraded??0)} degraded · ${esc(d.critical??0)} critical · ${esc(d.offline??0)} offline</div>`;break}
+    case 'fleet_alert_count':{let d=rc.data||{};body=`<div class="glance-tile-value">${esc(d.count??0)}</div><div class="glance-tile-sub">active alerts${d.severity&&d.severity!=='all'?' · '+esc(d.severity):''}</div>`;break}
+    case 'fleet_aggregate':{let d=rc.data||{};body=`<div class="glance-tile-value">${esc(humanValue(d.field,d.value))}</div><div class="glance-tile-sub">${esc((d.field||'').replaceAll('_',' '))}</div>`;break}
+    case 'storage_forecast':{let d=rc.data;body=d?`<div class="glance-tile-value">${esc(d.status||'—')}</div><div class="glance-tile-sub">${d.estimated_days_remaining!=null?`≈${Math.round(d.estimated_days_remaining)} days to full`:'no history yet'}</div>`:'<p class="muted">History unavailable.</p>';break}
+    case 'alert_list':{let d=rc.data||{alerts:[]};body=(d.alerts||[]).length?`<ul class="glance-alert-list">${d.alerts.map(a=>`<li class="severity-${esc(a.severity)}">${esc(a.severity)} · ${esc(a.device_id)} — ${esc(a.message)}</li>`).join('')}</ul>`:'<p class="muted">No active alerts.</p>';break}
+    default:body='<p class="muted">Unsupported card.</p>';
+  }
+  return `<article class="dashboard-card" data-card-id="${esc(rc.id)}" data-card-type="${esc(rc.type)}"><header>${esc(rc.title||rc.type)}</header><div class="dashboard-card-body">${body}</div></article>`;
+}
+// The dashboard composer: browse the card library, add/remove/reorder cards
+// (a simple ordered list rather than free-form drag positioning -- an MVP
+// simplification noted in the feature report), preview live data before
+// saving, and persist the layout as a named preset with a stable, shareable
+// URL (/dashboards/<preset_id> and /glance?preset=<preset_id>).
+async function dashboards(presetId){
+  let listRoot=document.querySelector('#dashboard-list'),editorPanel=document.querySelector('#dashboard-editor-panel');
+  if(!listRoot&&!editorPanel)return;
+  let nameInput=document.querySelector('#dashboard-name'),typeSelect=document.querySelector('#card-type-select'),configFields=document.querySelector('#card-config-fields'),cardsRoot=document.querySelector('#dashboard-cards'),message=document.querySelector('#dashboard-message'),shareEl=document.querySelector('#dashboard-share'),titleEl=document.querySelector('#dashboard-editor-title');
+  let library=[],devices=[],current={preset_id:presetId||null,name:'',cards:[]};
+  const note=(text,ok=true)=>{if(message){message.textContent=text;message.className=ok?'muted':'critical-row'}};
+  const fieldInput=field=>{
+    if(field.type==='device')return `<label>${esc(field.name)} <select data-field="${esc(field.name)}">${devices.map(d=>`<option value="${esc(d.id)}">${esc(d.friendly_name||d.hostname||d.id)}</option>`).join('')}</select></label>`;
+    if(field.type==='enum')return `<label>${esc(field.name)} <select data-field="${esc(field.name)}">${(field.options||[]).map(o=>`<option value="${esc(o)}">${esc(o||'(any)')}</option>`).join('')}</select></label>`;
+    return `<label>${esc(field.name)} <input data-field="${esc(field.name)}" type="number" value="${field.default??1}"></label>`;
+  };
+  const renderConfigFields=()=>{let type=library.find(x=>x.type===typeSelect.value);configFields.innerHTML=(type?.fields||[]).map(fieldInput).join('')};
+  const collectConfig=()=>{let out={};configFields.querySelectorAll('[data-field]').forEach(el=>{out[el.dataset.field]=el.type==='number'?Number(el.value):el.value});return out};
+  async function renderCards(){
+    if(!cardsRoot)return;
+    if(!current.cards.length){cardsRoot.innerHTML='<p class="muted">No cards yet — add one from the library above.</p>';return}
+    let resolved=current.cards;
+    try{let response=await mutate('/api/dashboards/preview',{method:'POST',body:JSON.stringify({cards:current.cards})});resolved=(await response.json()).cards||current.cards}catch(e){}
+    cardsRoot.innerHTML=resolved.map((rc,i)=>`<div class="dashboard-card-wrap"><div class="dashboard-card-controls"><button data-move-up="${i}" ${i===0?'disabled':''} type="button" title="Move up">↑</button><button data-move-down="${i}" ${i===resolved.length-1?'disabled':''} type="button" title="Move down">↓</button><button data-remove="${i}" type="button" title="Remove">Remove</button></div>${cardTile(rc)}</div>`).join('');
+    cardsRoot.querySelectorAll('[data-move-up]').forEach(b=>{b.onclick=()=>{let i=+b.dataset.moveUp;[current.cards[i-1],current.cards[i]]=[current.cards[i],current.cards[i-1]];renderCards()}});
+    cardsRoot.querySelectorAll('[data-move-down]').forEach(b=>{b.onclick=()=>{let i=+b.dataset.moveDown;[current.cards[i+1],current.cards[i]]=[current.cards[i],current.cards[i+1]];renderCards()}});
+    cardsRoot.querySelectorAll('[data-remove]').forEach(b=>{b.onclick=()=>{current.cards.splice(+b.dataset.remove,1);renderCards()}});
+  }
+  async function loadList(){
+    if(!listRoot)return;
+    let data;try{data=await(await fetch('/api/dashboards')).json()}catch(e){listRoot.innerHTML='<p class="muted">Dashboards unavailable.</p>';return}
+    let rows=data.dashboards||[];
+    listRoot.innerHTML=rows.length?rows.map(d=>{let count=(d.payload.cards||[]).length;return `<article class="dashboard-list-item ${d.preset_id===current.preset_id?'selected':''}"><div><strong>${esc(d.name)}</strong><small>${count} card${count===1?'':'s'} · updated ${localTime(d.updated_at)}</small></div><div class="dashboard-list-actions"><a href="/dashboards/${encodeURIComponent(d.preset_id)}">Open</a><a href="/glance?preset=${encodeURIComponent(d.preset_id)}">Glance</a><button data-delete-dashboard="${esc(d.preset_id)}" class="danger" type="button">Delete</button></div></article>`}).join(''):'<p class="muted">No saved dashboards yet.</p>';
+    listRoot.querySelectorAll('[data-delete-dashboard]').forEach(btn=>{btn.onclick=async()=>{
+      if(!confirm('Delete this dashboard?'))return;
+      await mutate(`/api/dashboards/${encodeURIComponent(btn.dataset.deleteDashboard)}`,{method:'DELETE'});
+      if(current.preset_id===btn.dataset.deleteDashboard){current={preset_id:null,name:'',cards:[]};if(nameInput)nameInput.value='';updateShare();await renderCards()}
+      await loadList();
+    }});
+  }
+  function updateShare(){
+    if(shareEl)shareEl.innerHTML=current.preset_id?`Shareable: <a href="/dashboards/${encodeURIComponent(current.preset_id)}">${location.origin}/dashboards/${encodeURIComponent(current.preset_id)}</a> · <a href="/glance?preset=${encodeURIComponent(current.preset_id)}">Glance view</a>`:'Save this dashboard to get a shareable link.';
+    if(titleEl)titleEl.textContent=current.name?`Editing "${current.name}"`:'New dashboard';
+  }
+  if(typeSelect){
+    try{let libData=await(await fetch('/api/card-library')).json();library=libData.cards||[]}catch(e){library=[]}
+    try{let devData=await(await fetch('/api/devices')).json();devices=devData.devices||[]}catch(e){devices=[]}
+    typeSelect.innerHTML=library.map(t=>`<option value="${esc(t.type)}">${esc(t.label)}</option>`).join('');
+    typeSelect.onchange=renderConfigFields;renderConfigFields();
+    let addButton=document.querySelector('#add-card-button');
+    if(addButton)addButton.onclick=()=>{current.cards.push({id:`card-${Date.now()}-${current.cards.length}`,type:typeSelect.value,title:'',config:collectConfig(),x:0,y:0,w:2,h:1});renderCards()};
+    let saveButton=document.querySelector('#save-dashboard-button');
+    if(saveButton)saveButton.onclick=async()=>{
+      let name=(nameInput?.value||current.name||'').trim();
+      if(!name){note('Name the dashboard before saving.',false);return}
+      let body={name,payload:{cards:current.cards}};
+      let response=current.preset_id?await mutate(`/api/dashboards/${encodeURIComponent(current.preset_id)}`,{method:'PUT',body:JSON.stringify(body)}):await mutate('/api/dashboards',{method:'POST',body:JSON.stringify(body)});
+      let result=await response.json().catch(()=>({}));
+      if(!response.ok){note(result.error||'could not save dashboard',false);return}
+      let saved=result.dashboard;current={preset_id:saved.preset_id,name:saved.name,cards:saved.payload.cards||[]};
+      note('Saved.');updateShare();window.history.replaceState(null,'',`/dashboards/${encodeURIComponent(current.preset_id)}`);await loadList();
+    };
+    let newButton=document.querySelector('#new-dashboard-button');
+    if(newButton)newButton.onclick=()=>{current={preset_id:null,name:'',cards:[]};if(nameInput)nameInput.value='';note('');updateShare();renderCards();window.history.replaceState(null,'','/dashboards')};
+  }
+  if(presetId){
+    try{
+      let response=await fetch(`/api/dashboards/${encodeURIComponent(presetId)}`);
+      if(response.ok){let d=(await response.json()).dashboard;current={preset_id:d.preset_id,name:d.name,cards:d.payload.cards||[]};if(nameInput)nameInput.value=d.name}
+      else note('Dashboard not found, or it is not yours.',false);
+    }catch(e){}
+  }
+  updateShare();await renderCards();await loadList();
+}
+// Saved search/filter presets on the fleet page: a small self-contained
+// widget appended to dashboard.html's existing filter bar. It reads/writes
+// the fleet page's own #search/#sort/#filters controls via DOM events
+// rather than reaching into dashboard()'s closure, so it stays decoupled
+// from that function.
+async function fleetFilterPresets(){
+  let root=document.querySelector('#fleet-filter-presets');if(!root)return;
+  function applyPreset(payload){
+    let search=document.querySelector('#search');
+    if(search){search.value=payload.search||'';search.dispatchEvent(new Event('input',{bubbles:true}))}
+    let sort=document.querySelector('#sort');
+    if(sort&&payload.sort){sort.value=payload.sort;sort.dispatchEvent(new Event('change',{bubbles:true}))}
+    let target=payload.health||payload.role||'all';
+    let button=[...document.querySelectorAll('#filters .filter')].find(b=>b.dataset.filter===target)||document.querySelector('#filters .filter[data-filter="all"]');
+    if(button)button.click();
+  }
+  async function render(){
+    let data;try{data=await(await fetch('/api/fleet-filters')).json()}catch(e){root.innerHTML='';return}
+    let list=data.filters||[];
+    root.innerHTML=(list.length?`<span class="muted">Saved views:</span> `:'')+list.map(f=>`<button class="filter" type="button" data-apply-filter="${esc(f.preset_id)}">${esc(f.name)}</button><button class="link-button" type="button" data-delete-filter="${esc(f.preset_id)}" title="Delete ${esc(f.name)}">×</button>`).join(' ')+` <button id="save-filter-preset" type="button">Save current view…</button>`;
+    root.querySelectorAll('[data-apply-filter]').forEach(btn=>{btn.onclick=()=>{let preset=list.find(f=>f.preset_id===btn.dataset.applyFilter);if(preset)applyPreset(preset.payload)}});
+    root.querySelectorAll('[data-delete-filter]').forEach(btn=>{btn.onclick=async e=>{e.stopPropagation();await mutate(`/api/fleet-filters/${encodeURIComponent(btn.dataset.deleteFilter)}`,{method:'DELETE'});await render()}});
+    let save=document.querySelector('#save-filter-preset');
+    if(save)save.onclick=async()=>{
+      let name=prompt('Name this saved view');if(!name)return;
+      let search=document.querySelector('#search')?.value||'';
+      let selected=document.querySelector('#filters .filter.selected');
+      let healthValues=['healthy','warning','degraded','critical','offline'];
+      let health=selected&&healthValues.includes(selected.dataset.filter)?selected.dataset.filter:'';
+      let role=selected&&!health&&selected.dataset.filter!=='all'?selected.dataset.filter:'';
+      let sort=document.querySelector('#sort')?.value||'';
+      let response=await mutate('/api/fleet-filters',{method:'POST',body:JSON.stringify({name,payload:{search,health,role,sort}})});
+      let result=await response.json().catch(()=>({}));
+      if(!response.ok){alert(result.error||'could not save view');return}
+      await render();
+    };
+  }
+  await render();
+}
+// The Glance page: a fixed-viewport, chrome-free rendering of one saved
+// dashboard (or, with no preset, PiNOC.dashboards' server-side default of
+// fleet summary + alert count + worst-health devices) for a TV/desk
+// display. Auto-refreshed by the caller via startAutoRefresh().
+async function glance(presetId){
+  let root=document.querySelector('#glance-root');if(!root)return;
+  let data;
+  try{let query=presetId?`?preset=${encodeURIComponent(presetId)}`:'';data=await(await fetch(`/api/glance${query}`)).json()}catch(e){root.innerHTML='<p class="severity-critical">Glance data unavailable.</p>';return}
+  if(data.error){root.innerHTML=`<p class="severity-critical">${esc(data.error)}</p>`;return}
+  let cards=data.cards||[];
+  root.innerHTML=`<header class="glance-head"><h1>${esc(data.name||'Glance')}</h1><span class="muted">${localTime(data.generated_at)}</span></header><div class="glance-grid">${cards.map(cardTile).join('')||'<p class="muted">No cards to show.</p>'}</div>`;
+}
+return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();
