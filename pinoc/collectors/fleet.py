@@ -16,19 +16,28 @@ from pinoc.health import evaluate
 from pinoc.models import DeviceState
 from pinoc.integrations import IntegrationStatus, active_integrations
 from pinoc.integrations.base import service as find_service
+from pinoc.integrations.packages import parse_apt
+from pinoc.integrations.raid import parse_mdstat
 
 LOG = logging.getLogger("pinoc.collectors.fleet")
 DISCOVERY = ("cockpit", "ssh", "desk-display", "piaware", "dump1090", "readsb", "magicmirror",
              "ics_modifier", "pi-hotspot", "temp-monitor", "smb", "smbd", "nmbd", "wg-quick")
 SCRIPT = r'''set +e
 # Optional bounded journal tail: "__jlogs__:<lines>:<unit1,unit2,...>" is passed
-# only on the low-frequency cycles the PiNOC host selects.
-jlogs_lines=""; jlogs_units=""
-for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; esac; done
+# only on the low-frequency cycles the PiNOC host selects. "__apt__" is
+# passed only on the (much lower-frequency) cycle a package check is due --
+# `apt-get --just-print upgrade` simulates a dependency resolution over the
+# whole local apt cache and must not run on every fleet poll.
+jlogs_lines=""; jlogs_units=""; apt_due=0
+for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; __apt__) apt_due=1;; esac; done
 echo __OS__; cat /etc/os-release 2>/dev/null; echo __UNAME__; uname -srm
 echo __MODEL__; tr -d '\000' </proc/device-tree/model 2>/dev/null; echo
 echo __UPTIME__; cat /proc/uptime; echo __LOAD__; cat /proc/loadavg
 echo __CPU__; head -1 /proc/stat; echo __FREQ__; cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null
+echo __MDSTAT__; cat /proc/mdstat 2>/dev/null
+echo __APT__; if [ "$apt_due" = "1" ]; then apt-get --just-print upgrade 2>/dev/null; fi
+echo __REBOOTREQUIRED__; [ -f /var/run/reboot-required ] && echo 1 || echo 0
+echo __APTREFRESH__; stat -c %Y /var/lib/apt/lists 2>/dev/null
 echo __TEMP__; for f in /sys/class/thermal/thermal_zone*/temp /sys/class/hwmon/hwmon*/temp1_input; do [ -r "$f" ] && echo "$f=$(cat "$f")"; done
 echo __THROTTLED__; command -v vcgencmd >/dev/null && vcgencmd get_throttled
 echo __MEM__; cat /proc/meminfo
@@ -85,6 +94,15 @@ def sections(text: str) -> Dict[str, str]:
             current = line.strip("_"); result[current] = []
         elif current: result[current].append(line)
     return {key: "\n".join(value).strip() for key, value in result.items()}
+
+
+def _apt_refresh_iso(text: str) -> Optional[str]:
+    """Convert __APTREFRESH__'s epoch seconds (the apt lists directory's
+    mtime, updated whenever the local apt cache is refreshed) to ISO 8601."""
+    try:
+        return datetime.fromtimestamp(int(text.strip()), timezone.utc).isoformat()
+    except (ValueError, OSError):
+        return None
 
 
 def parse_cpu(data: Dict[str, str], previous: Optional[tuple[int, int]] = None) -> tuple[Dict[str, Any], tuple[int, int]]:
@@ -344,7 +362,8 @@ class FleetCollector:
     def __init__(self, devices: List[DeviceConfig], max_workers: int = 4, timeout: float = 8,
                  password: str = "", runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
                  log_tail_seconds: float = 300.0, log_tail_lines: int = 50,
-                 passwords: Optional[Dict[str, str]] = None) -> None:
+                 passwords: Optional[Dict[str, str]] = None,
+                 packages_check_seconds: float = 21600.0) -> None:
         self.devices=devices; self.max_workers=max(1,min(int(max_workers),16)); self.timeout=float(timeout)
         self.password=password; self.runner=runner
         # Per-device password override (device_id -> password): compromising
@@ -367,11 +386,18 @@ class FleetCollector:
         self.previous_cpu={}; self.previous_net={}; self.snapshots={}
         self.log_tail_seconds=max(30.0,float(log_tail_seconds)); self.log_tail_lines=min(200,max(1,int(log_tail_lines)))
         self._last_jlogs: Dict[str, float] = {}
+        # apt-get --just-print upgrade simulates a dependency resolution over
+        # the whole local apt cache -- far too expensive to run on every
+        # fleet poll (default every ~10s). Bounded like jlogs above, but on
+        # its own, much lower-frequency cadence (default 6h, matching the
+        # long-documented-but-previously-unused DEFAULT_INTERVALS["packages"]).
+        self.packages_check_seconds=max(60.0,float(packages_check_seconds))
+        self._last_apt_check: Dict[str, float] = {}
 
     def _password_for(self, device: DeviceConfig) -> str:
         return self.passwords.get(device.id) or self.password
 
-    def _command(self, device: DeviceConfig, jlogs_due: bool = False) -> List[str]:
+    def _command(self, device: DeviceConfig, jlogs_due: bool = False, apt_due: bool = False) -> List[str]:
         args = (["__discover__"] if device.service_discovery else []) + list(device.monitored_services)
         if jlogs_due:
             units: List[str] = []
@@ -382,6 +408,8 @@ class FleetCollector:
                     break
             if units:
                 args.append(f"__jlogs__:{self.log_tail_lines}:{','.join(units)}")
+        if apt_due:
+            args.append("__apt__")
         if device.collection_method == "local": return ["sh", "-s", "--", *args]
         ssh=["ssh","-p",str(device.ssh_port),"-o",f"ConnectTimeout={max(1,int(self.timeout))}","-o","ServerAliveInterval=3"]
         if self._password_for(device): return ["sshpass","-e",*ssh,"-o","BatchMode=no",f"{device.ssh_user}@{device.address}","sh","-s","--",*args]
@@ -389,14 +417,29 @@ class FleetCollector:
 
     def collect_device(self, device: DeviceConfig) -> DeviceState:
         attempted=datetime.now(timezone.utc).isoformat(); old=self.snapshots.get(device.id)
-        jlogs_due=time.monotonic()-self._last_jlogs.get(device.id,0.0)>=self.log_tail_seconds
+        # time.monotonic()'s reference point is platform-defined (often time
+        # since boot, not process start) and can legitimately be smaller
+        # than log_tail_seconds/packages_check_seconds on a freshly booted
+        # host or container -- "subtract a 0.0 default" would then make
+        # jlogs/apt spuriously NOT due on a device's very first collection.
+        # Missing-from-the-dict must be its own explicit "always due" case.
+        last_jlogs=self._last_jlogs.get(device.id)
+        jlogs_due=last_jlogs is None or time.monotonic()-last_jlogs>=self.log_tail_seconds
+        last_apt=self._last_apt_check.get(device.id)
+        apt_due=last_apt is None or time.monotonic()-last_apt>=self.packages_check_seconds
         try:
             env={**os.environ,"LC_ALL":"C"}
             device_password=self._password_for(device)
             if device_password: env["SSHPASS"]=device_password
-            proc=self.runner(self._command(device,jlogs_due),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
+            proc=self.runner(self._command(device,jlogs_due,apt_due),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
             if proc.returncode: raise RuntimeError((proc.stderr or f"command exited {proc.returncode}").strip()[:240])
             self._last_jlogs[device.id]=time.monotonic()
+            # Only reset the apt cadence clock when a check actually ran
+            # this cycle -- unlike jlogs above, resetting it unconditionally
+            # on every poll would mean apt_due, computed from "time since
+            # last reset", could never reach packages_check_seconds again
+            # after the very first collection.
+            if apt_due: self._last_apt_check[device.id]=time.monotonic()
             data=sections(proc.stdout); cpu,counter=parse_cpu(data,self.previous_cpu.get(device.id)); self.previous_cpu[device.id]=counter
             os_values={}
             for row in data.get("OS","").splitlines():
@@ -451,6 +494,37 @@ class FleetCollector:
                         data={"checks":[{"name":x.get("name"),"kind":x.get("kind")} for x in checks],
                               "checks_total":len(checks),"failed_checks":None,"response_latency_ms":None},
                         critical=bool(cfg.get("critical",False)))).to_dict()
+                    continue
+                if name=="raid":
+                    arrays=parse_mdstat(data.get("MDSTAT",""))
+                    degraded=any(a["degraded"] for a in arrays)
+                    integrations["raid"]=IntegrationStatus(name="raid",available=bool(arrays),
+                        health="critical" if degraded else "healthy" if arrays else "unsupported",
+                        last_success=now if arrays else None,last_attempt=attempted,
+                        data_source="mdstat" if arrays else None,
+                        error=None if arrays else "no RAID arrays reported by /proc/mdstat",
+                        data={"arrays":arrays},critical=bool(cfg.get("critical",False))).to_dict()
+                    continue
+                if name=="packages":
+                    old_packages=(old.integrations or {}).get("packages") if old else None
+                    if apt_due:
+                        parsed=parse_apt(data.get("APT",""),
+                            reboot_required=data.get("REBOOTREQUIRED","").strip()=="1",
+                            metadata_refresh=_apt_refresh_iso(data.get("APTREFRESH","")))
+                        integrations["packages"]=IntegrationStatus(name="packages",available=True,
+                            health="warning" if parsed["security_updates"] else "healthy",
+                            last_success=now,last_attempt=attempted,data_source="apt-get",
+                            data=parsed,critical=bool(cfg.get("critical",False))).to_dict()
+                    elif old_packages:
+                        # Not due this cycle -- surface the last real check
+                        # rather than flip to "unavailable" every poll that
+                        # doesn't happen to land on the (multi-hour) cadence.
+                        integrations["packages"]={**old_packages,"last_attempt":attempted}
+                    else:
+                        integrations["packages"]=IntegrationStatus(name="packages",available=False,
+                            health="unavailable",last_attempt=attempted,
+                            error="awaiting first package check",
+                            critical=bool(cfg.get("critical",False))).to_dict()
                     continue
                 candidates={"adsb":["piaware.service","dump1090-fa.service","readsb.service"],"desk_display":["desk-display.service"],"magicmirror":["magicmirror.service"],"ics_modifier":["ics_modifier.service"],"pi_hotspot":["pi-hotspot.service"],"wireguard":["wg-quick@wg0.service"],"samba":["smbd.service","smb.service"]}.get(name,[])
                 found=[find_service(services,x) for x in candidates]; found=[x for x in found if x]

@@ -252,6 +252,28 @@ class CommandCadenceTest(unittest.TestCase):
         third = collector.collect_device(device)
         self.assertTrue(any(a.startswith("__jlogs__") for a in seen[-1]))
 
+    def test_first_collection_is_due_even_when_monotonic_clock_is_small(self):
+        # jlogs_due/apt_due used to be computed as
+        # "time.monotonic() - self._last_X.get(device.id, 0.0) >= interval",
+        # trusting time.monotonic() to always be "large" for a device never
+        # checked before. time.monotonic()'s reference point is platform-
+        # defined (often time since boot, not process start) and can
+        # legitimately be smaller than the interval on a freshly booted
+        # host or container, which would make jlogs/apt spuriously NOT due
+        # on a device's very first collection.
+        device = device_config()
+        seen = []
+
+        def runner(args, **kwargs):
+            seen.append(list(args))
+            return completed(SCRIPT_OUTPUT)
+
+        collector = FleetCollector([device], runner=runner, timeout=1,
+                                   log_tail_seconds=300, log_tail_lines=10)
+        with patch("pinoc.collectors.fleet.time.monotonic", return_value=1.0):
+            collector.collect_device(device)
+        self.assertTrue(any(a.startswith("__jlogs__") for a in seen[-1]))
+
     def test_coordinator_passes_log_settings_without_replacing_runner(self):
         polling = {"log_tail_seconds": 450, "log_tail_lines": 75}
         with patch.object(pi_noc, "load_devices", return_value=([], [])), \
