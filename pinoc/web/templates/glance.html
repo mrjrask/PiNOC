@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#07131d"><title>Glance · PiNOC</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"></head>
+<body class="glance-body" data-csrf="{{ csrf_token() }}">
+<div id="glance-root" data-preset="{{ preset_id or '' }}"><p class="muted">Loading…</p></div>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script>const glancePreset={{ preset_id|tojson }};PiNOC.glance(glancePreset);PiNOC.startAutoRefresh(()=>PiNOC.glance(glancePreset),30000);</script>
+</body></html>

@@ -20,6 +20,9 @@ from pinoc.config_store import atomic_save, save_devices, validate_config
 from pinoc.playbooks import load_playbooks, match as match_playbook
 from pinoc.history import storage_forecast
 from pinoc.correlation import describe_context
+from pinoc.dashboards import (
+    PresetStore, card_library, default_glance_cards, resolve_dashboard, validate_dashboard_payload,
+)
 from pinoc.onboarding import OnboardingService
 
 PROMETHEUS_HEALTH = {"healthy": 0, "maintenance": 0, "warning": 1, "degraded": 2, "critical": 3, "offline": 4}
@@ -288,6 +291,15 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         "api_rollout_detail":"config.write","api_rollout_cancel":"config.write",
         "api_network_topology":"view",
     }
+    # Custom dashboards / saved fleet-filter presets / Glance view (see
+    # pinoc/dashboards.py): personal, per-user data, so every endpoint only
+    # needs the base "view" permission -- a viewer can save their own layout
+    # without needing operator/administrator rights.
+    app.config["TOKEN_SCOPE_PERMISSIONS"].update({
+        "api_card_library":"view","api_dashboards":"view","api_dashboard_detail":"view",
+        "api_dashboard_data":"view","api_fleet_filters":"view","api_fleet_filter_detail":"view",
+        "api_glance":"view","api_dashboard_preview":"view",
+    })
     # Onboarding wizard endpoints (pinoc/onboarding.py): scan/fingerprint
     # read the local network/SSH into candidates, confirm writes the device
     # store -- all three are as sensitive as any other config-writing
@@ -1150,6 +1162,140 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def database_status():
         if security and not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
         return jsonify(history.db.status() if history else {"status":"disabled"})
+
+    # -- Customizable dashboards, saved views, and the Glance page ---------
+    # (enhancement #13). Self-contained block: a small card-data library
+    # (pinoc/dashboards.py) resolves fixed card types against the same
+    # shared state cache/history db every other route already reads, and
+    # PresetStore persists named, per-user dashboard and fleet-filter
+    # presets in the new user_presets table. Nothing here touches the
+    # routes/helpers above.
+    presets = PresetStore(security_db) if security_db is not None else None
+
+    def _preset_owner():
+        identity = g.get("identity") or {}
+        return identity.get("username") or "trusted-lan"
+
+    def _preset_view_allowed():
+        return security is None or security.allowed(g.get("identity"), "view")
+
+    @app.get("/api/card-library")
+    def api_card_library():
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        return jsonify({"cards":card_library()})
+
+    @app.post("/api/dashboards/preview")
+    def api_dashboard_preview():
+        """Resolve card data for an unsaved layout (the composer's live preview)."""
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        body=request.get_json(silent=True) or {}
+        try:payload=validate_dashboard_payload(body if isinstance(body.get("cards"),list) else {"cards":body.get("cards",[])})
+        except ValueError as exc:return jsonify({"error":str(exc)}),400
+        return jsonify({"cards":resolve_dashboard(payload,state,history)})
+
+    @app.get("/api/dashboards")
+    def api_dashboards():
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        if presets is None:return jsonify({"dashboards":[]})
+        return jsonify({"dashboards":presets.list(_preset_owner(),"dashboard")})
+    @app.post("/api/dashboards")
+    def api_dashboards_create():
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        if presets is None:return jsonify({"error":"preset storage unavailable"}),503
+        body=request.get_json(silent=True) or {}
+        try:preset=presets.create(_preset_owner(),"dashboard",body.get("name",""),body.get("payload") or {"cards":body.get("cards",[])})
+        except ValueError as exc:return jsonify({"error":str(exc)}),400
+        return jsonify({"dashboard":preset}),201
+    @app.get("/api/dashboards/<preset_id>")
+    def api_dashboard_detail(preset_id):
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        if presets is None:return jsonify({"error":"preset storage unavailable"}),503
+        preset=presets.get(preset_id)
+        # A saved dashboard is only readable by its owner for now -- see the
+        # "cross-user sharing" note in the feature's report; the "shareable
+        # URL" here means a stable link the owner can bookmark/reopen, not
+        # one that bypasses per-user auth.
+        if preset is None or preset["kind"]!="dashboard" or preset["owner"]!=_preset_owner():
+            return jsonify({"error":"dashboard not found"}),404
+        return jsonify({"dashboard":preset})
+    @app.put("/api/dashboards/<preset_id>")
+    def api_dashboard_update(preset_id):
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        if presets is None:return jsonify({"error":"preset storage unavailable"}),503
+        body=request.get_json(silent=True) or {}
+        try:preset=presets.update(preset_id,_preset_owner(),name=body.get("name"),payload=body.get("payload"))
+        except ValueError as exc:return jsonify({"error":str(exc)}),400
+        if preset is None:return jsonify({"error":"dashboard not found"}),404
+        return jsonify({"dashboard":preset})
+    @app.delete("/api/dashboards/<preset_id>")
+    def api_dashboard_delete(preset_id):
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        if presets is None:return jsonify({"error":"preset storage unavailable"}),503
+        return jsonify({"ok":presets.delete(preset_id,_preset_owner())})
+    @app.get("/api/dashboards/<preset_id>/data")
+    def api_dashboard_data(preset_id):
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        if presets is None:return jsonify({"error":"preset storage unavailable"}),503
+        preset=presets.get(preset_id)
+        if preset is None or preset["kind"]!="dashboard" or preset["owner"]!=_preset_owner():
+            return jsonify({"error":"dashboard not found"}),404
+        return jsonify({"dashboard":preset,"cards":resolve_dashboard(preset["payload"],state,history)})
+
+    @app.get("/api/fleet-filters")
+    def api_fleet_filters():
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        if presets is None:return jsonify({"filters":[]})
+        return jsonify({"filters":presets.list(_preset_owner(),"fleet_filter")})
+    @app.post("/api/fleet-filters")
+    def api_fleet_filters_create():
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        if presets is None:return jsonify({"error":"preset storage unavailable"}),503
+        body=request.get_json(silent=True) or {}
+        try:preset=presets.create(_preset_owner(),"fleet_filter",body.get("name",""),body.get("payload") or body)
+        except ValueError as exc:return jsonify({"error":str(exc)}),400
+        return jsonify({"filter":preset}),201
+    @app.put("/api/fleet-filters/<preset_id>")
+    def api_fleet_filter_update(preset_id):
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        if presets is None:return jsonify({"error":"preset storage unavailable"}),503
+        body=request.get_json(silent=True) or {}
+        try:preset=presets.update(preset_id,_preset_owner(),name=body.get("name"),payload=body.get("payload"))
+        except ValueError as exc:return jsonify({"error":str(exc)}),400
+        if preset is None:return jsonify({"error":"filter not found"}),404
+        return jsonify({"filter":preset})
+    @app.delete("/api/fleet-filters/<preset_id>")
+    def api_fleet_filter_delete(preset_id):
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        if presets is None:return jsonify({"error":"preset storage unavailable"}),503
+        return jsonify({"ok":presets.delete(preset_id,_preset_owner())})
+
+    @app.get("/dashboards")
+    def dashboards_page(): return render_template("dashboards.html",preset_id=None)
+    @app.get("/dashboards/<preset_id>")
+    def dashboard_view_page(preset_id): return render_template("dashboards.html",preset_id=preset_id)
+
+    @app.get("/glance")
+    def glance_page():
+        # A fixed-viewport, chrome-free rendering of one dashboard preset
+        # (or, with no ?preset, a sensible default) for a TV/desk display.
+        # When interactive auth is enabled this page still requires a
+        # session like any other (see install_security's before_request) --
+        # a kiosk display logs in once, the same as the desk-display
+        # integration's own browser session. See the report's MVP-scope
+        # notes for an unauthenticated public Glance link, which this does
+        # not implement.
+        return render_template("glance.html",preset_id=request.args.get("preset"))
+    @app.get("/api/glance")
+    def api_glance():
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        preset_id=request.args.get("preset")
+        preset=presets.get(preset_id) if presets is not None and preset_id else None
+        if preset is not None and (preset["kind"]!="dashboard" or preset["owner"]!=_preset_owner()):
+            preset=None
+        payload=preset["payload"] if preset is not None else default_glance_cards(state)
+        return jsonify({"name":preset["name"] if preset is not None else "Glance",
+                        "cards":resolve_dashboard(payload,state,history),
+                        "generated_at":datetime.now(timezone.utc).isoformat()})
 
     # -- Onboarding wizard (device discovery) --------------------------------
     # A self-contained, additive block: passive network discovery + bounded

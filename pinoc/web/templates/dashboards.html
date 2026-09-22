@@ -1,0 +1,22 @@
+{% extends "base.html" %}{% block title %}Dashboards · PiNOC{% endblock %}{% block content %}
+<section class="page-heading"><div><p class="eyebrow">Personal views</p><h1>Dashboards</h1><p class="muted">Compose a personal grid of cards from the library below, save it as a named preset, and reopen it any time from its own URL. The compact <a href="/glance">Glance</a> view renders any saved preset with no navigation chrome, for a TV or desk display.</p></div></section>
+<div class="dashboards-layout">
+<section class="panel" id="dashboard-list-panel"><div class="panel-heading"><h2>Saved dashboards</h2></div><div id="dashboard-list"><p class="muted">Loading…</p></div></section>
+<section class="panel" id="dashboard-editor-panel">
+  <div class="panel-heading"><h2 id="dashboard-editor-title">New dashboard</h2></div>
+  <div class="dashboard-editor-toolbar">
+    <label>Name <input id="dashboard-name" type="text" placeholder="My dashboard" autocomplete="off"></label>
+    <label>Card type <select id="card-type-select"></select></label>
+    <div id="card-config-fields" class="card-config-fields"></div>
+    <button id="add-card-button" class="action" type="button">Add card</button>
+  </div>
+  <div id="dashboard-cards" class="dashboard-grid" aria-label="Dashboard cards"></div>
+  <div class="dashboard-editor-actions">
+    <button id="save-dashboard-button" class="action" type="button">Save dashboard</button>
+    <button id="new-dashboard-button" type="button">Start new</button>
+  </div>
+  <p id="dashboard-share" class="muted"></p>
+  <p id="dashboard-message" class="muted" aria-live="polite"></p>
+</section>
+</div>
+{% endblock %}{% block scripts %}<script>PiNOC.dashboards({{ preset_id|tojson }});</script>{% endblock %}

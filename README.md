@@ -789,7 +789,31 @@ sample maturity. Once the noise level looks acceptable, set `"alerting": true`
 
 Primary pages are `/`, `/devices/<id>`, `/integrations`, `/adsb`, `/displays`,
 `/software`, `/network-inventory`, `/alerts`, `/events`, `/audit`, `/settings`,
-`/settings/status`, `/agents`, `/workspaces`, `/jobs`, and `/jobs/approvals`.
+`/settings/status`, `/agents`, `/workspaces`, `/jobs`, `/jobs/approvals`,
+`/dashboards`, and `/glance`.
+
+### Customizable dashboards, saved views, and Glance
+
+`/dashboards` is a personal dashboard composer: add cards from a fixed
+library (device health, a specific device metric, fleet summary counts,
+active-alert counts, a fleet-wide aggregate, the fleet storage-growth
+forecast, or a short active-alerts list), reorder them, and save the layout
+as a named preset. Each saved dashboard gets a stable id and a shareable URL
+(`/dashboards/<id>`), viewable by its owner. `/glance` renders one preset —
+or, with no `?preset=<id>`, a sensible default (fleet summary, active-alert
+count, and the worst-health devices) — as a fixed-viewport, chrome-free page
+with large tiles and a 30-second auto-refresh, for a TV or desk display
+alongside the `desk_display` integration. The fleet page's own filter bar
+gets the same treatment: save the current search/health/role/sort
+combination as a named view and reapply it with one click.
+
+Presets are per-user data stored in the `user_presets` table (see `GET/POST
+/api/dashboards`, `GET/PUT/DELETE /api/dashboards/<id>`, `GET
+/api/dashboards/<id>/data`, `POST /api/dashboards/preview` for the
+composer's live preview, `GET/POST /api/fleet-filters`, and `GET/PUT/DELETE
+/api/fleet-filters/<id>`); a saved dashboard is only readable by the user who
+saved it. `GET /api/card-library` lists the available card types and the
+config fields each one accepts.
 
 Frequently used read APIs:
 
@@ -1052,6 +1076,7 @@ and job data. Back up and remove preserved data manually only when intended.
 | `pinoc/web/` | Flask app, Jinja templates, CSS, and browser JavaScript. |
 | `pinoc/database.py`, `pinoc/history.py` | Migrations, persistence, history, events, alerts, and forecasts. |
 | `pinoc/security.py`, `pinoc/actions.py` | Authentication, authorization, CSRF, audit, and safe actions. |
+| `pinoc/dashboards.py` | Card library, card-data resolution, and preset persistence for `/dashboards` and `/glance`. |
 | `pinoc/development.py` | Enrollment, agent authentication, workspace/job policy, and artifacts. |
 | `config.json`, `config/devices.example.json`, `.env.example` | Runtime and fleet configuration examples. |
 | `install.sh`, `uninstall.sh` | Main service lifecycle. |
