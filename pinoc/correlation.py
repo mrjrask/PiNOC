@@ -43,12 +43,15 @@ _TRIGGER_CLASSES = {
     "anomaly": "anomaly",
 }
 
-# Priority order for shared context: SSID is the most specific (a single
-# access point), then the gateway/WAN interface a device routes through,
-# then a coarse /24 IP subnet as a fallback for wired devices or when
-# Wi-Fi details are unavailable. Each alert is grouped on the single
-# highest-priority hint it has, so it never lands in more than one cluster.
-CONTEXT_PRIORITY = ("ssid", "gateway", "ip_prefix")
+# Priority order for shared context: a persistently degraded network-
+# topology segment (see pinoc.topology) is measured evidence of a shared
+# cause, so it outranks the topology *hints* below it -- SSID is the most
+# specific of those (a single access point), then the gateway/WAN
+# interface a device routes through, then a coarse /24 IP subnet as a
+# fallback for wired devices or when Wi-Fi details are unavailable. Each
+# alert is grouped on the single highest-priority hint it has, so it never
+# lands in more than one cluster.
+CONTEXT_PRIORITY = ("segment", "ssid", "gateway", "ip_prefix")
 
 
 def trigger_class(alert_type: str) -> str:
@@ -75,6 +78,8 @@ def context_hints(device: Optional[Dict[str, Any]]) -> Dict[str, str]:
 
 def describe_context(context_key: str, context_value: str, label: Optional[str] = None) -> str:
     """Human-readable explanation of what a cluster's members have in common."""
+    if context_key == "segment":
+        return f'network segment "{context_value}" (persistent latency/loss)'
     if context_key == "ssid":
         return f'Wi-Fi SSID "{context_value}"'
     if context_key == "gateway":
@@ -120,12 +125,18 @@ class CorrelationEngine:
     not one per member).
     """
 
-    def __init__(self, db: Any, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, db: Any, config: Optional[Dict[str, Any]] = None, topology: Any = None):
         self.db = db
         config = config or {}
         self.enabled = bool(config.get("enabled", True))
         self.window_seconds = float(config.get("window_seconds", 300))
         self.min_members = max(2, int(config.get("min_members", 2)))
+        # Optional pinoc.topology.NetworkTopology: when set, its
+        # degraded_segment_for(device_id) is folded into this device's
+        # context hints (see _hints()) as shared-cause evidence, ahead of
+        # the topology *hints* below it in CONTEXT_PRIORITY. None (the
+        # default) preserves every existing behavior exactly.
+        self.topology = topology
 
     def reconcile(
         self,
@@ -145,7 +156,7 @@ class CorrelationEngine:
         unclustered = self.db.rows("SELECT * FROM alerts WHERE resolved_at IS NULL AND cluster_id IS NULL")
         leftovers: List[Dict[str, Any]] = []
         for row in unclustered:
-            hints = context_hints(device_context.get(row["device_id"]))
+            hints = self._hints(row["device_id"], device_context)
             cls = trigger_class(row["alert_type"])
             cluster = self._attach_to_existing(cls, hints, row, now, stamp)
             if cluster is not None:
@@ -179,6 +190,18 @@ class CorrelationEngine:
             (cls, key, value))
         return rows[0] if rows else None
 
+    def _hints(self, device_id: str, device_context: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+        hints = context_hints(device_context.get(device_id))
+        if self.topology is not None:
+            try:
+                segment = self.topology.degraded_segment_for(device_id)
+            except Exception:  # topology lookup must never break correlation
+                LOG.warning("network topology context lookup failed for %s", device_id, exc_info=True)
+                segment = None
+            if segment:
+                hints = {"segment": segment, **hints}
+        return hints
+
     def _attach_to_existing(self, cls: str, hints: Dict[str, str], row: Dict[str, Any],
                              now: datetime, stamp: str) -> Optional[Dict[str, Any]]:
         for key in CONTEXT_PRIORITY:
@@ -201,7 +224,7 @@ class CorrelationEngine:
         for row in leftovers:
             if abs((now - _parse(row["opened_at"])).total_seconds()) > self.window_seconds:
                 continue  # too stale to seed a brand-new cluster
-            hints = context_hints(device_context.get(row["device_id"]))
+            hints = self._hints(row["device_id"], device_context)
             cls = trigger_class(row["alert_type"])
             for key in CONTEXT_PRIORITY:
                 value = hints.get(key)

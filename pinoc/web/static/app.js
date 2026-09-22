@@ -396,4 +396,27 @@ async function correlationStatus(){
   const open=(data.clusters||[]).length;
   root.innerHTML=`<strong>On</strong> · groups within ${s.window_seconds}s of each other · needs ${s.min_members}+ devices to form a cluster · ${open} open cluster${open===1?'':'s'} right now`;
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
+// Device-to-device network quality matrix and topology view: gateway +
+// segments derived from the fleet/LAN inventory config, each pair's latest
+// ping latency/loss, and which segments are persistently degraded -- see
+// pinoc/topology.py and pinoc/collectors/network_matrix.py. The same
+// degraded-segment signal is fed into alert correlation as shared-cause
+// context (pinoc/correlation.py), visible there as a "segment" cluster.
+async function topology(){
+  const summary=document.querySelector('#topology-summary'),segRoot=document.querySelector('#topology-segments'),matrixRoot=document.querySelector('#topology-matrix');
+  if(!summary&&!segRoot&&!matrixRoot)return;
+  let data={};
+  try{data=await(await fetch('/api/network-topology')).json()}catch(error){}
+  if(!data.enabled){
+    if(summary)summary.innerHTML=`<p class="muted">${data.error?`Configuration error: ${esc(data.error)}`:'Network topology sampling is <strong>off</strong>. Configure <code>network_topology</code> (gateway, segments, pairs) in config.json to enable a bounded device-to-device ping matrix.'}</p>`;
+    if(segRoot)segRoot.innerHTML='';if(matrixRoot)matrixRoot.innerHTML='';
+    return;
+  }
+  const segments=data.segments||[],pairs=data.pairs||[],degradedCount=segments.filter(s=>s.status!=='ok').length;
+  const statusClass=s=>s==='critical'?'critical':s==='degraded'?'warning':'healthy';
+  if(summary)summary.innerHTML=`Gateway <strong>${esc(data.gateway||'—')}</strong> · ${segments.length} segment${segments.length===1?'':'s'} · ${pairs.length} sampled pair${pairs.length===1?'':'s'} · ${degradedCount?`<span class="severity-critical">${degradedCount} segment${degradedCount===1?'':'s'} degraded</span>`:'<span class="muted">all clear</span>'}`;
+  const pairLine=p=>{const latest=p.latest||{},lat=latest.latency_ms==null?'—':`${Number(latest.latency_ms).toFixed(1)} ms`,loss=latest.loss_percent==null?'—':`${Number(latest.loss_percent).toFixed(0)}% loss`;return `<li><span class="dot ${statusClass(p.severity)}"></span>${esc(p.source_id)} ↔ ${esc(p.target_id)} — ${lat} · ${loss}${latest&&latest.error?` · ${esc(latest.error)}`:''}</li>`};
+  if(segRoot)segRoot.innerHTML=segments.map(s=>`<section class="panel cluster-card ${s.status==='critical'?'sev-critical':s.status==='degraded'?'sev-warning':''}"><div class="cluster-head"><span class="dot ${statusClass(s.status)}"></span><div><h3>${esc(s.name)}</h3><p class="muted">${(s.devices||[]).length} device${(s.devices||[]).length===1?'':'s'}${s.gateway?` · gateway ${esc(s.gateway)}`:''} · ${esc(s.status)}</p></div></div><ul>${(s.pairs||[]).map(pairLine).join('')||'<li class="muted">No sampled pairs yet</li>'}</ul></section>`).join('')||'<p class="muted">No segments configured.</p>';
+  if(matrixRoot)matrixRoot.innerHTML=table(['Source','Target','Status','Latency','Loss','Error'],pairs.map(p=>{const latest=p.latest||{};return `<tr class="${p.severity==='critical'?'severity-critical':p.severity==='warning'?'severity-warning':''}"><td>${esc(p.source_id)}</td><td>${esc(p.target_id)}</td><td>${esc(p.severity)}</td><td>${latest.latency_ms==null?'—':Number(latest.latency_ms).toFixed(1)+' ms'}</td><td>${latest.loss_percent==null?'—':Number(latest.loss_percent).toFixed(0)+'%'}</td><td>${esc(latest.error||'')}</td></tr>`}));
+}
+return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,topology,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
