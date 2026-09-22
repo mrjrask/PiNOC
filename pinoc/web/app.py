@@ -286,6 +286,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         "api_remediations":"alerts.read","api_device_remediations":"alerts.read",
         "api_rollouts":"config.write","api_rollouts_create":"config.write",
         "api_rollout_detail":"config.write","api_rollout_cancel":"config.write",
+        "api_network_topology":"view",
     }
     # Onboarding wizard endpoints (pinoc/onboarding.py): scan/fingerprint
     # read the local network/SSH into candidates, confirm writes the device
@@ -566,6 +567,9 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
 
     @app.get("/events")
     def events_page(): return render_template("events.html")
+
+    @app.get("/topology")
+    def topology_page(): return render_template("topology.html")
 
     @app.get("/settings/status")
     def status_page():
@@ -920,6 +924,28 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
                            "members":members,"member_count":len(members),
                            "open_member_count":sum(1 for m in members if not m.get("resolved_at"))})
         return jsonify({"clusters":result,"status":status})
+
+    # Device-to-device network quality matrix and topology view: a bounded
+    # ping/latency sample per configured pair (pinoc.collectors.
+    # network_matrix), rolled up into gateway+segment status by
+    # pinoc.topology.NetworkTopology -- the same object HistoryManager feeds
+    # into alert correlation as shared-cause context (see CorrelationEngine
+    # .topology in pinoc/correlation.py).
+    @app.get("/api/network-topology")
+    def api_network_topology():
+        if security is not None and not security.allowed(g.identity,"view"):return jsonify({"error":"permission denied"}),403
+        from pinoc.topology import NetworkTopology, TopologyConfigError, parse_topology_config
+        raw=app.config.get("PINOC_CONFIG",{}).get("network_topology")
+        devices=state.devices()
+        known={d.get("id") for d in devices if d.get("id")}
+        tags={d.get("id"):tuple(d.get("tags") or ()) for d in devices if d.get("id")}
+        try:parsed=parse_topology_config(raw,known,tags)
+        except TopologyConfigError as exc:return jsonify({"enabled":False,"error":str(exc)})
+        if not parsed.enabled or not history or not history.db.available:
+            return jsonify({"enabled":parsed.enabled,"gateway":parsed.gateway,"segments":[],"pairs":[]})
+        topo=NetworkTopology(history.db,parsed)
+        return jsonify({"enabled":True,"gateway":parsed.gateway,
+                        "segments":topo.segment_statuses(),"pairs":topo.pair_statuses()})
 
     @app.get("/api/playbooks")
     def api_playbooks():

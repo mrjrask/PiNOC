@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -75,6 +75,8 @@ CREATE INDEX rollout_runs_status ON rollout_runs(status);
 CREATE TABLE rollout_devices(id INTEGER PRIMARY KEY,run_id TEXT NOT NULL,device_id TEXT NOT NULL,wave INTEGER NOT NULL,status TEXT NOT NULL,before_kernel TEXT,after_kernel TEXT,before_updates_available INTEGER,after_updates_available INTEGER,reboot_required INTEGER NOT NULL DEFAULT 0,update_job_id TEXT,reboot_job_id TEXT,error TEXT,dispatched_at TEXT,reboot_at TEXT,completed_at TEXT,updated_at TEXT NOT NULL,UNIQUE(run_id,device_id));
 CREATE INDEX rollout_devices_run_wave ON rollout_devices(run_id,wave);
 CREATE INDEX rollout_devices_run_status ON rollout_devices(run_id,status);""",
+"""CREATE TABLE network_matrix_samples(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,source_id TEXT NOT NULL,target_id TEXT NOT NULL,latency_ms REAL,loss_percent REAL,ok INTEGER NOT NULL,error TEXT,UNIQUE(source_id,target_id,timestamp));
+CREATE INDEX network_matrix_pair_time ON network_matrix_samples(source_id,target_id,timestamp);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

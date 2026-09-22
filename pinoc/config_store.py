@@ -141,6 +141,14 @@ def validate_alert_correlation(value):
     if minimum is not None and (isinstance(minimum,bool) or not isinstance(minimum,int) or not 2<=minimum<=100):
         raise ValueError("alert_correlation.min_members must be an integer between 2 and 100")
 
+def validate_network_topology(value,known_device_ids):
+    section=value.get("network_topology")
+    if section is None:return
+    if not isinstance(section,dict):raise ValueError("network_topology must be an object")
+    from pinoc.topology import TopologyConfigError, parse_topology_config
+    try:parse_topology_config(section,known_device_ids)
+    except TopologyConfigError as exc:raise ValueError(str(exc)) from None
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
@@ -154,8 +162,9 @@ def validate_config(value,base_dir=Path(".")):
     validate_notifications(value)
     validate_anomaly_detection(value)
     validate_alert_correlation(value)
-    _,errors=load_devices(value,Path(base_dir))
+    devices,errors=load_devices(value,Path(base_dir))
     if errors:raise ValueError("; ".join(errors))
+    validate_network_topology(value,{d.id for d in devices})
     return value
 
 def _atomic_write(path,value,backups=3):
