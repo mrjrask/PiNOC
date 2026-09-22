@@ -235,6 +235,38 @@ sudo -u pi ssh-copy-id -p 22 pi@device.local
 sudo -u pi ssh -o BatchMode=yes -p 22 pi@device.local true
 ```
 
+### Onboarding wizard (device discovery)
+
+Administrators can add devices from the web console instead of hand-editing
+`config/devices.json`, at **Onboarding** in the navigation
+(`/onboarding`, gated like Settings):
+
+1. **Scan** reads the local kernel ARP table (`/proc/net/arp`) and anything
+   the host's `avahi-browse` daemon has already heard over mDNS. This is
+   passive only -- nothing is actively probed or swept across an address
+   range -- and proposes candidate hosts (IP, MAC, hostname, advertised
+   mDNS services).
+2. **Fingerprint selected** runs a bounded, read-only SSH session (default
+   20 hosts per batch, a few seconds per host) against the candidates you
+   check, reusing the same `ssh`/`sshpass` machinery
+   `pinoc/collectors/fleet.py` already uses for fleet polling. It detects
+   hostname, OS/kernel/architecture, and a short allowlist of known service
+   units, and suggests a role, tags, and monitored/critical services from
+   what it finds (an ADS-B receiver's `piaware.service`, a file server's
+   `smbd.service`, and so on).
+3. **Review and confirm** shows the suggested `config/devices.json` entry
+   for each successfully fingerprinted host as editable JSON. Adding a
+   device (individually, or all shown at once) writes through the same
+   validated device-parsing path `load_devices()` itself uses
+   (`pinoc.config_store.save_devices`); an invalid entry is rejected with
+   nothing written, so the existing device store is never corrupted.
+   Confirming an `id` that already exists updates that device in place
+   rather than duplicating it. Restart PiNOC afterwards to start collecting
+   from newly added devices.
+
+`avahi-browse` (part of `avahi-utils`) is optional -- when it isn't
+installed, discovery falls back to the ARP table alone.
+
 ## Health, alerts, events, and history
 
 Live health is computed once in the backend. Default warnings begin above 70%

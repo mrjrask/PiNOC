@@ -167,13 +167,12 @@ def validate_config(value,base_dir=Path(".")):
     validate_network_topology(value,{d.id for d in devices})
     return value
 
-def atomic_save(path,value,backups=3):
-    # base_dir must be the directory *containing* config.json (where
-    # config/devices.json also lives), matching validate_config.py's own
-    # `root = Path.cwd()` -- not its parent, which would look one level too
-    # high and silently fall back to load_devices()'s empty in-config
-    # "devices" default instead of validating the real devices file.
-    path=Path(path);validate_config(value,path.parent);path.parent.mkdir(parents=True,exist_ok=True)
+def _atomic_write(path,value,backups=3):
+    """Bounded-backup, fsync'd, rename-into-place JSON write shared by
+    :func:`atomic_save` (config.json) and :func:`save_devices`
+    (config/devices.json) -- the mechanics are identical, only what gets
+    validated first differs."""
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
     for n in range(max(1,backups),1,-1):
         older=path.with_name(path.name+f".bak.{n-1}");newer=path.with_name(path.name+f".bak.{n}")
         if older.exists():os.replace(older,newer)
@@ -189,3 +188,33 @@ def atomic_save(path,value,backups=3):
         try:os.unlink(tmp)
         except FileNotFoundError:pass
         raise
+
+def atomic_save(path,value,backups=3):
+    # base_dir must be the directory *containing* config.json (where
+    # config/devices.json also lives), matching validate_config.py's own
+    # `root = Path.cwd()` -- not its parent, which would look one level too
+    # high and silently fall back to load_devices()'s empty in-config
+    # "devices" default instead of validating the real devices file.
+    path=Path(path);validate_config(value,path.parent);_atomic_write(path,value,backups)
+
+def save_devices(config,base_dir,payload,backups=3):
+    """Validate and atomically write the device store (``config/devices.json``
+    by default, per ``config['devices_file']``) through the same
+    :class:`~pinoc.device_config.DeviceConfig` parsing/validation
+    :func:`~pinoc.device_config.load_devices` itself uses -- the onboarding
+    wizard's confirm step (and anything else that wants to add/update
+    devices from code) calls this instead of hand-writing the JSON file, so
+    it can never persist an entry the rest of PiNOC would reject.
+
+    Validation happens entirely before anything touches disk: a bad payload
+    raises :class:`ValueError` and leaves the existing devices file (and its
+    backups) untouched.
+    """
+    from pinoc.device_config import validate_device_list
+    if not isinstance(payload,dict) or not isinstance(payload.get("devices"),list):
+        raise ValueError("devices payload must be an object with a devices list")
+    _,errors=validate_device_list(payload["devices"],config.get("health_thresholds",{}))
+    if errors:raise ValueError("; ".join(errors))
+    devices_path=Path(base_dir)/str(config.get("devices_file","config/devices.json"))
+    _atomic_write(devices_path,payload,backups)
+    return devices_path

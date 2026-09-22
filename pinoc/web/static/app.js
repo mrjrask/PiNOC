@@ -387,6 +387,88 @@ async function anomalies(){
     previewsRoot.innerHTML=rows.length?table(['Time','Device','Metric','Value','Baseline mean','Z-score'],rows):`<p class="muted">${empty}</p>`;
   }
 }
+// Onboarding wizard (device discovery) -- see pinoc/onboarding.py and
+// /onboarding. Three steps, each state kept in closures here rather than
+// the DOM: scan() proposes candidates from the ARP table + mDNS; fingerprint()
+// runs a bounded SSH session against the checked ones and suggests a
+// config/devices.json entry per success; confirm() edits/writes one device
+// (or every shown device) through /api/onboarding/confirm, which validates
+// before writing so a bad edit never corrupts the store.
+async function onboarding(){
+  const scanBtn=document.querySelector('#onboarding-scan');
+  if(!scanBtn)return;
+  const candidatesRoot=document.querySelector('#onboarding-candidates');
+  const resultsRoot=document.querySelector('#onboarding-results');
+  const scanMsg=()=>document.querySelector('#onboarding-scan-message');
+  const fpMsg=()=>document.querySelector('#onboarding-fingerprint-message');
+  const confirmMsg=()=>document.querySelector('#onboarding-confirm-message');
+  const note=(el,text,ok=true)=>{if(el){el.textContent=text;el.className=ok?'muted':'critical-row'}};
+  let candidates=[],fingerprinted=[];
+  scanBtn.onclick=async()=>{
+    scanBtn.disabled=true;note(scanMsg(),'Scanning…');
+    try{
+      let response=await mutate('/api/onboarding/scan',{method:'POST',body:'{}'});
+      let result=await response.json().catch(()=>({}));
+      if(!response.ok)throw new Error(result.error||`HTTP ${response.status}`);
+      candidates=result.candidates||[];
+      candidatesRoot.innerHTML=candidates.length?table(['','IP','MAC','Hostname','mDNS services','Sources','SSH user','SSH port'],
+        candidates.map((c,i)=>`<tr><td><input type="checkbox" data-candidate="${i}" checked></td><td>${esc(c.ip)}</td><td>${esc(c.mac)}</td><td>${esc(c.hostname)}</td><td>${esc((c.mdns_services||[]).join(', '))}</td><td>${esc((c.sources||[]).join(', '))}</td><td><input data-user="${i}" placeholder="pi" style="width:6rem"></td><td><input data-port="${i}" type="number" min="1" max="65535" placeholder="22" style="width:5rem"></td></tr>`))
+        :'<p class="muted">No candidates found. Devices must have sent LAN traffic recently (ARP) or advertise over mDNS.</p>';
+      note(scanMsg(),`${candidates.length} candidate${candidates.length===1?'':'s'} found.`);
+    }catch(error){note(scanMsg(),error.message,false)}
+    scanBtn.disabled=false;
+  };
+  const fpBtn=document.querySelector('#onboarding-fingerprint');
+  if(fpBtn)fpBtn.onclick=async()=>{
+    let defaultUser=document.querySelector('#onboarding-ssh-user')?.value.trim()||'pi';
+    let defaultPort=Number(document.querySelector('#onboarding-ssh-port')?.value)||22;
+    let hosts=candidates.map((c,i)=>({...c,idx:i,checked:candidatesRoot.querySelector(`input[data-candidate="${i}"]`)?.checked,
+      ssh_user:candidatesRoot.querySelector(`input[data-user="${i}"]`)?.value.trim()||defaultUser,
+      ssh_port:Number(candidatesRoot.querySelector(`input[data-port="${i}"]`)?.value)||defaultPort})).filter(h=>h.checked);
+    if(!hosts.length)return note(fpMsg(),'Check at least one candidate above.',false);
+    fpBtn.disabled=true;note(fpMsg(),`Fingerprinting ${hosts.length} host${hosts.length===1?'':'s'}…`);
+    try{
+      let response=await mutate('/api/onboarding/fingerprint',{method:'POST',body:JSON.stringify({hosts})});
+      let result=await response.json().catch(()=>({}));
+      if(!response.ok)throw new Error(result.error||`HTTP ${response.status}`);
+      fingerprinted=(result.results||[]).filter(r=>r.ok);
+      let failed=(result.results||[]).filter(r=>!r.ok);
+      resultsRoot.innerHTML=fingerprinted.length?fingerprinted.map((r,i)=>`<article class="panel" style="margin-bottom:.75rem">
+        <h3>${esc(r.suggested.friendly_name)} <small class="muted">${esc(r.ip)}</small></h3>
+        <label for="onboarding-json-${i}">Suggested device JSON (edit before adding)</label>
+        <textarea id="onboarding-json-${i}" class="config-editor" rows="10" spellcheck="false">${esc(JSON.stringify(r.suggested,null,2))}</textarea>
+        <div class="toolbar" style="margin-top:.5rem"><button data-add="${i}">Add this device</button><span class="muted" data-add-message="${i}"></span></div>
+        </article>`).join(''):'<p class="muted">No candidate fingerprinted successfully.</p>';
+      if(failed.length)resultsRoot.innerHTML+=`<p class="muted">${failed.length} host${failed.length===1?'':'s'} could not be fingerprinted: ${failed.map(f=>`${esc(f.ip)} (${esc(f.fingerprint?.error||'unknown error')})`).join(', ')}</p>`;
+      resultsRoot.querySelectorAll('button[data-add]').forEach(btn=>{btn.onclick=async()=>{
+        let i=btn.dataset.add,editor=document.querySelector(`#onboarding-json-${i}`),msg=resultsRoot.querySelector(`[data-add-message="${i}"]`);
+        let device;try{device=JSON.parse(editor.value)}catch(err){note(msg,`Invalid JSON: ${err.message}`,false);return}
+        await addDevices([device],msg);
+      }});
+      note(fpMsg(),`${fingerprinted.length} of ${hosts.length} fingerprinted successfully.`);
+    }catch(error){note(fpMsg(),error.message,false)}
+    fpBtn.disabled=false;
+  };
+  async function addDevices(devices,msgEl){
+    note(msgEl,'Adding…');
+    try{
+      let response=await mutate('/api/onboarding/confirm',{method:'POST',body:JSON.stringify({devices})});
+      let result=await response.json().catch(()=>({}));
+      if(!response.ok)throw new Error(result.error||`HTTP ${response.status}`);
+      note(msgEl,`Added: ${(result.added||[]).join(', ')||'none'}${result.updated?.length?`; updated: ${result.updated.join(', ')}`:''}. Restart PiNOC to collect from new devices.`);
+    }catch(error){note(msgEl,error.message,false)}
+  }
+  const confirmAllBtn=document.querySelector('#onboarding-confirm-all');
+  if(confirmAllBtn)confirmAllBtn.onclick=async()=>{
+    let devices=[];
+    for(let i=0;i<fingerprinted.length;i++){
+      let editor=document.querySelector(`#onboarding-json-${i}`);if(!editor)continue;
+      try{devices.push(JSON.parse(editor.value))}catch(err){note(confirmMsg(),`Device ${i+1}: invalid JSON: ${err.message}`,false);return}
+    }
+    if(!devices.length)return note(confirmMsg(),'Fingerprint at least one candidate first.',false);
+    await addDevices(devices,confirmMsg());
+  };
+}
 async function correlationStatus(){
   const root=document.querySelector('#correlation-status');if(!root)return;
   let data={};
@@ -419,4 +501,4 @@ async function topology(){
   if(segRoot)segRoot.innerHTML=segments.map(s=>`<section class="panel cluster-card ${s.status==='critical'?'sev-critical':s.status==='degraded'?'sev-warning':''}"><div class="cluster-head"><span class="dot ${statusClass(s.status)}"></span><div><h3>${esc(s.name)}</h3><p class="muted">${(s.devices||[]).length} device${(s.devices||[]).length===1?'':'s'}${s.gateway?` · gateway ${esc(s.gateway)}`:''} · ${esc(s.status)}</p></div></div><ul>${(s.pairs||[]).map(pairLine).join('')||'<li class="muted">No sampled pairs yet</li>'}</ul></section>`).join('')||'<p class="muted">No segments configured.</p>';
   if(matrixRoot)matrixRoot.innerHTML=table(['Source','Target','Status','Latency','Loss','Error'],pairs.map(p=>{const latest=p.latest||{};return `<tr class="${p.severity==='critical'?'severity-critical':p.severity==='warning'?'severity-warning':''}"><td>${esc(p.source_id)}</td><td>${esc(p.target_id)}</td><td>${esc(p.severity)}</td><td>${latest.latency_ms==null?'—':Number(latest.latency_ms).toFixed(1)+' ms'}</td><td>${latest.loss_percent==null?'—':Number(latest.loss_percent).toFixed(0)+'%'}</td><td>${esc(latest.error||'')}</td></tr>`}));
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,topology,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
+return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
