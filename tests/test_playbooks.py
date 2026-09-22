@@ -11,7 +11,7 @@ from pinoc.config_store import validate_config
 from pinoc.database import Database
 from pinoc.history import HistoryManager
 from pinoc.models import DeviceState
-from pinoc.playbooks import load_playbooks, match, validate_playbooks
+from pinoc.playbooks import AUTO_SAFE_ACTIONS, load_playbooks, match, validate_playbooks
 from pinoc.state import PiNOCState
 from pinoc.web.app import create_app
 
@@ -75,6 +75,83 @@ class PlaybookValidationTest(unittest.TestCase):
 
     def test_validate_config_accepts_playbooks(self):
         validate_config({"polling": {"fleet_seconds": 10}, "devices": [], "playbooks": [sample_playbook()]}, Path("."))
+
+
+class RemediationValidationTest(unittest.TestCase):
+    def test_absent_remediation_is_none(self):
+        playbook = load_playbooks({"playbooks": [sample_playbook()]})[0]
+        self.assertIsNone(playbook["remediation"])
+
+    def test_valid_auto_remediation_gets_defaults(self):
+        entry = sample_playbook(remediation={"action": "service.restart", "policy": "auto"})
+        playbook = load_playbooks({"playbooks": [entry]})[0]
+        self.assertEqual(playbook["remediation"], {
+            "action": "service.restart", "target": None, "policy": "auto",
+            "cooldown_seconds": 900, "max_attempts": 3, "respect_maintenance": True,
+        })
+
+    def test_explicit_fields_are_kept(self):
+        entry = sample_playbook(remediation={
+            "action": "journal.vacuum", "target": "time:3d", "policy": "approve",
+            "cooldown_seconds": 1800, "max_attempts": 5, "respect_maintenance": False,
+        })
+        playbook = load_playbooks({"playbooks": [entry]})[0]
+        self.assertEqual(playbook["remediation"]["target"], "time:3d")
+        self.assertEqual(playbook["remediation"]["cooldown_seconds"], 1800)
+        self.assertEqual(playbook["remediation"]["max_attempts"], 5)
+        self.assertFalse(playbook["remediation"]["respect_maintenance"])
+
+    def test_auto_policy_rejects_a_strong_action(self):
+        # device.reboot requires ActionDispatcher's "strong" confirmation;
+        # remediation may only run it through "approve", never "auto".
+        entry = sample_playbook(remediation={"action": "device.reboot", "policy": "auto"})
+        self.assertEqual(load_playbooks({"playbooks": [entry]}), [])
+        with self.assertRaises(ValueError):
+            validate_playbooks([entry])
+
+    def test_approve_policy_accepts_a_strong_action(self):
+        entry = sample_playbook(remediation={"action": "device.reboot", "policy": "approve"})
+        playbook = load_playbooks({"playbooks": [entry]})[0]
+        self.assertEqual(playbook["remediation"]["action"], "device.reboot")
+
+    def test_unknown_action_is_rejected(self):
+        entry = sample_playbook(remediation={"action": "device.panic", "policy": "approve"})
+        self.assertEqual(load_playbooks({"playbooks": [entry]}), [])
+
+    def test_bad_policy_is_rejected(self):
+        entry = sample_playbook(remediation={"action": "service.restart", "policy": "someday"})
+        self.assertEqual(load_playbooks({"playbooks": [entry]}), [])
+
+    def test_cooldown_and_max_attempts_bounds(self):
+        too_short = sample_playbook(remediation={"action": "service.restart", "policy": "auto", "cooldown_seconds": 1})
+        too_long = sample_playbook(remediation={"action": "service.restart", "policy": "auto", "cooldown_seconds": 10**7})
+        zero_attempts = sample_playbook(remediation={"action": "service.restart", "policy": "auto", "max_attempts": 0})
+        too_many_attempts = sample_playbook(remediation={"action": "service.restart", "policy": "auto", "max_attempts": 21})
+        for bad in (too_short, too_long, zero_attempts, too_many_attempts):
+            self.assertEqual(load_playbooks({"playbooks": [bad]}), [])
+
+    def test_target_length_bounds(self):
+        entry = sample_playbook(remediation={"action": "logs.truncate", "policy": "approve", "target": "x" * 300})
+        self.assertEqual(load_playbooks({"playbooks": [entry]}), [])
+
+    def test_remediation_must_be_an_object(self):
+        entry = sample_playbook(remediation="service.restart")
+        self.assertEqual(load_playbooks({"playbooks": [entry]}), [])
+
+    def test_known_auto_actions_override(self):
+        # The web loader passes the live "simple confirmation" set; a custom
+        # action absent from the decoupled default AUTO_SAFE_ACTIONS but
+        # present in that live set must still be accepted for "auto".
+        entry = sample_playbook(actions=[], remediation={"action": "custom.safe_thing", "policy": "auto"})
+        self.assertEqual(load_playbooks({"playbooks": [entry]}, known_actions={"custom.safe_thing"}), [])
+        accepted = load_playbooks({"playbooks": [entry]}, known_actions={"custom.safe_thing"},
+                                  known_auto_actions={"custom.safe_thing"})
+        self.assertEqual(accepted[0]["remediation"]["action"], "custom.safe_thing")
+
+    def test_default_auto_safe_actions_exclude_strong_ones(self):
+        for strong in ("device.reboot", "device.shutdown", "service.stop",
+                       "logs.truncate", "journal.vacuum", "cache.drop"):
+            self.assertNotIn(strong, AUTO_SAFE_ACTIONS)
 
 
 class ShippedConfigRunbookTest(unittest.TestCase):

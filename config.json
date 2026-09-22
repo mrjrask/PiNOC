@@ -94,7 +94,13 @@
         "service.restart",
         "device.refresh"
       ],
-      "links": []
+      "links": [],
+      "remediation": {
+        "action": "service.restart",
+        "policy": "auto",
+        "cooldown_seconds": 900,
+        "max_attempts": 3
+      }
     },
     {
       "id": "device-offline",
@@ -115,7 +121,14 @@
         "device.refresh",
         "package.check"
       ],
-      "links": []
+      "links": [],
+      "remediation": {
+        "action": "journal.vacuum",
+        "target": "time:3d",
+        "policy": "approve",
+        "cooldown_seconds": 3600,
+        "max_attempts": 2
+      }
     },
     {
       "id": "raid-degraded",

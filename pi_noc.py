@@ -1496,6 +1496,18 @@ def main() -> None:
         schedules.start()
         extensions["pinoc_schedules"] = schedules
 
+    # Playbook self-healing rides the same ActionDispatcher, so it is wired
+    # up the same way and for the same reason: it only fires playbooks that
+    # declare a `remediation` block, so it is a no-op fleet-wide until an
+    # operator adds one.
+    from pinoc.remediation import RemediationService
+    remediation = None
+    if extensions.get("pinoc_actions") is not None:
+        remediation = RemediationService(history.db, extensions["pinoc_actions"], state=state,
+                                         playbooks=extensions.get("pinoc_playbooks"), notifier=notifications)
+        remediation.start()
+        extensions["pinoc_remediation"] = remediation
+
     previous_signal_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
     }
@@ -1518,6 +1530,8 @@ def main() -> None:
             backups.stop()
             if schedules is not None:
                 schedules.stop()
+            if remediation is not None:
+                remediation.stop()
             notifications.stop()
             history.stop()
         finally:
