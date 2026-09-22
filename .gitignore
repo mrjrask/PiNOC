@@ -133,3 +133,6 @@ screens_config.local.json
 
 # Temporary files
 *.tmp
+
+# Claude Code agent worktrees
+.claude/worktrees/
