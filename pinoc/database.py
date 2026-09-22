@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -70,6 +70,11 @@ CREATE INDEX alert_clusters_lookup ON alert_clusters(trigger_class,context_key,c
 """CREATE TABLE remediation_runs(fingerprint TEXT PRIMARY KEY,device_id TEXT NOT NULL,playbook_id TEXT NOT NULL,alert_type TEXT NOT NULL,action TEXT NOT NULL,target TEXT,policy TEXT NOT NULL,cooldown_seconds INTEGER NOT NULL,max_attempts INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,last_attempt_at TEXT,last_job_id TEXT,last_status TEXT,cooldown_until TEXT,approval_status TEXT,decided_by TEXT,decided_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE INDEX remediation_runs_device ON remediation_runs(device_id);
 CREATE INDEX remediation_runs_approval ON remediation_runs(approval_status);""",
+"""CREATE TABLE rollout_runs(run_id TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',scope TEXT NOT NULL,device_selector_json TEXT NOT NULL DEFAULT '{}',canary_count INTEGER NOT NULL DEFAULT 0,wave_size INTEGER,respect_maintenance INTEGER NOT NULL DEFAULT 1,status TEXT NOT NULL,current_wave INTEGER NOT NULL DEFAULT 0,wave_count INTEGER NOT NULL DEFAULT 0,halted_reason TEXT,requested_by TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,started_at TEXT,completed_at TEXT);
+CREATE INDEX rollout_runs_status ON rollout_runs(status);
+CREATE TABLE rollout_devices(id INTEGER PRIMARY KEY,run_id TEXT NOT NULL,device_id TEXT NOT NULL,wave INTEGER NOT NULL,status TEXT NOT NULL,before_kernel TEXT,after_kernel TEXT,before_updates_available INTEGER,after_updates_available INTEGER,reboot_required INTEGER NOT NULL DEFAULT 0,update_job_id TEXT,reboot_job_id TEXT,error TEXT,dispatched_at TEXT,reboot_at TEXT,completed_at TEXT,updated_at TEXT NOT NULL,UNIQUE(run_id,device_id));
+CREATE INDEX rollout_devices_run_wave ON rollout_devices(run_id,wave);
+CREATE INDEX rollout_devices_run_status ON rollout_devices(run_id,status);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

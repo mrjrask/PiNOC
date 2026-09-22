@@ -212,7 +212,7 @@ fields include:
 | `roles`, `tags`, `notes` | Classification, filtering, and operator context. |
 | `monitored_services`, `critical_services` | Observed systemd units; critical units are automatically monitored. |
 | `manageable_services` | Explicit allowlist for safe service actions. |
-| `allowed_actions` | Per-device allowlist for optional actions (package checks, disk rescues); none are enabled by default. |
+| `allowed_actions` | Per-device allowlist for optional actions (package checks, apt updates, disk rescues); none are enabled by default. |
 | `important_paths` | Paths whose read-only mounts are critical. |
 | `thresholds` | Per-device live health threshold overrides. |
 | `integrations` | Per-integration enablement and options. |
@@ -590,6 +590,56 @@ PUT    /api/schedules/<id>              pause/resume, or change spec/target
 POST   /api/schedules/<id>/run          queue one run immediately without
                                          touching the next scheduled slot
 DELETE /api/schedules/<id>              delete (already-queued jobs are left intact)
+```
+
+## Staged fleet updates (rolling apt upgrades)
+
+Administrators can roll apt updates across a set of devices in waves instead
+of upgrading and rebooting them one at a time, or all at once with no way to
+stop a bad rollout mid-flight. A run is started from the **Staged fleet
+updates** panel on the Settings page (or the API below) with:
+
+- **scope** — `security` (delegates to `unattended-upgrade`'s own
+  security-origin allowlist) or `all` (`apt-get upgrade`);
+- **device selection** — by role and/or tag (matching how other fleet-wide
+  features select devices); a device must also list `apt.upgrade` in its own
+  `allowed_actions` (see [Disk rescue actions](#disk-rescue-actions) for the
+  same per-device opt-in pattern);
+- **wave plan** — an explicit canary count (the first N selected devices, by
+  id) updates first; everything else follows in one wave, or, with a wave
+  size set, in successive fixed-size waves.
+
+A background thread (`pinoc/rollout.py`, `RolloutService`) ticks every 20
+seconds and walks the plan: each device's `apt.upgrade` is queued through the
+same action dispatcher, queue, and audit trail as a manual or scheduled
+action, and only while that device reports being inside its own configured
+maintenance window (the same per-device maintenance state used elsewhere).
+When an update leaves a reboot pending (`/var/run/reboot-required`, the
+practical Debian/Ubuntu proxy for "a new kernel needs a reboot to take
+effect"), the device is rebooted and re-verified once it comes back online.
+A wave only advances once every device in it reports healthy (not
+`critical`); if any device's update, reboot, or post-update health check
+fails, the rollout halts immediately — later waves never run — and a
+critical notification is enqueued over the existing notification path, the
+same as a repeatedly failing schedule.
+
+Each run's per-device results (wave, status, before/after kernel and
+pending-update count, timestamps, any error) and its rollout summary are
+kept in the history database (`rollout_runs`/`rollout_devices`) and shown in
+the panel; an administrator can cancel a running rollout, which halts it the
+same way a failed health gate would (devices already mid-update finish, but
+no further wave starts).
+
+All routes require the `config.write` permission (administrator) and are
+audited:
+
+```text
+GET    /api/rollouts                    list rollout runs
+POST   /api/rollouts                    start a run {scope, roles?, tags?, device_ids?,
+                                         canary_device_ids?, canary_count?, wave_size?,
+                                         respect_maintenance?}
+GET    /api/rollouts/<run_id>           run detail: the run, its per-device rows, and a summary
+POST   /api/rollouts/<run_id>/cancel    halt a running rollout
 ```
 
 ## Anomaly detection (statistical baselines)

@@ -17,7 +17,12 @@ RESCUE_ACTIONS=frozenset({"apt.clean","apt.autoremove","logs.truncate","journal.
 # contain -- i.e. every action ActionDispatcher.validate() actually
 # consults device.get("allowed_actions",[]) for. Keep in sync with
 # validate()'s own checks.
-ALLOWLISTABLE_ACTIONS=RESCUE_ACTIONS|{"package.check"}
+ALLOWLISTABLE_ACTIONS=RESCUE_ACTIONS|{"package.check","apt.upgrade"}
+# Valid `target` values for apt.upgrade: which packages to bring current.
+# "security" delegates to unattended-upgrades' own configured security-origin
+# allowlist rather than PiNOC re-deriving "is this a security update" itself
+# from apt output; "all" runs a normal full-system upgrade.
+APT_UPGRADE_SCOPES=frozenset({"security","all"})
 # Log paths are /var/log/** or under a path the operator declared as
 # important; the character class plus the .. check keep them file-safe.
 LOG_PATH_RE=re.compile(r"/var/log/[A-Za-z0-9/._@:-]{1,254}$")
@@ -84,6 +89,7 @@ class ActionDispatcher:
           "magicmirror.restart":ActionDefinition("magicmirror.restart","Restart MagicMirror","actions.execute","simple",60,handler=self._integration_service),
           "pi_hotspot.restart":ActionDefinition("pi_hotspot.restart","Restart hotspot",handler=self._integration_service),
           "package.check":ActionDefinition("package.check","Check package metadata",handler=self._package_check),
+          "apt.upgrade":ActionDefinition("apt.upgrade","Apply apt updates","actions.execute","strong",1800,handler=self._apt_upgrade),
           "apt.clean":ActionDefinition("apt.clean","Clean apt cache",timeout=120,handler=self._apt_clean),
           "apt.autoremove":ActionDefinition("apt.autoremove","Preview package autoremove",timeout=120,handler=self._apt_autoremove),
           "logs.truncate":ActionDefinition("logs.truncate","Truncate a log file","actions.execute","strong",60,handler=self._logs_truncate),
@@ -109,6 +115,9 @@ class ActionDispatcher:
             if isinstance(cfg,dict):service=cfg.get("service",service)
             if service not in device.get("manageable_services",[]):raise ActionError("integration service is not approved for management")
         if action=="package.check" and action not in device.get("allowed_actions",[]):raise ActionError("package metadata checks are not approved for this device")
+        if action=="apt.upgrade":
+            if action not in device.get("allowed_actions",[]):raise ActionError("apt upgrades are not approved for this device")
+            if target is not None and str(target) not in APT_UPGRADE_SCOPES:raise ActionError("apt upgrade scope must be 'security' or 'all'")
         if action in RESCUE_ACTIONS:
             if action not in device.get("allowed_actions",[]):raise ActionError("this recovery action is not approved for this device")
             if action=="logs.truncate" and target is not None and not valid_log_path(target,device.get("important_paths",[])):
@@ -179,6 +188,32 @@ class ActionDispatcher:
             if len(parts)>=6 and parts[1].isdigit() and parts[3].isdigit():
                 return int(parts[1]),int(parts[3])
         return None
+    def _apt_upgrade(self,row,timeout):
+        """Apply apt updates, then report whether a reboot is now required.
+
+        ``reboot_required=1``/``reboot_required=0`` is appended to the
+        summary as a plain marker (not a separate job column) so callers
+        such as :mod:`pinoc.rollout` can read it back from the job row
+        without a schema change; it reflects /var/run/reboot-required,
+        Debian/Ubuntu's own signal that an installed package (typically a
+        new kernel) needs a reboot to take effect -- the practical proxy
+        for "the kernel changed" a rolling-update driver can act on without
+        itself diffing installed-vs-running kernel package versions.
+        """
+        device=self.state.device(row["device_id"])
+        scope=str(row.get("target") or "all").strip().lower()
+        if scope not in APT_UPGRADE_SCOPES:raise ActionError("apt upgrade scope must be 'security' or 'all'")
+        if scope=="security":
+            result=self._command(device,["sudo","-n","unattended-upgrade","-d"],timeout)
+        else:
+            result=self._command(device,["sudo","-n","apt-get","-y","upgrade"],timeout)
+        if result.get("exit_code")!=0:return result
+        flag_timeout=max(1,min(timeout,10))
+        code,_=self._raw(device,["test","-e","/var/run/reboot-required"],flag_timeout)
+        reboot_required=(code==0)
+        base=result.get("summary") or "apt upgrade completed"
+        result["summary"]=f"{base} (reboot_required={1 if reboot_required else 0})"
+        return result
     def _apt_clean(self,row,timeout):
         device=self.state.device(row["device_id"])
         before=self._fs_stats(device)

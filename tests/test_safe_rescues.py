@@ -105,7 +105,7 @@ class RegistryTest(unittest.TestCase):
                 for action in ("logs.truncate", "journal.vacuum", "cache.drop"):
                     self.assertEqual(dispatcher.definition(action).confirmation, "strong")
                 with self.assertRaises(ActionError):
-                    dispatcher.definition("apt.upgrade")
+                    dispatcher.definition("apt.reinstall")
             finally:
                 dispatcher.stop()
 
