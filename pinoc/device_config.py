@@ -162,6 +162,41 @@ def legacy_device(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "roles": ["file_server"], "important_paths": [x["path"] for x in config.get("remote_paths", [])]}
 
 
+def validate_device_list(raw_devices: List[Any],
+                         global_thresholds: Dict[str, Any]) -> Tuple[List[DeviceConfig], List[str]]:
+    """Parse and validate a bare ``devices`` array against per-device global
+    threshold defaults -- the same core loop :func:`load_devices` runs once it
+    has resolved its raw device list from either ``config.json`` or the
+    devices file, factored out so any other caller that already has a raw
+    device list in hand (for example the onboarding wizard's confirm step in
+    :func:`pinoc.config_store.save_devices`) validates through this one path
+    too, rather than hand-rolling its own JSON checks.
+    """
+    if not isinstance(raw_devices, list):
+        raise DeviceConfigError("devices must be a list")
+    errors: List[str] = []
+    devices: List[DeviceConfig] = []
+    seen = set()
+    for index, raw in enumerate(raw_devices):
+        try:
+            device = parse_device(raw, index)
+            if device.id in seen:
+                raise DeviceConfigError(f"device {device.id}: duplicate id")
+            seen.add(device.id)
+            devices.append(device)
+        except DeviceConfigError as exc:
+            errors.append(str(exc))
+    if not isinstance(global_thresholds, dict):
+        errors.append("health_thresholds must be an object")
+    else:
+        try:
+            normalized = {str(k): float(v) for k, v in global_thresholds.items()}
+            devices = [replace(d, thresholds={**normalized, **d.thresholds}) for d in devices]
+        except (TypeError, ValueError):
+            errors.append("health_thresholds values must be numeric")
+    return devices, errors
+
+
 def load_devices(config: Dict[str, Any], base_dir: Path) -> Tuple[List[DeviceConfig], List[str]]:
     source = config.get("devices", [])
     path = config.get("devices_file", "config/devices.json")
@@ -176,25 +211,4 @@ def load_devices(config: Dict[str, Any], base_dir: Path) -> Tuple[List[DeviceCon
     explicit_ids = {str(x.get("id")) for x in raw_devices if isinstance(x, dict) and x.get("id")}
     if legacy and str(legacy["id"]) not in explicit_ids:
         raw_devices.append(legacy)
-    errors: List[str] = []
-    devices: List[DeviceConfig] = []
-    seen = set()
-    for index, raw in enumerate(raw_devices):
-        try:
-            device = parse_device(raw, index)
-            if device.id in seen:
-                raise DeviceConfigError(f"device {device.id}: duplicate id")
-            seen.add(device.id)
-            devices.append(device)
-        except DeviceConfigError as exc:
-            errors.append(str(exc))
-    global_thresholds = config.get("health_thresholds", {})
-    if not isinstance(global_thresholds, dict):
-        errors.append("health_thresholds must be an object")
-    else:
-        try:
-            normalized = {str(k): float(v) for k, v in global_thresholds.items()}
-            devices = [replace(d, thresholds={**normalized, **d.thresholds}) for d in devices]
-        except (TypeError, ValueError):
-            errors.append("health_thresholds values must be numeric")
-    return devices, errors
+    return validate_device_list(raw_devices, config.get("health_thresholds", {}))
