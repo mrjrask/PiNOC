@@ -16,10 +16,11 @@ from pinoc.security import SecurityManager, install_security, redact, restore_re
 from pinoc.actions import ActionDispatcher, ActionError
 from pinoc.collectors.fleet import redact_log_line
 from pinoc.development import DevelopmentGateway, DevError, PROTOCOL_VERSION
-from pinoc.config_store import atomic_save, validate_config
+from pinoc.config_store import atomic_save, save_devices, validate_config
 from pinoc.playbooks import load_playbooks, match as match_playbook
 from pinoc.history import storage_forecast
 from pinoc.correlation import describe_context
+from pinoc.onboarding import OnboardingService
 
 PROMETHEUS_HEALTH = {"healthy": 0, "maintenance": 0, "warning": 1, "degraded": 2, "critical": 3, "offline": 4}
 
@@ -286,11 +287,24 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         "api_rollouts":"config.write","api_rollouts_create":"config.write",
         "api_rollout_detail":"config.write","api_rollout_cancel":"config.write",
     }
+    # Onboarding wizard endpoints (pinoc/onboarding.py): scan/fingerprint
+    # read the local network/SSH into candidates, confirm writes the device
+    # store -- all three are as sensitive as any other config-writing
+    # endpoint above, so they share its "config.write"/"admin:config" gate.
+    app.config["TOKEN_SCOPE_PERMISSIONS"].update({
+        "api_onboarding_scan":"config.write","api_onboarding_fingerprint":"config.write",
+        "api_onboarding_confirm":"config.write",
+    })
     if security:install_security(app,security)
     app.extensions["pinoc_security"]=security;app.extensions["pinoc_actions"]=actions
     app.extensions["pinoc_development"]=development;app.extensions["pinoc_playbooks"]=playbooks
     app.extensions["pinoc_backups"]=backups;app.extensions["pinoc_schedules"]=schedules
     app.extensions["pinoc_remediation"]=remediation;app.extensions["pinoc_rollout"]=rollout
+    # Onboarding wizard (device discovery): fully self-contained, no DB or
+    # ActionDispatcher dependency, so it is built here rather than threaded
+    # through create_app's constructor kwargs like schedules/remediation/
+    # rollout are. See pinoc/onboarding.py.
+    app.extensions["pinoc_onboarding"]=OnboardingService(**(app.config.get("ONBOARDING_CONFIG") or {}))
     # The schedule/remediation/rollout routes read the live service from
     # app.extensions so each can be constructed *after* create_app (all three
     # depend on the ActionDispatcher that create_app builds) and still be
@@ -1110,6 +1124,73 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def database_status():
         if security and not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
         return jsonify(history.db.status() if history else {"status":"disabled"})
+
+    # -- Onboarding wizard (device discovery) --------------------------------
+    # A self-contained, additive block: passive network discovery + bounded
+    # SSH fingerprinting propose candidate devices; the operator reviews and
+    # confirms, and confirmation writes config/devices.json through the same
+    # validated path load_devices() itself uses (pinoc.config_store.save_devices),
+    # never a hand-rolled JSON edit. See pinoc/onboarding.py.
+    def _onboarding_service():
+        return app.extensions.get("pinoc_onboarding")
+    @app.get("/onboarding")
+    def onboarding_page():
+        if security and not security.allowed(g.identity,"config.write"):abort(403)
+        return render_template("onboarding.html")
+    @app.post("/api/onboarding/scan")
+    def api_onboarding_scan():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_onboarding_service()
+        if service is None:return jsonify({"error":"onboarding is not available"}),409
+        candidates=service.scan()
+        actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"onboarding.scan",None,
+                     {"candidates":len(candidates)},"allowed","succeeded") if actions else None
+        return jsonify({"candidates":candidates})
+    @app.post("/api/onboarding/fingerprint")
+    def api_onboarding_fingerprint():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_onboarding_service()
+        if service is None:return jsonify({"error":"onboarding is not available"}),409
+        body=request.get_json(silent=True) or {}
+        hosts=body.get("hosts")
+        if not isinstance(hosts,list) or not hosts:return jsonify({"error":"hosts must be a non-empty list"}),400
+        results=service.fingerprint([h for h in hosts if isinstance(h,dict)])
+        actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"onboarding.fingerprint",None,
+                     {"hosts":len(hosts),"ok":sum(1 for r in results if r.get("ok"))},"allowed","succeeded") if actions else None
+        return jsonify({"results":redact(results)})
+    @app.post("/api/onboarding/confirm")
+    def api_onboarding_confirm():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        body=request.get_json(silent=True) or {}
+        submitted=body.get("devices")
+        if not isinstance(submitted,list) or not submitted:return jsonify({"error":"devices must be a non-empty list"}),400
+        app_dir=Path(app.config.get("APP_DIR","."))
+        current_config=app.config.get("PINOC_CONFIG",{})
+        devices_path=app_dir/str(current_config.get("devices_file","config/devices.json"))
+        try:
+            existing=json.loads(devices_path.read_text(encoding="utf-8")) if devices_path.exists() else {"devices":[]}
+        except (OSError,ValueError) as exc:
+            return jsonify({"error":f"unable to read existing device store: {redact(exc)}"}),500
+        if not isinstance(existing.get("devices"),list):existing["devices"]=[]
+        by_id={str(d.get("id")):d for d in existing["devices"] if isinstance(d,dict) and d.get("id")}
+        added,updated=[],[]
+        for device in submitted:
+            if not isinstance(device,dict) or not device.get("id"):
+                return jsonify({"error":"every device must be an object with an id"}),400
+            device_id=str(device["id"])
+            (updated if device_id in by_id else added).append(device_id)
+            by_id[device_id]=device
+        payload={**existing,"devices":list(by_id.values())}
+        try:
+            save_devices(current_config,app_dir,payload)
+        except ValueError as exc:
+            actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"onboarding.confirm",None,
+                         {"attempted":[str(d.get("id")) for d in submitted if isinstance(d,dict)]},
+                         "allowed","failed",error=str(redact(exc))[:500]) if actions else None
+            return jsonify({"error":str(redact(exc))}),400
+        actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"onboarding.confirm",None,
+                     {"added":added,"updated":updated},"allowed","succeeded") if actions else None
+        return jsonify({"ok":True,"added":added,"updated":updated,"restart_required":True}),201
 
     return app
 
