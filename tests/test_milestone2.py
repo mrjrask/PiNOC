@@ -247,4 +247,108 @@ class PerDevicePasswordTest(unittest.TestCase):
         self.assertEqual(collector._command(device)[0],"sshpass")
 
 
+BASE_OUTPUT = "__UPTIME__\n1 1\n__LOAD__\n0 0 0\n__CPU__\ncpu 1 0 1 8\n__MEM__\nMemTotal: 10 kB\nMemAvailable: 5 kB\n"
+
+HEALTHY_MDSTAT = "md0 : active raid1 sda1[0] sdb1[1]\n      1953124 blocks super 1.2 [2/2] [UU]\n"
+DEGRADED_MDSTAT = "md0 : active raid1 sda1[0]\n      1953124 blocks super 1.2 [2/1] [U_]\n"
+
+
+class RaidIntegrationTest(unittest.TestCase):
+    def _device(self):
+        return parse_device({"id": "nas", "hostname": "nas",
+                             "integrations": {"raid": {"enabled": True}}}, 0)
+
+    def test_healthy_array_is_reported(self):
+        device = self._device()
+        runner = lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 0, BASE_OUTPUT + f"__MDSTAT__\n{HEALTHY_MDSTAT}", "")
+        result = FleetCollector([device], runner=runner).collect_device(device)
+        raid = result.integrations["raid"]
+        self.assertTrue(raid["available"])
+        self.assertEqual(raid["health"], "healthy")
+        self.assertEqual(raid["data"]["arrays"][0]["array"], "md0")
+
+    def test_degraded_array_is_critical(self):
+        device = self._device()
+        runner = lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 0, BASE_OUTPUT + f"__MDSTAT__\n{DEGRADED_MDSTAT}", "")
+        result = FleetCollector([device], runner=runner).collect_device(device)
+        raid = result.integrations["raid"]
+        self.assertEqual(raid["health"], "critical")
+        self.assertTrue(raid["data"]["arrays"][0]["degraded"])
+
+    def test_no_array_is_unsupported_not_a_failure(self):
+        device = self._device()
+        runner = lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 0, BASE_OUTPUT + "__MDSTAT__\n", "")
+        result = FleetCollector([device], runner=runner).collect_device(device)
+        raid = result.integrations["raid"]
+        self.assertFalse(raid["available"])
+        self.assertEqual(raid["health"], "unsupported")
+
+
+class PackagesIntegrationTest(unittest.TestCase):
+    def _device(self):
+        return parse_device({"id": "pi", "hostname": "pi",
+                             "integrations": {"packages": {"enabled": True}}}, 0)
+
+    APT_OUTPUT = ("Reading package lists...\n"
+                 "Inst coreutils [9.4-3] (9.4-4 Debian:stable)\n"
+                 "Inst openssl [3.0.1] (3.0.2 Debian:stable-security)\n"
+                 "Conf coreutils (9.4-4 Debian:stable)\n")
+
+    def _runner(self, seen):
+        def runner(cmd, **kw):
+            seen.append(cmd)
+            body = BASE_OUTPUT
+            if any(a == "__apt__" for a in cmd):
+                body += f"__APT__\n{self.APT_OUTPUT}__REBOOTREQUIRED__\n1\n__APTREFRESH__\n1700000000\n"
+            else:
+                body += "__APT__\n__REBOOTREQUIRED__\n0\n__APTREFRESH__\n1700000000\n"
+            return subprocess.CompletedProcess(cmd, 0, body, "")
+        return runner
+
+    def test_first_collection_runs_the_check_and_reports_results(self):
+        device = self._device()
+        seen = []
+        collector = FleetCollector([device], runner=self._runner(seen))
+        result = collector.collect_device(device)
+        self.assertTrue(any(a == "__apt__" for a in seen[-1]))
+        packages = result.integrations["packages"]
+        self.assertTrue(packages["available"])
+        self.assertEqual(packages["data"]["updates_available"], 2)
+        self.assertEqual(packages["data"]["security_updates"], 1)
+        self.assertTrue(packages["data"]["reboot_required"])
+        self.assertEqual(packages["health"], "warning")  # security update pending
+
+    def test_apt_get_is_not_run_on_every_poll(self):
+        # apt-get --just-print upgrade simulates a dependency resolution
+        # over the whole local apt cache -- it must not run on every fleet
+        # poll (default every ~10s), only on its own much lower-frequency
+        # cadence.
+        device = self._device()
+        seen = []
+        collector = FleetCollector([device], runner=self._runner(seen),
+                                   packages_check_seconds=3600)
+        collector.collect_device(device)
+        self.assertTrue(any(a == "__apt__" for a in seen[-1]))
+        first_result_data = collector.snapshots[device.id].integrations["packages"]["data"]
+
+        result = collector.collect_device(device)
+        self.assertFalse(any(a == "__apt__" for a in seen[-1]))
+        # The previous check's data is preserved, not reset to unavailable.
+        self.assertEqual(result.integrations["packages"]["data"], first_result_data)
+        self.assertTrue(result.integrations["packages"]["available"])
+
+    def test_check_runs_again_once_the_interval_elapses(self):
+        device = self._device()
+        seen = []
+        collector = FleetCollector([device], runner=self._runner(seen),
+                                   packages_check_seconds=60)
+        collector.collect_device(device)
+        collector._last_apt_check[device.id] = time.monotonic() - 61
+        collector.collect_device(device)
+        self.assertTrue(any(a == "__apt__" for a in seen[-1]))
+
+
 if __name__ == "__main__": unittest.main()
