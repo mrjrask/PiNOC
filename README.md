@@ -266,6 +266,53 @@ typing the target to confirm before they are queued). Invalid
 entries fail `validate_config`; the runtime loader drops them so a bad entry
 cannot break the console. `GET /api/playbooks` returns the loaded list.
 
+#### Automatic remediation (self-healing)
+
+A playbook may add an optional `remediation` block so a known-safe fix runs
+without waiting for someone to click the runbook button:
+
+```json
+"remediation": {
+  "action": "service.restart",
+  "policy": "auto",
+  "cooldown_seconds": 900,
+  "max_attempts": 3,
+  "respect_maintenance": true
+}
+```
+
+- `action` (required) is one action from the same safe-action registry as
+  `actions` above; an optional `target` pins a static target (a log path, a
+  journal-vacuum spec, ...) — service actions with no explicit `target`
+  reuse the resource already recorded on the matching alert (e.g. the failed
+  unit name), so one playbook covers every service it protects.
+- `policy` is `"auto"` (run automatically) or `"approve"` (queue a
+  pending decision instead of running). `"auto"` is only accepted for
+  actions ActionDispatcher itself would run without a "strong" confirmation
+  (service start/restart, a refresh, an integration restart, a package
+  check, `apt.clean`/`apt.autoremove`); a reboot, a shutdown, a service
+  stop, or a destructive disk rescue (`logs.truncate`, `journal.vacuum`,
+  `cache.drop`) must use `"approve"`.
+- `cooldown_seconds` (60–604800, default 900) and `max_attempts` (1–20,
+  default 3) bound how often and how many times remediation retries the
+  *same* alert (tracked per alert fingerprint, i.e. per device + alert type
+  + resource); both reset once the alert resolves.
+- `respect_maintenance` (default `true`) defers remediation — without
+  spending an attempt — while the device is in a maintenance window.
+
+Every run, automatic or approved, is enqueued through the same action queue,
+job table, and audit trail as a manual click (`requested_by` is
+`"remediation"` for automatic runs, or the approving operator for an
+approved one) — there is no separate execution path. A device that recovers
+resolves its alert exactly as it already did without remediation configured
+(see the durable alert engine above); remediation only notices that and
+resets its own attempt/cooldown bookkeeping for the next occurrence. A
+pending `"approve"` decision shows on the alert's runbook panel with
+Approve/Deny buttons; `GET /api/remediations` (optionally `?state=pending`
+or `?device=<id>`) and `GET /api/devices/<id>/remediations` list live
+remediation status, and `POST /api/remediations/<fingerprint>/approve` or
+`/deny` decide a pending one.
+
 SQLite defaults:
 
 - Core and network samples every 60 seconds; storage and media-wear counters

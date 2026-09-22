@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -67,6 +67,9 @@ CREATE INDEX alerts_cluster ON alerts(cluster_id);
 CREATE TABLE alert_clusters(cluster_id INTEGER PRIMARY KEY,trigger_class TEXT NOT NULL,context_key TEXT NOT NULL,context_value TEXT NOT NULL,context_json TEXT NOT NULL DEFAULT '{}',severity TEXT NOT NULL,opened_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,resolved_at TEXT,notified_open INTEGER NOT NULL DEFAULT 0,notified_resolved INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX alert_clusters_open ON alert_clusters(resolved_at);
 CREATE INDEX alert_clusters_lookup ON alert_clusters(trigger_class,context_key,context_value,resolved_at);""",
+"""CREATE TABLE remediation_runs(fingerprint TEXT PRIMARY KEY,device_id TEXT NOT NULL,playbook_id TEXT NOT NULL,alert_type TEXT NOT NULL,action TEXT NOT NULL,target TEXT,policy TEXT NOT NULL,cooldown_seconds INTEGER NOT NULL,max_attempts INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,last_attempt_at TEXT,last_job_id TEXT,last_status TEXT,cooldown_until TEXT,approval_status TEXT,decided_by TEXT,decided_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE INDEX remediation_runs_device ON remediation_runs(device_id);
+CREATE INDEX remediation_runs_approval ON remediation_runs(approval_status);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

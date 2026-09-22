@@ -242,7 +242,7 @@ def fleet_aggregates(devices: List[Dict[str, Any]], history: Any = None) -> Dict
     return result
 
 
-def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None, backups: Any = None, schedules: Any = None) -> Flask:
+def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None, backups: Any = None, schedules: Any = None, remediation: Any = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(config or {})
     trusted_proxy_count=int(app.config.get("TRUSTED_PROXY_COUNT",0))
@@ -260,7 +260,13 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     security=SecurityManager(security_db,auth_enabled,app.config.get("RATE_LIMIT")) if security_db else None
     actions=ActionDispatcher(history.db,state,coordinator,int(app.config.get("ACTION_WORKERS",2))) if history else None
     development=DevelopmentGateway(history.db,app.config.get("DEV_ARTIFACT_ROOT","data/jobs"),app.config.get("DEV_CONFIG",{}),app.secret_key) if history else None
-    playbooks=load_playbooks(app.config.get("PINOC_CONFIG") or {},known_actions=actions.registry.keys() if actions else None)
+    # Only actions ActionDispatcher itself would run without a "strong"
+    # confirmation are safe to offer through remediation's "auto" policy;
+    # everything else -- a reboot, a service stop, a destructive disk rescue
+    # -- may only be offered through "approve". See playbooks.AUTO_SAFE_ACTIONS
+    # for the decoupled default this mirrors.
+    known_auto_actions={aid for aid,d in actions.registry.items() if d.confirmation=="simple"} if actions else None
+    playbooks=load_playbooks(app.config.get("PINOC_CONFIG") or {},known_actions=actions.registry.keys() if actions else None,known_auto_actions=known_auto_actions)
     # Flask/Werkzeug enforces this while reading the stream, before the public
     # agent endpoints buffer a body for HMAC verification.  Allow enough room
     # for the configured artifact total after base64 and JSON encoding.
@@ -276,16 +282,21 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         "api_events":"history.read","device_events":"history.read","metrics":"history.read","forecast":"history.read","device_logs":"history.read",
         "action_list":"actions.execute","action_result":"actions.execute","api_audit":"config.write","database_status":"config.write",
         "api_schedules":"config.write","api_anomalies":"history.read",
+        "api_remediations":"alerts.read","api_device_remediations":"alerts.read",
     }
     if security:install_security(app,security)
     app.extensions["pinoc_security"]=security;app.extensions["pinoc_actions"]=actions
     app.extensions["pinoc_development"]=development;app.extensions["pinoc_playbooks"]=playbooks
     app.extensions["pinoc_backups"]=backups;app.extensions["pinoc_schedules"]=schedules
-    # The schedule routes read the live service from app.extensions so it can
-    # be constructed *after* create_app (it depends on the ActionDispatcher that
-    # create_app builds) and still be served.
+    app.extensions["pinoc_remediation"]=remediation
+    # The schedule/remediation routes read the live service from
+    # app.extensions so each can be constructed *after* create_app (both
+    # depend on the ActionDispatcher that create_app builds) and still be
+    # served.
     def _schedules_service():
         return schedules if schedules is not None else app.extensions.get("pinoc_schedules")
+    def _remediation_service():
+        return remediation if remediation is not None else app.extensions.get("pinoc_remediation")
 
     @app.route("/login",methods=["GET","POST"])
     def login():
@@ -766,15 +777,25 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         device = state.device(device_id)
         return jsonify({"services": device.get("services", [])}) if device else (jsonify({"error": "device not found"}), 404)
 
+    def _with_remediation(row):
+        """Attach this alert's matching playbook and, if it has a
+        remediation block, that remediation's live status (attempts, last
+        run, cooldown, pending approval, ...) from remediation_runs."""
+        playbook=match_playbook(playbooks,row.get("alert_type"));service=_remediation_service()
+        remediation_status=None
+        if playbook and playbook.get("remediation") and service is not None:
+            remediation_status=service.get(row.get("fingerprint"))
+        return {**row,"playbook":playbook,"remediation":remediation_status}
+
     @app.get("/api/alerts")
     def api_alerts():
-        if not history:return jsonify({"alerts":[{**row,"playbook":match_playbook(playbooks,row.get("alert_type"))} for row in state.alerts()]})
+        if not history:return jsonify({"alerts":[_with_remediation(row) for row in state.alerts()]})
         page,limit=_page(); where,args=["1=1"],[]
         for field,column in (("device","device_id"),("severity","severity"),("state","state"),("type","alert_type")):
             if request.args.get(field):where.append(f"{column}=?");args.append(request.args[field])
         total=history.db.scalar("SELECT COUNT(*) FROM alerts WHERE "+" AND ".join(where),args) or 0
         rows=history.db.rows("SELECT * FROM alerts WHERE "+" AND ".join(where)+" ORDER BY CASE severity WHEN 'critical' THEN 3 WHEN 'degraded' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END DESC, opened_at DESC LIMIT ? OFFSET ?",args+[limit,(page-1)*limit])
-        return jsonify({"alerts":[{**row,"playbook":match_playbook(playbooks,row.get("alert_type"))} for row in rows],"page":page,"limit":limit,"total":total})
+        return jsonify({"alerts":[_with_remediation(row) for row in rows],"page":page,"limit":limit,"total":total})
 
     def _page():
         try:return max(1,int(request.args.get("page",1))),min(200,max(1,int(request.args.get("limit",50))))
@@ -784,7 +805,39 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def api_alert(alert_id):
         rows=history.db.rows("SELECT * FROM alerts WHERE alert_id=?",(alert_id,)) if history else []
         if not rows:return jsonify({"error":"alert not found"}),404
-        return jsonify({**rows[0],"playbook":match_playbook(playbooks,rows[0].get("alert_type"))})
+        return jsonify(_with_remediation(rows[0]))
+
+    @app.get("/api/remediations")
+    def api_remediations():
+        if security and not security.allowed(g.identity,"alerts.read"):return jsonify({"error":"permission denied"}),403
+        service=_remediation_service()
+        if service is None:return jsonify({"remediations":[]})
+        device_id=request.args.get("device")
+        pending_only=request.args.get("state")=="pending"
+        rows=service.pending_approvals() if pending_only else service.list(device_id)
+        return jsonify({"remediations":rows})
+    @app.get("/api/devices/<device_id>/remediations")
+    def api_device_remediations(device_id):
+        if security and not security.allowed(g.identity,"alerts.read"):return jsonify({"error":"permission denied"}),403
+        service=_remediation_service()
+        return jsonify({"remediations":service.list(device_id) if service else []})
+    # Keyed by alert_id, not the raw fingerprint (which can itself contain a
+    # "/", e.g. a root-mount disk-usage alert's resource) -- an alert_id is
+    # always a plain integer, so it is always a well-formed single URL
+    # segment, and it is exactly what the alert page already has to hand.
+    def _decide_remediation(alert_id, approve):
+        if not security.allowed(g.identity,"actions.execute"):return jsonify({"error":"permission denied"}),403
+        service=_remediation_service()
+        if service is None:return jsonify({"error":"remediation is not available"}),409
+        rows=history.db.rows("SELECT fingerprint FROM alerts WHERE alert_id=?",(alert_id,)) if history else []
+        if not rows:return jsonify({"error":"alert not found"}),404
+        try:row=service.decide(rows[0]["fingerprint"],approve,g.identity["username"],g.identity["role"],request.remote_addr)
+        except ValueError as exc:return jsonify({"error":str(exc)}),404
+        return jsonify({"remediation":row})
+    @app.post("/api/alerts/<int:alert_id>/remediation/approve")
+    def api_remediation_approve(alert_id):return _decide_remediation(alert_id,True)
+    @app.post("/api/alerts/<int:alert_id>/remediation/deny")
+    def api_remediation_deny(alert_id):return _decide_remediation(alert_id,False)
 
     @app.get("/api/alert-clusters")
     def api_alert_clusters():
