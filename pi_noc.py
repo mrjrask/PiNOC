@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from pinoc.collectors import CollectionScheduler, CollectionTask
 from pinoc.collectors.fleet import FleetCollector
 from pinoc.collectors.probes import ProbeCollector
+from pinoc.collectors.network_matrix import NetworkMatrixCollector
 from pinoc.device_config import DeviceConfig, load_devices
 from pinoc.health import evaluate
 from pinoc.legacy import normalize_snapshot
@@ -1194,7 +1195,7 @@ def collect_snapshot() -> Snapshot:
 
 class SharedSnapshotCoordinator:
     """Collect legacy domains independently and publish one shared snapshot."""
-    def __init__(self, state: PiNOCState) -> None:
+    def __init__(self, state: PiNOCState, history_db: Any = None) -> None:
         self.state = state
         self.lock = threading.RLock()
         self.snapshot = Snapshot(
@@ -1243,9 +1244,15 @@ class SharedSnapshotCoordinator:
         integration_polling = CONFIG.get("integration_polling", {})
         self.probe_collector = ProbeCollector(
             state, lambda: list(self.fleet_collector.devices), integration_polling)
+        # Bounded device-to-device ping/latency matrix (see pinoc.topology);
+        # a no-op cycle whenever network_topology.enabled is unset/false.
+        self.network_matrix_collector = NetworkMatrixCollector(
+            history_db, lambda: list(self.fleet_collector.devices), CONFIG.get("network_topology"))
         self.scheduler = CollectionScheduler([
             CollectionTask("fleet", float(polling.get("fleet_seconds", 10)), self.collect_fleet),
             CollectionTask("probes", float(integration_polling.get("probe_seconds", 30)), self.probe_collector.collect),
+            CollectionTask("network_matrix", float((CONFIG.get("network_topology") or {}).get("interval_seconds", 60)),
+                          self.network_matrix_collector.collect),
             CollectionTask("local", float(polling.get("local_seconds", 10)), self.collect_local),
             CollectionTask("network", float(polling.get("network_seconds", 10)), self.collect_vpn),
             CollectionTask("remote_health", float(polling.get("remote_health_seconds", 10)), self.collect_remote_health),
@@ -1458,11 +1465,12 @@ def main() -> None:
     )
     notifications = NotificationService(CONFIG.get("notifications", {}), state=state)
     history = HistoryManager(Database(database_path), history_config, state, notifier=notifications,
-                              anomalies=CONFIG.get("anomaly_detection"), correlation=CONFIG.get("alert_correlation"))
+                              anomalies=CONFIG.get("anomaly_detection"), correlation=CONFIG.get("alert_correlation"),
+                              network_topology=CONFIG.get("network_topology"))
     state.add_publish_hook(history.submit)
     history.start()
     notifications.start()
-    coordinator = SharedSnapshotCoordinator(state)
+    coordinator = SharedSnapshotCoordinator(state, history_db=history.db)
     coordinator.start()
 
     from pinoc.backup import BackupService

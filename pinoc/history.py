@@ -11,10 +11,15 @@ LOG=logging.getLogger("pinoc.history"); UTC=timezone.utc
 SEVERITY_RANK={"info":0,"warning":1,"degraded":2,"critical":3}
 
 class HistoryManager:
-    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None,notifier:Any=None,anomalies:Optional[Dict[str,Any]]=None,correlation:Optional[Dict[str,Any]]=None):
+    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None,notifier:Any=None,anomalies:Optional[Dict[str,Any]]=None,correlation:Optional[Dict[str,Any]]=None,network_topology:Optional[Dict[str,Any]]=None):
         self.db=db; self.config=config or {}; self.enabled=bool(self.config.get("enabled",True)); self.notifier=notifier
         self.anomaly=BaselineTracker(db,anomalies)
         self.correlation=CorrelationEngine(db,correlation)
+        # Raw network_topology config; re-parsed against the *current*
+        # roster on every correlation pass (see _topology()) since segments
+        # can be auto-derived from live device tags and the fleet changes
+        # over the life of this process -- see pinoc.topology.
+        self.topology_config=network_topology or {}
         self.queue:queue.Queue=queue.Queue(maxsize=int(self.config.get("queue_size",1000)))
         self.stop_event=threading.Event(); self.thread=threading.Thread(target=self._run,name="pinoc-history",daemon=True)
         self.previous={}; self.last_sample={}; self.cpu_since={}; self.dropped=0
@@ -229,9 +234,25 @@ class HistoryManager:
                 self.db.execute("UPDATE alerts SET resolved_at=?,state='resolved' WHERE alert_id=?",(stamp,row["alert_id"]));self._write_event(did,"alert_resolved","info",f"Recovered: {row['message']}",{"alert_id":row["alert_id"]},stamp)
                 resolved.append(row)
         return opened,resolved
+    def _topology(self):
+        """Build a fresh pinoc.topology.NetworkTopology from the current
+        roster (self.previous), or None when the section is absent/off.
+        Cheap: pairs/segments are always bounded (see pinoc.topology), and
+        this only runs when there is alert activity to correlate."""
+        if not self.topology_config or not self.topology_config.get("enabled",False):
+            return None
+        from .topology import NetworkTopology, parse_topology_config
+        tags={did:tuple(d.get("tags") or ()) for did,d in self.previous.items()}
+        try:
+            parsed=parse_topology_config(self.topology_config,self.previous.keys(),tags)
+        except Exception as exc:
+            LOG.warning("invalid network_topology configuration: %s",exc)
+            return None
+        return NetworkTopology(self.db,parsed)
     def _correlate(self,opened,resolved,stamp):
         outcome=None
         if self.correlation.enabled and (opened or resolved):
+            self.correlation.topology=self._topology()
             try:outcome=self.correlation.reconcile({a["alert_id"] for a in opened},resolved,self.previous,stamp)
             except Exception as exc:LOG.warning("alert correlation failed; falling back to per-alert notifications: %s",exc)
         absorbed_open=outcome.absorbed_open if outcome else set()

@@ -1,0 +1,19 @@
+{% extends "base.html" %}{% block title %}Onboarding · PiNOC{% endblock %}
+{% block content %}<h1>Onboarding wizard</h1><p class="muted">Administrator-only. Passively discover candidate Pis on the LAN (ARP table + mDNS, no active scanning), fingerprint the ones you pick over a bounded SSH session, then review and confirm each suggested <code>config/devices.json</code> entry before it is written.</p>
+<section class="panel"><h2>1. Discover</h2><p class="muted">Reads the kernel's ARP table and anything the local <code>avahi-browse</code> daemon has already heard over mDNS. Nothing is scanned or probed at this step.</p>
+<div class="toolbar"><button id="onboarding-scan" class="primary">Scan LAN</button><span id="onboarding-scan-message" class="muted" role="status"></span></div>
+<div id="onboarding-candidates" class="muted">No scan run yet.</div>
+</section>
+<section class="panel"><h2>2. Fingerprint selected candidates</h2><p class="muted">Attempts a bounded, read-only SSH session (default user/port below, override per candidate above if needed) against each checked candidate to detect hostname, OS, and known services, and to suggest roles/tags/monitored services.</p>
+<div class="schedule-grid">
+<label>Default SSH user<input id="onboarding-ssh-user" value="pi"></label>
+<label>Default SSH port<input id="onboarding-ssh-port" type="number" min="1" max="65535" value="22"></label>
+</div>
+<div class="toolbar"><button id="onboarding-fingerprint" class="primary">Fingerprint selected</button><span id="onboarding-fingerprint-message" class="muted" role="status"></span></div>
+</section>
+<section class="panel"><h2>3. Review and confirm</h2><p class="muted">Edit the suggested JSON for each device if needed, then add it (or add every device shown at once) to the device store. Writes go through the same validation the rest of PiNOC uses; an invalid entry is rejected and nothing is written.</p>
+<div id="onboarding-results" class="muted">Fingerprint some candidates first.</div>
+<div class="toolbar"><button id="onboarding-confirm-all">Add all shown devices</button><span id="onboarding-confirm-message" class="muted" role="status"></span></div>
+</section>
+{% endblock %}
+{% block scripts %}<script>PiNOC.onboarding();</script>{% endblock %}
