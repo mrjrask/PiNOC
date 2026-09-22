@@ -316,6 +316,58 @@ async function schedules(){
   };
   await renderList();
 }
+// Staged fleet update rollouts: a canary wave then the remainder, with a
+// health gate between waves -- see pinoc/rollout.py. Each run's per-device
+// wave table (status, before/after kernel, errors) is shown inline via
+// <details> so the panel stays compact with many runs.
+async function rollouts(){
+  const listRoot=document.querySelector('#rollouts-list');
+  if(!listRoot)return;
+  const message=()=>document.querySelector('#rollout-message');
+  const note=(text,ok=true)=>{let m=message();if(m){m.textContent=text;m.className=ok?'muted':'critical-row'}};
+  const deviceRows=d=>`<tr class="${d.status==='failed'?'critical-row':''}"><td>${esc(d.device_id)}</td><td>${d.wave}</td><td>${esc(d.status)}</td><td>${esc(d.before_kernel)} → ${esc(d.after_kernel)}</td><td>${d.before_updates_available??'—'} → ${d.after_updates_available??'—'}</td><td>${d.reboot_required?'yes':'no'}</td><td>${esc(d.error||'')}</td></tr>`;
+  const renderList=async()=>{
+    let data;
+    try{data=await(await fetch('/api/rollouts')).json()}catch(error){listRoot.innerHTML='<p class="muted">Rollouts unavailable.</p>';return}
+    const runs=data.rollouts||[];
+    if(!runs.length){listRoot.innerHTML='<p class="muted">No rollouts yet. Start one below.</p>';return}
+    const sections=await Promise.all(runs.map(async r=>{
+      let detail={};
+      try{detail=await(await fetch(`/api/rollouts/${encodeURIComponent(r.run_id)}`)).json()}catch(error){}
+      const devices=detail.devices||[],summary=detail.summary||{by_status:{}};
+      const counts=Object.entries(summary.by_status||{}).map(([k,v])=>`${v} ${k}`).join(', ')||'no devices';
+      const cancel=r.status==='running'?`<button data-cancel="${esc(r.run_id)}">Cancel</button>`:'';
+      return `<section class="panel"><div class="panel-heading"><div><p class="eyebrow">${esc(r.scope)} · wave ${r.current_wave+1} of ${r.wave_count}</p><h3>${esc(r.name||r.run_id)}</h3></div>${cancel}</div><p class="muted">${esc(r.status)}${r.halted_reason?` — ${esc(r.halted_reason)}`:''} · started ${localTime(r.started_at)}${r.completed_at?` · finished ${localTime(r.completed_at)}`:''} · ${counts}</p><details><summary>${devices.length} device${devices.length===1?'':'s'} (expand)</summary>${table(['Device','Wave','Status','Kernel before → after','Updates before → after','Rebooted','Error'],devices.map(deviceRows))}</details></section>`;
+    }));
+    listRoot.innerHTML=sections.join('');
+    listRoot.querySelectorAll('button[data-cancel]').forEach(btn=>{btn.onclick=async()=>{
+      if(!confirm('Cancel this rollout? Devices already updating will finish, but no further wave will start.'))return;
+      let response=await mutate(`/api/rollouts/${encodeURIComponent(btn.dataset.cancel)}/cancel`,{method:'POST',body:'{}'});
+      let result=await response.json().catch(()=>({}));
+      if(!response.ok)note(result.error||'cancel failed',false);
+      await renderList();
+    }});
+  };
+  let form=document.querySelector('#rollout-create');
+  if(form)form.onsubmit=async e=>{
+    e.preventDefault();
+    const split=v=>v.split(',').map(x=>x.trim()).filter(Boolean);
+    const waveSize=document.querySelector('#rollout-wave-size')?.value.trim();
+    const body={scope:document.querySelector('#rollout-scope')?.value,
+      roles:split(document.querySelector('#rollout-roles')?.value||''),
+      tags:split(document.querySelector('#rollout-tags')?.value||''),
+      canary_count:Number(document.querySelector('#rollout-canary')?.value||0),
+      wave_size:waveSize?Number(waveSize):null,
+      respect_maintenance:!!document.querySelector('#rollout-maintenance')?.checked};
+    if(!body.roles.length&&!body.tags.length)return note('Select devices by role and/or tag.',false);
+    let response=await mutate('/api/rollouts',{method:'POST',body:JSON.stringify(body)});
+    let result=await response.json().catch(()=>({}));
+    if(!response.ok){note(result.error||'could not start rollout',false);return}
+    note('Rollout started.');
+    await renderList();
+  };
+  await renderList();
+}
 async function anomalies(){
   const statusRoot=document.querySelector('#anomalies-status');
   const previewsRoot=document.querySelector('#anomalies-previews');
@@ -344,4 +396,4 @@ async function correlationStatus(){
   const open=(data.clusters||[]).length;
   root.innerHTML=`<strong>On</strong> · groups within ${s.window_seconds}s of each other · needs ${s.min_members}+ devices to form a cluster · ${open} open cluster${open===1?'':'s'} right now`;
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,anomalies,correlationStatus,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();
+return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate}})();

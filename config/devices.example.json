@@ -68,6 +68,9 @@
         "piaware.service",
         "dump1090-fa.service"
       ],
+      "allowed_actions": [
+        "apt.upgrade"
+      ],
       "notes": "North-side receiver",
       "integrations": {
         "adsb": {

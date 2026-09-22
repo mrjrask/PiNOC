@@ -242,7 +242,7 @@ def fleet_aggregates(devices: List[Dict[str, Any]], history: Any = None) -> Dict
     return result
 
 
-def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None, backups: Any = None, schedules: Any = None, remediation: Any = None) -> Flask:
+def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None, backups: Any = None, schedules: Any = None, remediation: Any = None, rollout: Any = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(config or {})
     trusted_proxy_count=int(app.config.get("TRUSTED_PROXY_COUNT",0))
@@ -283,20 +283,24 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         "action_list":"actions.execute","action_result":"actions.execute","api_audit":"config.write","database_status":"config.write",
         "api_schedules":"config.write","api_anomalies":"history.read",
         "api_remediations":"alerts.read","api_device_remediations":"alerts.read",
+        "api_rollouts":"config.write","api_rollouts_create":"config.write",
+        "api_rollout_detail":"config.write","api_rollout_cancel":"config.write",
     }
     if security:install_security(app,security)
     app.extensions["pinoc_security"]=security;app.extensions["pinoc_actions"]=actions
     app.extensions["pinoc_development"]=development;app.extensions["pinoc_playbooks"]=playbooks
     app.extensions["pinoc_backups"]=backups;app.extensions["pinoc_schedules"]=schedules
-    app.extensions["pinoc_remediation"]=remediation
-    # The schedule/remediation routes read the live service from
-    # app.extensions so each can be constructed *after* create_app (both
+    app.extensions["pinoc_remediation"]=remediation;app.extensions["pinoc_rollout"]=rollout
+    # The schedule/remediation/rollout routes read the live service from
+    # app.extensions so each can be constructed *after* create_app (all three
     # depend on the ActionDispatcher that create_app builds) and still be
     # served.
     def _schedules_service():
         return schedules if schedules is not None else app.extensions.get("pinoc_schedules")
     def _remediation_service():
         return remediation if remediation is not None else app.extensions.get("pinoc_remediation")
+    def _rollout_service():
+        return rollout if rollout is not None else app.extensions.get("pinoc_rollout")
 
     @app.route("/login",methods=["GET","POST"])
     def login():
@@ -446,6 +450,44 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
             job=service.run_now(schedule_id,requested_by=g.identity["username"],role=g.identity["role"],source_ip=request.remote_addr)
         except ValueError as exc:return jsonify({"error":str(redact(exc))}),400
         return jsonify({"job":redact(job)}),202
+    @app.get("/api/rollouts")
+    def api_rollouts():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_rollout_service()
+        if service is None:return jsonify({"rollouts":[]})
+        return jsonify({"rollouts":[redact(r) for r in service.list()]})
+    @app.post("/api/rollouts")
+    def api_rollouts_create():
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_rollout_service()
+        if service is None:return jsonify({"error":"staged rollouts are not available"}),409
+        body=request.get_json(silent=True) or {}
+        try:
+            run=service.create_run(name=str(body.get("name") or ""),scope=str(body.get("scope","")),
+                roles=body.get("roles"),tags=body.get("tags"),device_ids=body.get("device_ids"),
+                canary_device_ids=body.get("canary_device_ids"),canary_count=int(body.get("canary_count") or 0),
+                wave_size=body.get("wave_size"),respect_maintenance=bool(body.get("respect_maintenance",True)),
+                requested_by=g.identity["username"],role=g.identity["role"],source_ip=request.remote_addr)
+        except (ValueError,TypeError) as exc:return jsonify({"error":str(redact(exc))}),400
+        return jsonify({"rollout":redact(run)}),201
+    @app.get("/api/rollouts/<run_id>")
+    def api_rollout_detail(run_id):
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_rollout_service()
+        if service is None:return jsonify({"error":"staged rollouts are not available"}),409
+        run=service.get(run_id)
+        if run is None:return jsonify({"error":"rollout not found"}),404
+        return jsonify({"rollout":redact(run),"devices":[redact(d) for d in service.devices(run_id)],
+                        "summary":service.summary(run_id)})
+    @app.post("/api/rollouts/<run_id>/cancel")
+    def api_rollout_cancel(run_id):
+        if not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_rollout_service()
+        if service is None:return jsonify({"error":"staged rollouts are not available"}),409
+        try:
+            run=service.cancel(run_id,requested_by=g.identity["username"],role=g.identity["role"],source_ip=request.remote_addr)
+        except ValueError as exc:return jsonify({"error":str(redact(exc))}),404
+        return jsonify({"rollout":redact(run)})
     @app.get("/api/anomalies")
     def api_anomalies():
         if not (security is None or security.allowed(g.identity, "history.read")):

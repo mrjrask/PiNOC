@@ -26,6 +26,21 @@
 <span id="schedule-message" class="muted" role="status"></span>
 </form>
 </section>
+<section class="panel"><h2>Staged fleet updates</h2><p class="muted">Apply apt updates fleet-wide in waves: a canary group first, then the remainder, with a health gate (critical-service check, and a reboot + re-verify if the update left one pending) after every wave. A failed gate halts the rollout and notifies — later waves never run. Each device only updates while it is inside its own configured maintenance window. Select devices by role and/or tag; <code>apt.upgrade</code> must be in that device's <code>allowed_actions</code>.</p>
+<div id="rollouts-list" class="muted">Loading rollouts…</div>
+<form id="rollout-create">
+<div class="schedule-grid">
+<label>Scope<select id="rollout-scope"><option value="security">Security only</option><option value="all">All updates</option></select></label>
+<label>Roles (comma-separated)<input id="rollout-roles" placeholder="file_server, general"></label>
+<label>Tags (comma-separated)<input id="rollout-tags" placeholder="edge"></label>
+<label>Canary count<input id="rollout-canary" type="number" min="0" value="1"></label>
+<label>Remainder wave size (optional)<input id="rollout-wave-size" type="number" min="1" placeholder="all at once"></label>
+<label><input id="rollout-maintenance" type="checkbox" checked> Only update devices inside their maintenance window</label>
+</div>
+<button type="submit" class="primary">Start rollout</button>
+<span id="rollout-message" class="muted" role="status"></span>
+</form>
+</section>
 <section class="panel"><h2>Alert correlation</h2><p class="muted">Groups open alerts that share a trigger class and network context (same Wi-Fi SSID, gateway, or IP subnet) within a rolling window into one explainable cluster card on <a href="/alerts">Alerts</a>, and batches their notifications. Grouping only — no alert is ever merged or suppressed. Enabled by default; override with the <code>alert_correlation</code> section in config.json (restart required).</p>
 <div id="correlation-status" class="muted">Loading alert correlation status…</div>
 </section>
@@ -35,4 +50,4 @@
 </section>
 <section class="panel"><p>Use the validated settings API or local configuration CLI. Changes currently require restart and are saved atomically with bounded backups.</p></section>
 {% endblock %}
-{% block scripts %}<script>PiNOC.settings();PiNOC.schedules();PiNOC.anomalies();PiNOC.correlationStatus();</script>{% endblock %}
+{% block scripts %}<script>PiNOC.settings();PiNOC.schedules();PiNOC.rollouts();PiNOC.anomalies();PiNOC.correlationStatus();</script>{% endblock %}

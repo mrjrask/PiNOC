@@ -1508,6 +1508,16 @@ def main() -> None:
         remediation.start()
         extensions["pinoc_remediation"] = remediation
 
+    # Staged fleet update rollouts ride the same ActionDispatcher too (apt
+    # updates and any reboot they trigger are just more queued actions), so
+    # it is wired up the same way: a no-op until an operator starts a run.
+    from pinoc.rollout import RolloutService
+    rollout = None
+    if extensions.get("pinoc_actions") is not None:
+        rollout = RolloutService(history.db, extensions["pinoc_actions"], state=state, notifier=notifications)
+        rollout.start()
+        extensions["pinoc_rollout"] = rollout
+
     previous_signal_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
     }
@@ -1532,6 +1542,8 @@ def main() -> None:
                 schedules.stop()
             if remediation is not None:
                 remediation.stop()
+            if rollout is not None:
+                rollout.stop()
             notifications.stop()
             history.stop()
         finally:
