@@ -785,12 +785,59 @@ page's Anomaly detection panel (`GET /api/anomalies`) with each baseline's
 sample maturity. Once the noise level looks acceptable, set `"alerting": true`
 (restart required) to open real alerts.
 
+## Console self-monitoring
+
+PiNOC also watches itself. A background service (`pinoc/self_monitoring.py`,
+config section `self_monitoring`) ticks on an interval and computes six
+signals: per-domain **collector success rate** and **cache staleness** (both
+read straight from the collector scheduler's own per-task run bookkeeping —
+consecutive failures, last successful run — since a domain's last successful
+collector run is exactly when its results were published into the shared
+state cache), **history database size and retention** (is `maintenance()`'s
+retention cleanup still running on schedule, and how close is the database
+file to a configured size ceiling), **scheduler tick lag** (how far behind
+its due time a collector task actually started, plus a heartbeat check that
+catches a fully stalled scheduler thread), **agent reachability** (last-seen
+staleness per row of the `agents` table), and **queued-action depth**
+(pending/running `action_jobs`, by count and by oldest-queued age).
+
+A crossed threshold opens an alert through the *same* `alerts` table and
+open/resolve lifecycle every device alert uses — same acknowledge/mute path,
+same alerts page, same notification channels — tagged onto a synthetic
+`pinoc-console` device id with alert types prefixed `console_self_` (e.g.
+`console_self_collector_failing`, `console_self_cache_stale`,
+`console_self_database_size`, `console_self_database_retention_lag`,
+`console_self_scheduler_lag`, `console_self_agent_offline`,
+`console_self_action_queue_backlog`) so they read at a glance as being about
+the console itself, not a monitored device. Recovery resolves them the same
+way a device alert recovers.
+
+```json
+"self_monitoring": {
+  "interval_seconds": 30,
+  "consecutive_failure_threshold": 3,
+  "cache_stale_multiplier": 3.0,
+  "database_size_ceiling_bytes": 2147483648,
+  "database_retention_stale_seconds": 7200,
+  "scheduler_heartbeat_stale_seconds": 30,
+  "scheduler_lag_seconds": 30,
+  "agent_offline_seconds": 600,
+  "queue_backlog_depth": 20,
+  "queue_backlog_age_seconds": 900
+}
+```
+
+All signals are rendered together on `/console-status`
+(`GET /api/console-status`, gated the same as `/settings/status`). That
+existing page stays scoped to the history database specifically;
+`/console-status` is the console's overall health.
+
 ## Web console and APIs
 
 Primary pages are `/`, `/devices/<id>`, `/integrations`, `/adsb`, `/displays`,
 `/software`, `/network-inventory`, `/alerts`, `/events`, `/audit`, `/settings`,
-`/settings/status`, `/agents`, `/workspaces`, `/jobs`, `/jobs/approvals`,
-`/dashboards`, and `/glance`.
+`/settings/status`, `/console-status`, `/agents`, `/workspaces`, `/jobs`,
+`/jobs/approvals`, `/dashboards`, and `/glance`.
 
 ### Customizable dashboards, saved views, and Glance
 
@@ -839,6 +886,7 @@ GET /api/alert-clusters[?state=all]
 GET /api/events
 GET /api/export/<kind>?device=&range=24h&format=csv&limit=10000
 GET /api/database/status
+GET /api/console-status
 ```
 
 Fleet queries accept `health`, `role`, and `tag` filters. Event and alert APIs
@@ -1078,6 +1126,7 @@ and job data. Back up and remove preserved data manually only when intended.
 | `pinoc/security.py`, `pinoc/actions.py` | Authentication, authorization, CSRF, audit, and safe actions. |
 | `pinoc/dashboards.py` | Card library, card-data resolution, and preset persistence for `/dashboards` and `/glance`. |
 | `pinoc/development.py` | Enrollment, agent authentication, workspace/job policy, and artifacts. |
+| `pinoc/self_monitoring.py` | Console self-monitoring: collector health, cache staleness, database, scheduler lag, agent reachability, action-queue depth, and `console_self_*` alerts. |
 | `config.json`, `config/devices.example.json`, `.env.example` | Runtime and fleet configuration examples. |
 | `install.sh`, `uninstall.sh` | Main service lifecycle. |
 | `install_agent.sh`, `uninstall_agent.sh` | Optional agent lifecycle. |
