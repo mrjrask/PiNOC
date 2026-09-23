@@ -149,6 +149,36 @@
         "device.refresh"
       ],
       "links": []
+    },
+    {
+      "id": "auth-fail",
+      "alert_type": "auth_fail",
+      "title": "Repeated failed SSH logins",
+      "markdown": "## Triage\n- Review recent auth attempts: `journalctl -u ssh -u sshd -n 200` or `tail -n 200 /var/log/auth.log`.\n- Distinguish a misconfigured client/cron job from a real brute-force attempt (many distinct source IPs, or an unfamiliar username).\n- Consider tightening `sshd_config` (key-only auth, fail2ban) or blocking the offending source at the firewall.",
+      "actions": [
+        "device.refresh"
+      ],
+      "links": []
+    },
+    {
+      "id": "listener-change",
+      "alert_type": "listener_change",
+      "title": "Unexpected listening port",
+      "markdown": "## Triage\n- The alert message names the unexpected port or the missing expected one.\n- Identify the owning process: `ss -tlnp` / `ss -ulnp` (the security integration's data already lists it when visible).\n- If the change is intentional (a new service, a config change), update the device's `expected_listeners` list so it stops alerting.",
+      "actions": [
+        "device.refresh"
+      ],
+      "links": []
+    },
+    {
+      "id": "cert-expiry",
+      "alert_type": "cert_expiry",
+      "title": "Certificate nearing expiry",
+      "markdown": "## Triage\n- The alert message names the check and how many days remain.\n- Renew or reissue the certificate before it expires; for a self-signed certificate, regenerate and redeploy it.\n- Refresh the device (or wait for the check's own interval) so the probe re-runs and clears the alert once renewed.",
+      "actions": [
+        "device.refresh"
+      ],
+      "links": []
     }
   ],
   "remote_host": "192.168.1.200",
@@ -209,5 +239,11 @@
     "enabled": false,
     "source_path": "",
     "interval_seconds": 600
+  },
+  "security_monitoring": {
+    "auth_fail_warning": 5,
+    "auth_fail_critical": 20,
+    "auth_fail_hysteresis": 2,
+    "listener_change_duration_seconds": 60
   }
 }

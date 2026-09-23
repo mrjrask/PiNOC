@@ -214,6 +214,7 @@ fields include:
 | `manageable_services` | Explicit allowlist for safe service actions. |
 | `allowed_actions` | Per-device allowlist for optional actions (package checks, apt updates, disk rescues); none are enabled by default. |
 | `important_paths` | Paths whose read-only mounts are critical. |
+| `expected_listeners` | Optional `"tcp:22"`/`"udp:53"`-style baseline for listener-change alerting (see [Security-surface monitoring](#security-surface-monitoring)); omit/empty to collect the inventory without alerting on it. |
 | `thresholds` | Per-device live health threshold overrides. |
 | `integrations` | Per-integration enablement and options. |
 | `repositories` | Named, configured Git working trees for read-only status. |
@@ -624,17 +625,66 @@ on their own intervals:
 }
 ```
 
-Check kinds are `http_get`, `http_head`, and `tcp`. `expected_status` accepts a
-single code or a list, `pattern` is an optional response-body regular expression,
-and `critical` escalates a failing check from a warning alert to a critical one.
-Probes are passive and read-only, run on the collection scheduler (never from a
-web request), honor per-check intervals, and are capped at 20 checks per device.
-Failing checks open a single `probe_failed` alert per device (naming every
-offending check) with the normal acknowledge/mute/resolve lifecycle, and
-latency plus failure counts are sampled into `integration_metrics`.
+Check kinds are `http_get`, `http_head`, `tcp`, and `tls_cert`. `expected_status`
+accepts a single code or a list, `pattern` is an optional response-body regular
+expression, and `critical` escalates a failing check from a warning alert to a
+critical one. Probes are passive and read-only, run on the collection scheduler
+(never from a web request), honor per-check intervals, and are capped at 20
+checks per device. Failing `http_get`/`http_head`/`tcp` checks open a single
+`probe_failed` alert per device (naming every offending check) with the normal
+acknowledge/mute/resolve lifecycle, and latency plus failure counts are sampled
+into `integration_metrics`. `tls_cert` checks (below) open their own
+`cert_expiry` alert instead, so an approaching certificate expiry reads as its
+own explainable condition rather than a generic probe failure.
 
 `integration_polling.probe_seconds` (default 30) is the base scheduler tick;
 individual checks still honor their own `interval_seconds`.
+
+### Security-surface monitoring
+
+Every device's fleet poll gathers a bounded, read-only "security" signal set
+alongside its normal metrics: a recent failed-SSH-login count and the current
+listening TCP/UDP port inventory (`ss -tlnp`/`ss -ulnp`). Both are bounded and
+rate-limited, and both surface in the API/UI like any other integration
+(`integrations.security`) and open alerts through the same lifecycle as every
+other alert type:
+
+- **`auth_fail`** — opens when recent failed SSH login attempts (read from
+  `journalctl`/`auth.log`, bounded to the last ~30 minutes / 500 lines, on the
+  same low-frequency cadence as the existing journal tail) reach
+  `security_monitoring.auth_fail_warning` (default 5), escalates to critical
+  at `auth_fail_critical` (default 20), and needs to drop back below
+  `auth_fail_warning - auth_fail_hysteresis` (default hysteresis 2) before it
+  closes — the same open/close-band hysteresis the temperature and disk-usage
+  alerts already use.
+- **`listener_change`** — compares the live listener inventory against a
+  device's optional `expected_listeners` list (see below); an unexpected port
+  or a missing expected one must persist for
+  `security_monitoring.listener_change_duration_seconds` (default 60s) before
+  it opens, so a single flapping service doesn't spam an alert. A device with
+  no `expected_listeners` configured is never alerted on (its inventory is
+  still collected and visible, just not compared against anything).
+- **`cert_expiry`** — see the `tls_cert` probe kind above: a 30/7/1-day
+  info/warning/critical severity ladder as a configured certificate's expiry
+  approaches.
+
+```json
+{
+  "expected_listeners": ["tcp:22", "tcp:9090", "udp:53"]
+}
+```
+
+is a per-device field (sibling of `important_paths`), and
+`security_monitoring` is a top-level `config.json` section:
+
+```json
+"security_monitoring": {
+  "auth_fail_warning": 5,
+  "auth_fail_critical": 20,
+  "auth_fail_hysteresis": 2,
+  "listener_change_duration_seconds": 60
+}
+```
 
 ## Scheduled actions (cron-style)
 
