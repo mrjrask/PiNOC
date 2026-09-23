@@ -208,6 +208,21 @@ def test_incompatible_heartbeat_does_not_claim_queued_job(tmp_path):
  assert gateway.job(queued["job_id"])["status"]=="queued"
  app.extensions["pinoc_actions"].stop()
 
+def test_protocol_one_agent_cannot_claim_hardware_device_job(tmp_path):
+ db,gateway=setup(tmp_path);credentials=enroll(gateway);root=tmp_path/"repo";root.mkdir();workspace(gateway,root)
+ profiles={"hardware":{"argv":["python3","-V"],"hardware":True,"devices":["/dev/gpiochip0"]}}
+ hardware={"devices":["/dev/gpiochip0"]}
+ db.execute("UPDATE workspaces SET test_profiles_json=?,hardware_profile_json=? WHERE workspace_id='project'",(json.dumps(profiles),json.dumps(hardware)))
+ queued=gateway.submit(identity(scopes=identity()["scopes"]+["dev:hardware"]),{"device_id":"pi","workspace_id":"project","job_type":"test","profile":"hardware"})
+ history=HistoryManager(db,{})
+ app=create_app(PiNOCState(),{"TESTING":True,"AUTH_ENABLED":True,"SECRET_KEY":CREDENTIAL_KEY},history)
+ body=json.dumps({"protocol_version":1}).encode();stamp=str(int(time.time()));nonce="legacy-hardware"
+ headers={"Content-Type":"application/json","X-PiNOC-Agent":credentials["agent_id"],"X-PiNOC-Timestamp":stamp,"X-PiNOC-Nonce":nonce,"X-PiNOC-Signature":gateway.sign(credentials["agent_id"],credentials["credential"],stamp,nonce,body)}
+ response=app.test_client().post("/api/v1/agent/heartbeat",data=body,headers=headers)
+ assert response.status_code==409 and response.get_json()["error_type"]=="protocol_incompatible"
+ assert gateway.job(queued["job_id"])["status"]=="queued"
+ app.extensions["pinoc_actions"].stop()
+
 def test_wire_job_uses_selected_profile_artifact_patterns(tmp_path):
  _,gateway=setup(tmp_path);enroll(gateway);root=tmp_path/"repo";root.mkdir();workspace(gateway,root)
  profiles={"screenshots":{"argv":["python3","-V"],"artifact_patterns":["screens/*.png"]}}

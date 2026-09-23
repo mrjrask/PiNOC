@@ -23,8 +23,11 @@ def redact(value):
         return re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~-]+",r"\1[REDACTED]",value)
     return value
 
-PROTOCOL_VERSION=1
-AGENT_VERSION="1.0.0"
+# Protocol 2 adds the ``hardware_devices`` job field.  Keeping this distinct
+# from protocol 1 prevents an older executor from claiming a device-bound job
+# and silently running it without the requested device bindings.
+PROTOCOL_VERSION=2
+AGENT_VERSION="1.1.0"
 STATUSES={"queued","dispatched","running","succeeded","failed","timed_out","cancelled","agent_lost","rejected"}
 READ_TYPES={"capabilities","workspace_info","git_status","git_diff","file_read","log_read","service_status"}
 TEST_TYPES={"test","python","pytest","npm_test","artifact_collect"}
