@@ -735,4 +735,37 @@ async function incidentDetail(id){
   let rows=timeline.map(e=>`<tr><td>${localTime(e.time)}</td><td>${esc(e.kind)}</td><td>${esc(e.device_id||'cluster')}</td><td>${esc(e.description)}</td></tr>`);
   root.innerHTML=`<div class="title-row"><span class="dot ${esc(incident.severity)}"></span><div><h1>${esc(incident.title)}</h1><p>${esc(incident.severity)} · opened ${localTime(incident.opened_at)} · resolved ${localTime(incident.resolved_at)}</p></div></div><section class="panel"><dl class="details"><dt>MTTA</dt><dd>${durationMinutes(incident.mtta_seconds)}</dd><dt>MTTR</dt><dd>${durationMinutes(incident.mttr_seconds)}</dd><dt>Devices involved</dt><dd>${esc((incident.device_ids||[]).join(', ')||'none')}</dd></dl><p class="actions"><a class="action" href="/api/incidents/${id}/export.md">Export Markdown</a> <a class="action" href="/api/incidents/${id}/export.json">Export JSON</a> <a class="action" href="/api/incidents/${id}/print" target="_blank" rel="noopener">Printable view</a></p></section><section class="panel"><h2>Timeline</h2>${table(['Time','Kind','Device','Description'],rows)}</section>`;
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,incidents,incidentDetail,slos,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();
+// Scheduled fleet health reports (enhancement #5, see pinoc/reports.py):
+// lists configured reports (next/last firing) with a "Run now" button, and
+// the archive of rendered editions with view/download links. Self-contained:
+// nothing here touches the routes/rendering above.
+async function reports(){
+  const listRoot=document.querySelector('#reports-list'),editionsRoot=document.querySelector('#report-editions');
+  if(!listRoot&&!editionsRoot)return;
+  const renderList=async()=>{
+    if(!listRoot)return;
+    let data;
+    try{data=await(await fetch('/api/reports')).json()}catch(error){listRoot.innerHTML='<p class="muted">Reports unavailable.</p>';return}
+    const rows=(data.reports||[]).map(r=>`<tr><td>${esc(r.name)}</td><td><code>${esc(r.spec)}</code>${r.timezone&&r.timezone!=='UTC'?` <small>${esc(r.timezone)}</small>`:''}</td><td>${esc(r.scope&&r.scope.type==='fleet'?'whole fleet':`${r.scope&&r.scope.type}=${r.scope&&r.scope.value}`)}</td><td>${esc((r.sections||[]).join(', '))}</td><td>${esc(r.format)}</td><td>${r.next_run?localTime(r.next_run):'—'}</td><td>${r.last_run?localTime(r.last_run):'—'}</td><td><button data-run="${esc(r.id)}">Run now</button></td></tr>`);
+    listRoot.innerHTML=rows.length?table(['Name','Schedule','Scope','Sections','Format','Next run','Last run',''],rows):'<p class="muted">No reports configured. Add one to the top-level <code>reports</code> section in config.json.</p>';
+    listRoot.querySelectorAll('button[data-run]').forEach(btn=>{btn.onclick=async()=>{
+      btn.disabled=true;
+      try{
+        let response=await mutate(`/api/reports/${encodeURIComponent(btn.dataset.run)}/run`,{method:'POST'});
+        let result=await response.json().catch(()=>({}));
+        if(!response.ok)alert(result.error||'run failed');
+      }catch(error){}
+      btn.disabled=false;
+      await renderEditions();
+    }});
+  };
+  const renderEditions=async()=>{
+    if(!editionsRoot)return;
+    let data;
+    try{data=await(await fetch('/api/reports/editions')).json()}catch(error){editionsRoot.innerHTML='<p class="muted">Report archive unavailable.</p>';return}
+    const rows=(data.editions||[]).map(e=>`<tr><td>${esc(e.name)}</td><td>${localTime(e.generated_at)}</td><td>${esc(e.format)}</td><td>${e.device_count}</td><td>${e.delivered?'delivered':`<span class="critical-row">${esc(e.delivery_error||'not delivered')}</span>`}</td><td class="row-actions"><a class="action" href="/api/reports/editions/${e.id}/download" target="_blank" rel="noopener">${e.format==='csv'?'Download':'View / print'}</a></td></tr>`);
+    editionsRoot.innerHTML=rows.length?table(['Report','Generated','Format','Devices','Delivery',''],rows):'<p class="muted">No editions yet.</p>';
+  };
+  await Promise.all([renderList(),renderEditions()]);
+}
+return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,incidents,incidentDetail,slos,reports,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();

@@ -1508,6 +1508,74 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         if incident is None:return jsonify({"error":"incident not found"}),404
         return Response(to_html(incident,timeline),mimetype="text/html")
 
+    # -- Scheduled fleet health reports (enhancement #5) --------------------
+    # Self-contained, additive block: pinoc.reports.ReportService reuses
+    # pinoc.schedules' cron/alias/one-shot spec parsing for firing and the
+    # existing notification channels (NotificationService.send_direct) for
+    # delivery -- no second scheduler or delivery mechanism. Built here the
+    # same way pinoc.slo.SLOService is (no ActionDispatcher dependency);
+    # started/stopped by pi_noc.py alongside self_monitoring/slo. Nothing
+    # here touches the routes/helpers above.
+    from pinoc.reports import ReportService
+    app.extensions["pinoc_reports"] = ReportService(
+        history.db, state=state, notifications=notifications,
+        config=(app.config.get("PINOC_CONFIG") or {}).get("reports")) if history is not None else None
+    app.config["TOKEN_SCOPE_PERMISSIONS"].update({
+        "api_reports": "view", "api_report_run": "config.write",
+        "api_report_editions": "view", "api_report_edition": "view",
+        "api_report_edition_download": "view",
+    })
+
+    def _reports_service():
+        return app.extensions.get("pinoc_reports")
+
+    @app.get("/api/reports")
+    def api_reports():
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        service=_reports_service()
+        return jsonify(service.status() if service is not None else {"running":False,"reports":[]})
+
+    @app.post("/api/reports/<report_id>/run")
+    def api_report_run(report_id):
+        if security and not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=_reports_service()
+        if service is None:return jsonify({"error":"reports are not available"}),409
+        try:
+            edition_id=service.run_now(report_id)
+        except ValueError as exc:
+            return jsonify({"error":str(exc)}),404
+        actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"report.run",report_id,
+                     {"edition_id":edition_id},"allowed","succeeded") if actions else None
+        return jsonify({"edition_id":edition_id}),201
+
+    @app.get("/api/reports/editions")
+    def api_report_editions():
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        service=_reports_service()
+        return jsonify({"editions":service.editions(request.args.get("report_id")) if service is not None else []})
+
+    @app.get("/api/reports/editions/<int:edition_id>")
+    def api_report_edition(edition_id):
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        service=_reports_service()
+        edition=service.edition(edition_id) if service is not None else None
+        if edition is None:return jsonify({"error":"edition not found"}),404
+        return jsonify({"edition":edition})
+
+    @app.get("/api/reports/editions/<int:edition_id>/download")
+    def api_report_edition_download(edition_id):
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        service=_reports_service()
+        edition=service.edition(edition_id) if service is not None else None
+        if edition is None:return jsonify({"error":"edition not found"}),404
+        is_csv=edition["format"]=="csv"
+        return Response(edition["content"],mimetype="text/csv" if is_csv else "text/html",
+                        headers={"Content-Disposition":f'attachment; filename="pinoc-report-{edition["report_id"]}-{edition_id}.{"csv" if is_csv else "html"}"'})
+
+    @app.get("/reports")
+    def reports_page():
+        return render_template("reports.html")
+
     return app
 
 

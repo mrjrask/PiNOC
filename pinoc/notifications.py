@@ -267,6 +267,24 @@ class NotificationService:
     def channels(self) -> List[Dict[str, Any]]:
         return [dict(c) for c in self._channels]
 
+    # -- ad-hoc delivery for non-alert features ---------------------------
+    def send_direct(self, channel: Dict[str, Any], subject: str, body: str) -> "tuple[bool, Optional[str]]":
+        """Send one ad-hoc message through an existing channel's exact
+        ntfy/smtp/webhook delivery path, bypassing the alert transition/
+        severity filtering :meth:`enqueue` applies. Synchronous (no queue) --
+        a feature that needs this off its own request/tick path should call
+        it from its own thread, the way :class:`pinoc.reports.ReportService`
+        does. Recorded through the same :meth:`_record` bookkeeping
+        (per-channel status/history and ``notification_log``) as a queued
+        alert send, so a delivered/failed report shows up next to alert
+        notifications in the same places.
+        """
+        message = {"transition": "report", "device_id": None, "device_name": None,
+                   "alert_type": "report", "severity": "info", "subject": subject, "body": body}
+        ok, error = self._send(channel, message)
+        self._record(channel, message, ok, error)
+        return ok, error
+
 
 def _now_iso() -> str:
     from datetime import datetime, timezone
