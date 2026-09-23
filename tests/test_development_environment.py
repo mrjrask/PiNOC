@@ -25,6 +25,13 @@ def test_secret_environment_is_encrypted_at_rest_and_restored_for_agent(tmp_path
                             "allowed_job_types": ["test"], "allowed_env": ["API_TOKEN"],
                             "test_profiles": {"unit": {"argv": ["python3", "-V"],
                                                             "environment": {"API_TOKEN": "real-secret"}}}})
+    stored_profiles = db.scalar("SELECT test_profiles_json FROM workspaces WHERE workspace_id=?",
+                                ("project",))
+    assert "real-secret" not in stored_profiles
+    assert "__encrypted__" in json.loads(stored_profiles)
+    assert gateway.workspace("project")["test_profiles"]["unit"]["environment"] == {
+        "API_TOKEN": "[REDACTED]"
+    }
     job = gateway.submit(_identity(), {"device_id": "pi", "workspace_id": "project",
                                        "job_type": "test", "profile": "unit"})
     stored = db.scalar("SELECT environment_json FROM development_jobs WHERE job_id=?", (job["job_id"],))
@@ -32,3 +39,6 @@ def test_secret_environment_is_encrypted_at_rest_and_restored_for_agent(tmp_path
     assert "__encrypted__" in json.loads(stored)
     wire = gateway._wire_job(gateway.job(job["job_id"]))
     assert wire["environment"] == {"API_TOKEN": "real-secret"}
+    assert wire["workspace"]["test_profiles"]["unit"]["environment"] == {
+        "API_TOKEN": "[REDACTED]"
+    }

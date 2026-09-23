@@ -83,6 +83,18 @@ class DevelopmentGateway:
         if not isinstance(environment,dict) or "__encrypted__" not in environment:return environment
         try:return json.loads(self._fernet.decrypt(str(environment["__encrypted__"]).encode()).decode())
         except (InvalidToken,TypeError,ValueError,json.JSONDecodeError) as exc:raise DevError("job environment could not be decrypted","job_environment_unavailable",409) from exc
+    def _encode_test_profiles(self,profiles):
+        # Profiles are persisted independently of jobs, so their environment
+        # secrets need the same database-at-rest protection as job copies.
+        if redact(profiles)!=profiles:
+            payload=json.dumps(profiles,sort_keys=True,separators=(",",":"))
+            return json.dumps({"__encrypted__":self._fernet.encrypt(payload.encode()).decode()},sort_keys=True)
+        return json.dumps(profiles,sort_keys=True)
+    def _decode_test_profiles(self,row):
+        profiles=_loads(row,"test_profiles_json",{})
+        if not isinstance(profiles,dict) or "__encrypted__" not in profiles:return profiles
+        try:return json.loads(self._fernet.decrypt(str(profiles["__encrypted__"]).encode()).decode())
+        except (InvalidToken,TypeError,ValueError,json.JSONDecodeError) as exc:raise DevError("test profiles could not be decrypted","test_profiles_unavailable",409) from exc
     def audit(self,identity,ip,device,action,target,params,auth,result=None,error=None):
         self.db.execute("INSERT INTO audit_records(timestamp,user,role,source_ip,device_id,action,target,parameters_json,authorization_result,execution_result,error) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(utcnow(),identity.get("username","agent"),identity.get("role","agent"),ip,device,action,target,json.dumps(redact(params or {}),sort_keys=True),auth,result,redact(error) if error else None))
     def enrollment_code(self,device,actor,ttl=600):
@@ -139,14 +151,16 @@ class DevelopmentGateway:
     def save_workspace(self,data):
         wid=str(data.get("workspace_id", ""));device=str(data.get("device_id", ""));path=str(data.get("path", ""));mode=str(data.get("mode","read_only"))
         if not all((wid,device,path)) or mode not in {"read_only","development"} or not path.startswith("/") or not all(c.isalnum() or c in "_.-" for c in wid):raise DevError("invalid workspace")
-        fields=(wid,device,path,str(data.get("repository", ""))[:512],mode,data.get("execution_user"),json.dumps(data.get("allowed_job_types",sorted(READ_TYPES|TEST_TYPES))),json.dumps(data.get("allowed_commands",[])),json.dumps(data.get("allowed_env",[])),json.dumps(data.get("test_profiles",{})),json.dumps(data.get("services",[])),json.dumps(data.get("artifact_patterns",[])),json.dumps(data.get("sensitive_patterns",SENSITIVE)),json.dumps(data.get("hardware_profile",{})),int(bool(data.get("approved",True))),utcnow(),utcnow())
+        fields=(wid,device,path,str(data.get("repository", ""))[:512],mode,data.get("execution_user"),json.dumps(data.get("allowed_job_types",sorted(READ_TYPES|TEST_TYPES))),json.dumps(data.get("allowed_commands",[])),json.dumps(data.get("allowed_env",[])),self._encode_test_profiles(data.get("test_profiles",{})),json.dumps(data.get("services",[])),json.dumps(data.get("artifact_patterns",[])),json.dumps(data.get("sensitive_patterns",SENSITIVE)),json.dumps(data.get("hardware_profile",{})),int(bool(data.get("approved",True))),utcnow(),utcnow())
         self.db.execute("INSERT INTO workspaces VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET device_id=excluded.device_id,path=excluded.path,repository=excluded.repository,mode=excluded.mode,execution_user=excluded.execution_user,allowed_job_types_json=excluded.allowed_job_types_json,allowed_commands_json=excluded.allowed_commands_json,allowed_env_json=excluded.allowed_env_json,test_profiles_json=excluded.test_profiles_json,services_json=excluded.services_json,artifact_patterns_json=excluded.artifact_patterns_json,sensitive_patterns_json=excluded.sensitive_patterns_json,hardware_profile_json=excluded.hardware_profile_json,approved=excluded.approved,updated_at=excluded.updated_at",fields);return self.workspace(wid)
-    def workspace(self,wid):
-        rows=self.db.rows("SELECT * FROM workspaces WHERE workspace_id=?",(wid,));return self._workspace(rows[0]) if rows else None
+    def workspace(self,wid,include_secrets=False):
+        rows=self.db.rows("SELECT * FROM workspaces WHERE workspace_id=?",(wid,));return self._workspace(rows[0],include_secrets) if rows else None
     def workspaces(self,approved=True):return [self._workspace(x) for x in self.db.rows("SELECT * FROM workspaces"+(" WHERE approved=1" if approved else "")+" ORDER BY device_id,workspace_id")]
-    def _workspace(self,row):
+    def _workspace(self,row,include_secrets=False):
         out=dict(row)
-        for key in ("allowed_job_types_json","allowed_commands_json","allowed_env_json","test_profiles_json","services_json","artifact_patterns_json","sensitive_patterns_json","hardware_profile_json"):out[key[:-5]]=_loads(row,key,{} if key in {"test_profiles_json","hardware_profile_json"} else []);out.pop(key,None)
+        for key in ("allowed_job_types_json","allowed_commands_json","allowed_env_json","services_json","artifact_patterns_json","sensitive_patterns_json","hardware_profile_json"):out[key[:-5]]=_loads(row,key,{} if key=="hardware_profile_json" else []);out.pop(key,None)
+        profiles=self._decode_test_profiles(row)
+        out["test_profiles"]=profiles if include_secrets else redact(profiles);out.pop("test_profiles_json",None)
         return out
     def _restricted(self,identity,device,wid,kind):
         for key,value in (("devices",device),("workspaces",wid),("job_types",kind)):
@@ -156,7 +170,7 @@ class DevelopmentGateway:
         if kind not in ALL_TYPES:raise DevError("unsupported job type")
         required="dev:read" if kind in READ_TYPES else "dev:test" if kind in TEST_TYPES else "dev:command"
         if required not in identity.get("scopes",[]) and identity.get("token"):raise DevError("required development scope missing","authorization_denied",403)
-        ws=self.workspace(wid) if wid else None
+        ws=self.workspace(wid,include_secrets=True) if wid else None
         if kind not in {"capabilities"} and (not ws or not ws["approved"] or ws["device_id"]!=device):raise DevError("approved workspace not found","workspace_not_found",404)
         if ws and kind not in ws["allowed_job_types"]:raise DevError("job type is not approved for workspace","authorization_denied",403)
         agent=next((x for x in self.agents() if x["device_id"]==device),None)
@@ -245,10 +259,11 @@ class DevelopmentGateway:
         if not rows:return None
         row=rows[0];self.db.execute("UPDATE development_jobs SET status='dispatched',dispatched_at=?,queue_reason=NULL WHERE job_id=? AND status='queued'",(utcnow(),row["job_id"]));return self._wire_job(self.job(row["job_id"]))
     def _wire_job(self,row):
-        ws=self.workspace(row["workspace_id"]) if row.get("workspace_id") else None
+        ws=self.workspace(row["workspace_id"],include_secrets=True) if row.get("workspace_id") else None
         if ws and row.get("profile"):
             definition=ws.get("test_profiles",{}).get(row["profile"],{})
             ws["artifact_patterns"]=definition.get("artifact_patterns",ws.get("artifact_patterns",[]))
+        if ws:ws["test_profiles"]=redact(ws.get("test_profiles",{}))
         return {"job_id":row["job_id"],"job_type":row["job_type"],"profile":row.get("profile"),"workspace":ws,"argv":_loads(row,"argv_json",[]),"environment":self._decode_environment(row),"request":_loads(row,"request_json",{}),"timeout_seconds":row["timeout_seconds"],"output_limit_bytes":self.output_limit,"file_limit_bytes":self.file_limit,"artifact_limits":{"count":self.artifact_count,"file_bytes":self.artifact_file_limit,"total_bytes":self.artifact_total_limit}}
     def result(self,agent,job_id,body):
         job=self.job(job_id)
