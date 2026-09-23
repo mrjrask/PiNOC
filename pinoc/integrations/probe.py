@@ -17,9 +17,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-CHECK_KINDS = ("http_get", "http_head", "tcp")
+CHECK_KINDS = ("http_get", "http_head", "tcp", "tls_cert")
 MAX_CHECKS = 20
 MAX_PATTERN = 500
 MIN_TIMEOUT = 0.5
@@ -30,6 +31,13 @@ DEFAULT_TIMEOUT = 5.0
 DEFAULT_INTERVAL = 60.0
 # A result older than this many intervals is considered stale and failing.
 STALE_INTERVALS = 4.0
+# tls_cert's 30/7/1-day expiry ladder: severity escalates as the
+# certificate's expiry approaches, exactly like a probe check's own
+# warning/critical severity except this one is fixed rather than
+# per-check-configurable, since it names a specific, well-known cadence.
+CERT_NOTICE_DAYS = 30.0
+CERT_WARNING_DAYS = 7.0
+CERT_CRITICAL_DAYS = 1.0
 
 _NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
 _HTTP_METHODS = {"http_get": "GET", "http_head": "HEAD"}
@@ -72,14 +80,14 @@ def validate_check(raw: Any, index: int = 0) -> Dict[str, Any]:
         "name": name, "kind": kind, "timeout_seconds": timeout, "interval_seconds": interval,
         "severity": severity, "enabled": bool(raw.get("enabled", True)),
     }
-    if kind == "tcp":
+    if kind in ("tcp", "tls_cert"):
         host = str(raw.get("host") or "").strip()
         if not host or len(host) > 253:
-            raise ProbeConfigError(f"{label}: host is required for tcp checks")
+            raise ProbeConfigError(f"{label}: host is required for {kind} checks")
         try:
             port = int(raw.get("port"))
         except (TypeError, ValueError):
-            raise ProbeConfigError(f"{label}: port must be an integer for tcp checks") from None
+            raise ProbeConfigError(f"{label}: port must be an integer for {kind} checks") from None
         if not 1 <= port <= 65535:
             raise ProbeConfigError(f"{label}: port must be between 1 and 65535")
         check.update(host=host, port=port)
@@ -140,17 +148,29 @@ def validate_probes(device_label: str, value: Any) -> Dict[str, Any]:
     return probes
 
 
+def _default_cert_fetcher(host: str, port: int, timeout: float) -> Dict[str, Any]:
+    """Connect, complete a TLS handshake, and return the peer certificate
+    dict (``ssl.SSLSocket.getpeercert()``'s shape, e.g. a ``notAfter``
+    string). No certificate data is retained beyond this one call."""
+    context = ssl.create_default_context()
+    with socket.create_connection((host, port), timeout=timeout) as raw_socket:
+        with context.wrap_socket(raw_socket, server_hostname=host) as tls_socket:
+            return tls_socket.getpeercert() or {}
+
+
 def run_check(
     check: Dict[str, Any],
     opener: Optional[Callable] = None,
     connector: Optional[Callable] = None,
     clock: Optional[Callable[[], float]] = None,
     now: Optional[str] = None,
+    cert_fetcher: Optional[Callable[[str, int, float], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Execute one check and return a normalized result.
 
     ``opener`` and ``connector`` are injectable for tests; the defaults use
-    ``urllib`` and ``socket``.  No shell, no subprocess, no code execution.
+    ``urllib`` and ``socket``. ``cert_fetcher`` is the ``tls_cert`` kind's
+    equivalent injection point. No shell, no subprocess, no code execution.
     """
     from pinoc.database import utcnow
 
@@ -168,6 +188,25 @@ def run_check(
         else:
             result["ok"] = True
             result["status"] = "reachable"
+    elif check["kind"] == "tls_cert":
+        fetch_cert = cert_fetcher or _default_cert_fetcher
+        try:
+            cert = fetch_cert(check["host"], check["port"], check["timeout_seconds"])
+            not_after = cert.get("notAfter") if isinstance(cert, dict) else None
+            if not not_after:
+                raise ValueError("certificate carried no notAfter field")
+            expires_epoch = ssl.cert_time_to_seconds(not_after)
+            expires_at = datetime.fromtimestamp(expires_epoch, timezone.utc)
+            days_remaining = (expires_at - datetime.now(timezone.utc)).total_seconds() / 86400.0
+            result["status"] = "valid"
+            result["days_remaining"] = round(days_remaining, 2)
+            result["expires_at"] = expires_at.isoformat()
+            result["ok"] = days_remaining > CERT_NOTICE_DAYS
+            if not result["ok"]:
+                result["error"] = (f"certificate for {check['host']}:{check['port']} "
+                                   f"expires in {days_remaining:.1f} day(s)")
+        except (OSError, ValueError, ssl.SSLError) as exc:
+            result["error"] = f"certificate check for {check['host']}:{check['port']} failed: {exc.__class__.__name__}: {exc}"
     else:
         request = urllib.request.Request(check["url"], method=_HTTP_METHODS[check["kind"]],
                                          headers={"User-Agent": "PiNOC-Probe/2.0",
@@ -242,6 +281,7 @@ def normalize(
     normalized_checks: List[Dict[str, Any]] = []
     latencies: List[float] = []
     failing: List[Dict[str, Any]] = []
+    cert_items: List[Dict[str, Any]] = []
     for check in checks:
         result = dict(by_name.get(check["name"], {"name": check["name"], "kind": check["kind"],
                                                   "ok": False, "status": None,
@@ -252,14 +292,20 @@ def normalize(
         if age is not None and age > interval * STALE_INTERVALS:
             result = {**result, "ok": False,
                       "error": f"result stale ({int(age)}s without a successful run)"}
-        if not result.get("ok"):
+        # tls_cert checks get their own 30/7/1-day severity ladder below
+        # (cert_expiry) instead of the generic probe_failed bucket, so a
+        # slowly-approaching expiry reads as its own explainable alert
+        # rather than an opaque "probe check failing".
+        if check.get("kind") == "tls_cert":
+            cert_items.append({"check": check, "result": result})
+        elif not result.get("ok"):
             failing.append({"check": check, "result": result})
         latency = result.get("latency_ms")
         if latency is not None:
             latencies.append(float(latency))
         normalized_checks.append({key: result.get(key) for key in
                                   ("name", "kind", "url", "host", "port", "ok", "status",
-                                   "latency_ms", "error", "checked_at")})
+                                   "latency_ms", "error", "checked_at", "days_remaining", "expires_at")})
     # The alert engine treats the condition type as a stable class, so all
     # failing checks on a device collapse into one explainable condition that
     # names every offender; the fingerprint stays one alert per device.
@@ -275,7 +321,40 @@ def normalize(
             "severity": severity,
             "message": f"{len(failing)} probe check(s) failing: {details}"[:500],
         })
-    failed = len(failing)
+    cert_failed = 0
+    cert_bands: List[tuple] = []
+    for item in cert_items:
+        days = item["result"].get("days_remaining")
+        error = item["result"].get("error")
+        if not item["result"].get("ok"):
+            cert_failed += 1
+        if days is None:
+            if error:
+                cert_bands.append(("critical", item, None))
+            continue
+        if days <= CERT_CRITICAL_DAYS:
+            band = "critical"
+        elif days <= CERT_WARNING_DAYS:
+            band = "warning"
+        elif days <= CERT_NOTICE_DAYS:
+            band = "info"
+        else:
+            continue
+        cert_bands.append((band, item, days))
+    if cert_bands:
+        rank = {"info": 0, "warning": 1, "critical": 2}
+        severity = max(cert_bands, key=lambda entry: rank[entry[0]])[0]
+        details = "; ".join(
+            f"'{item['check']['name']}' ({item['check'].get('host')}:{item['check'].get('port')}) " +
+            (f"expires in {days:.1f} day(s)" if days is not None else
+             (item["result"].get("error") or "certificate check failed"))
+            for _band, item, days in cert_bands)
+        conditions.append({
+            "type": "cert_expiry",
+            "severity": severity,
+            "message": f"{len(cert_bands)} certificate(s) nearing expiry: {details}"[:500],
+        })
+    failed = len(failing) + cert_failed
     data = {
         "checks": normalized_checks,
         "checks_total": len(checks),

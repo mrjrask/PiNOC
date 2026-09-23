@@ -129,6 +129,15 @@ def validate_anomaly_detection(value):
             if setting is not None and (isinstance(setting,bool) or not isinstance(setting,(int,float)) or not 0<=setting<=100):
                 raise ValueError(f"anomaly_detection.metrics.{name}.{zname} must be a number between 0 and 100")
 
+def validate_security_monitoring(value):
+    section=value.get("security_monitoring")
+    if section is None:return
+    if not isinstance(section,dict):raise ValueError("security_monitoring must be an object")
+    for name in ("auth_fail_warning","auth_fail_critical","auth_fail_hysteresis","listener_change_duration_seconds"):
+        setting=section.get(name)
+        if setting is not None and (isinstance(setting,bool) or not isinstance(setting,(int,float)) or setting<0):
+            raise ValueError(f"security_monitoring.{name} must be a non-negative number")
+
 def validate_alert_correlation(value):
     section=value.get("alert_correlation")
     if section is None:return
@@ -162,6 +171,7 @@ def validate_config(value,base_dir=Path(".")):
     validate_notifications(value)
     validate_anomaly_detection(value)
     validate_alert_correlation(value)
+    validate_security_monitoring(value)
     devices,errors=load_devices(value,Path(base_dir))
     if errors:raise ValueError("; ".join(errors))
     validate_network_topology(value,{d.id for d in devices})

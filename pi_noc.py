@@ -1223,12 +1223,18 @@ class SharedSnapshotCoordinator:
         # unaffected.
         ssh_passwords = {device.id: value for device in devices
                          if (value := read_env_value(device_ssh_password_env_key(device.id)))}
+        security_monitoring = CONFIG.get("security_monitoring", {})
         self.fleet_collector = FleetCollector(
             devices, int(CONFIG.get("fleet_max_workers", 4)),
             float(CONFIG.get("ssh_command_timeout", 8)), read_env_value("CM5_SSH_PASS"),
             log_tail_seconds=float(polling.get("log_tail_seconds", 300)),
             log_tail_lines=int(polling.get("log_tail_lines", 50)),
-            passwords=ssh_passwords)
+            passwords=ssh_passwords,
+            auth_fail_warning=float(security_monitoring.get("auth_fail_warning", 5)),
+            auth_fail_critical=float(security_monitoring.get("auth_fail_critical", 20)),
+            auth_fail_hysteresis=float(security_monitoring.get("auth_fail_hysteresis", 2)),
+            listener_change_duration_seconds=float(
+                security_monitoring.get("listener_change_duration_seconds", 60)))
         self.configured_fleet_devices = tuple(devices)
         global_thresholds = CONFIG.get("health_thresholds", {})
         try:

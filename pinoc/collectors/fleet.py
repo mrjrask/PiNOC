@@ -28,8 +28,8 @@ SCRIPT = r'''set +e
 # passed only on the (much lower-frequency) cycle a package check is due --
 # `apt-get --just-print upgrade` simulates a dependency resolution over the
 # whole local apt cache and must not run on every fleet poll.
-jlogs_lines=""; jlogs_units=""; apt_due=0
-for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; __apt__) apt_due=1;; esac; done
+jlogs_lines=""; jlogs_units=""; apt_due=0; authcheck_due=0
+for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; __apt__) apt_due=1;; __authcheck__) authcheck_due=1;; esac; done
 echo __OS__; cat /etc/os-release 2>/dev/null; echo __UNAME__; uname -srm
 echo __MODEL__; tr -d '\000' </proc/device-tree/model 2>/dev/null; echo
 echo __UPTIME__; cat /proc/uptime; echo __LOAD__; cat /proc/loadavg
@@ -72,6 +72,19 @@ if command -v iw >/dev/null; then
     # "channel N (freq MHz), width: W MHz, ..." line -- link never prints it.
     [ -n "$ifc" ] && iw dev "$ifc" link 2>/dev/null
     [ -n "$ifc" ] && iw dev "$ifc" info 2>/dev/null
+fi
+echo __LISTENTCP__; ss -Htlnp 2>/dev/null | head -200
+echo __LISTENUDP__; ss -Hulnp 2>/dev/null | head -200
+echo __AUTHFAIL__
+# Bounded, low-frequency (only on the same cadence as the journal tail
+# above): count recent failed SSH login attempts. journalctl is preferred
+# (systemd hosts); auth.log/secure is the fallback on hosts without a
+# journal. Each source is capped at 500 lines, so this is a small, fixed-
+# size scan, never an unbounded log walk.
+if [ "$authcheck_due" = "1" ]; then
+  { journalctl -u ssh -u sshd --no-pager -q -n 500 --since "-30 min" 2>/dev/null
+    tail -n 500 /var/log/auth.log 2>/dev/null
+    tail -n 500 /var/log/secure 2>/dev/null; } | grep -ciE "Failed password|Invalid user|authentication failure|Failed publickey"
 fi
 if [ "$1" = "__discover__" ]; then shift; discovered=$(systemctl list-unit-files --no-legend --no-pager 2>/dev/null | awk '{print $1}' | grep -E '^(cockpit|ssh|desk-display|piaware|dump1090|readsb|magicmirror|ics_modifier|pi-hotspot|temp-monitor|smb|smbd|nmbd|wg-quick)' | head -30); fi
 echo __SERVICES__; systemctl show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ActiveEnterTimestampMonotonic,NRestarts,MemoryCurrent "$@" $discovered 2>/dev/null
@@ -278,6 +291,54 @@ def parse_throttled(text: str) -> Dict[str, bool]:
             "soft_temp_limit_occurred":bool(value&(1<<19)),"raw":hex(value)}
 
 
+MAX_LISTENERS = 200
+_LISTEN_PROCESS_RE = re.compile(r'users:\(\("([^"]+)"')
+
+
+def parse_listeners(tcp_text: str, udp_text: str) -> List[Dict[str, Any]]:
+    """Parse ``ss -Htlnp``/``ss -Hulnp`` output into a bounded listener
+    inventory: one entry per local (proto, port), each carrying the owning
+    process name when it was visible (unprivileged collection often cannot
+    see it, which is fine -- the port/proto pair is what alerting keys on).
+    """
+    result: List[Dict[str, Any]] = []
+    seen: set = set()
+    for proto, text in (("tcp", tcp_text), ("udp", udp_text)):
+        for line in text.splitlines():
+            bits = line.split()
+            if len(bits) < 4:
+                continue
+            local = bits[3]
+            port_text = local.rsplit(":", 1)[-1]
+            try:
+                port = int(port_text)
+            except ValueError:
+                continue
+            if not 1 <= port <= 65535:
+                continue
+            process_match = _LISTEN_PROCESS_RE.search(line)
+            key = (proto, port)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append({"proto": proto, "port": port,
+                           "process": process_match.group(1) if process_match else None})
+            if len(result) >= MAX_LISTENERS:
+                return result
+    return result
+
+
+_AUTH_FAIL_RE = re.compile(r"\A\s*(\d+)")
+
+
+def parse_auth_failures(text: str) -> Optional[int]:
+    """Parse the bounded ``__AUTHFAIL__`` section (a single ``grep -c``
+    count) into an integer. ``None`` means the section was not collected
+    this cycle (not due, or the command produced no parseable output)."""
+    match = _AUTH_FAIL_RE.match(text or "")
+    return int(match.group(1)) if match else None
+
+
 def parse_services(text: str, critical: Iterable[str], system_uptime: float = 0) -> List[Dict[str, Any]]:
     def numeric_value(values: Dict[str, str], name: str) -> Optional[int]:
         try:
@@ -363,7 +424,10 @@ class FleetCollector:
                  password: str = "", runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
                  log_tail_seconds: float = 300.0, log_tail_lines: int = 50,
                  passwords: Optional[Dict[str, str]] = None,
-                 packages_check_seconds: float = 21600.0) -> None:
+                 packages_check_seconds: float = 21600.0,
+                 auth_fail_warning: float = 5, auth_fail_critical: float = 20,
+                 auth_fail_hysteresis: float = 2,
+                 listener_change_duration_seconds: float = 60.0) -> None:
         self.devices=devices; self.max_workers=max(1,min(int(max_workers),16)); self.timeout=float(timeout)
         self.password=password; self.runner=runner
         # Per-device password override (device_id -> password): compromising
@@ -393,6 +457,20 @@ class FleetCollector:
         # long-documented-but-previously-unused DEFAULT_INTERVALS["packages"]).
         self.packages_check_seconds=max(60.0,float(packages_check_seconds))
         self._last_apt_check: Dict[str, float] = {}
+        # Security-surface monitoring (auth failures, listening ports): each
+        # threshold/hysteresis pair follows the exact same open-until-you-
+        # drop-back-down shape history.HistoryManager._alerts() already uses
+        # for temperature/disk usage, just evaluated here since these
+        # signals are computed in this collector rather than persisted
+        # thresholds. auth_fail_active/listener_since are per-device
+        # cross-poll state, the same idiom as previous_cpu/cpu_since above.
+        self.auth_fail_warning=max(1.0,float(auth_fail_warning))
+        self.auth_fail_critical=max(self.auth_fail_warning,float(auth_fail_critical))
+        self.auth_fail_hysteresis=max(0.0,float(auth_fail_hysteresis))
+        self.listener_change_duration_seconds=max(0.0,float(listener_change_duration_seconds))
+        self._auth_fail_active: Dict[str, bool] = {}
+        self._last_auth_failures: Dict[str, Optional[int]] = {}
+        self._listener_since: Dict[str, Dict[str, float]] = {}
 
     def _password_for(self, device: DeviceConfig) -> str:
         return self.passwords.get(device.id) or self.password
@@ -408,6 +486,11 @@ class FleetCollector:
                     break
             if units:
                 args.append(f"__jlogs__:{self.log_tail_lines}:{','.join(units)}")
+            # Independent of whether any journal units were found above (a
+            # device with no monitored_services would otherwise never get an
+            # auth-failure check at all) -- gated on the same jlogs_due
+            # cadence so it stays a bounded, low-frequency scan.
+            args.append("__authcheck__")
         if apt_due:
             args.append("__apt__")
         if device.collection_method == "local": return ["sh", "-s", "--", *args]
@@ -536,12 +619,87 @@ class FleetCollector:
                     data_source="systemd" if candidates else None,
                     error=None if available else "optional data source not discovered",
                     data={"services":found},critical=bool(cfg.get("critical",False))).to_dict()
+            # Security-surface monitoring runs for every device unconditionally
+            # (it is a baseline signal, not an opt-in role integration like the
+            # ones above), reusing the same IntegrationStatus/"conditions"
+            # contract so it surfaces on the device page and feeds the alert
+            # engine exactly like every other integration already does.
+            integrations["security"]=self._security_status(device,data,attempted,now,jlogs_due)
             raw["integrations"]=integrations
             raw["logs"]=parse_jlogs(data.get("JLOGS","")) if jlogs_due else (list(old.logs) if old else [])
             health,reasons,stale=evaluate(raw,device.thresholds); raw.update(health=health,health_reasons=reasons,stale=stale)
             result=DeviceState.from_dict(raw); self.snapshots[device.id]=result; return result
         except (subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
             return self._failure_result(device,old,attempted,exc)
+
+    def _security_status(self, device: DeviceConfig, data: Dict[str, str], attempted: str, now: str,
+                         jlogs_due: bool) -> Dict[str, Any]:
+        """Auth-failure count + listening-port inventory for one device.
+
+        Both signals are bounded (parse_auth_failures reads one bounded
+        `grep -c` count; parse_listeners caps at MAX_LISTENERS) and each
+        alert condition is gated so a single noisy poll can't spam an open:
+        auth_fail uses the same open-band/close-band hysteresis
+        history.HistoryManager._alerts() already uses for temperature/disk
+        usage; listener_change requires the change to persist across polls
+        (listener_change_duration_seconds) before it opens, the same
+        duration-gate shape that file already uses for high_cpu.
+        """
+        did = device.id
+        auth_failures = parse_auth_failures(data.get("AUTHFAIL", "")) if jlogs_due else None
+        if auth_failures is None:
+            # Not due this cycle -- surface the last real count rather than
+            # flip to "unknown" on every poll that doesn't land on the
+            # (multi-minute) log-tail cadence, mirroring the "packages"
+            # integration's same not-due fallback above.
+            auth_failures = self._last_auth_failures.get(did)
+        else:
+            self._last_auth_failures[did] = auth_failures
+        listeners = parse_listeners(data.get("LISTENTCP", ""), data.get("LISTENUDP", ""))
+        expected = set(device.expected_listeners)
+        observed = {f"{entry['proto']}:{entry['port']}" for entry in listeners}
+        unexpected = sorted(observed - expected) if expected else []
+        missing = sorted(expected - observed) if expected else []
+        changed = set(unexpected) | set(missing)
+        since = self._listener_since.setdefault(did, {})
+        for key in list(since):
+            if key not in changed:
+                del since[key]
+        now_mono = time.monotonic()
+        confirmed = []
+        for key in changed:
+            first_seen = since.setdefault(key, now_mono)
+            if now_mono - first_seen >= self.listener_change_duration_seconds:
+                confirmed.append(key)
+        conditions: List[Dict[str, Any]] = []
+        active_before = self._auth_fail_active.get(did, False)
+        if auth_failures is not None:
+            cutoff = (self.auth_fail_warning - self.auth_fail_hysteresis) if active_before else self.auth_fail_warning
+            is_active = auth_failures >= max(1.0, cutoff)
+            self._auth_fail_active[did] = is_active
+            if is_active:
+                severity = "critical" if auth_failures >= self.auth_fail_critical else "warning"
+                conditions.append({"type": "auth_fail", "severity": severity,
+                                   "message": f"{auth_failures} failed SSH login attempt(s) in the last ~30 minutes"})
+        else:
+            self._auth_fail_active[did] = active_before
+        if confirmed:
+            details = [f"unexpected listener {key}" if key in unexpected else f"expected listener missing: {key}"
+                      for key in sorted(confirmed)]
+            conditions.append({"type": "listener_change", "severity": "warning",
+                               "message": "; ".join(details)[:400]})
+        status = IntegrationStatus(
+            name="security", enabled=True, available=True,
+            health="critical" if any(c["severity"] == "critical" for c in conditions)
+            else "warning" if conditions else "healthy",
+            last_success=now, last_attempt=attempted, data_source="ssh",
+            data={"auth_failures": auth_failures, "listeners": listeners,
+                 "expected_listeners": sorted(expected), "unexpected_listeners": unexpected,
+                 "missing_listeners": missing},
+            critical=False)
+        value = status.to_dict()
+        value["conditions"] = conditions
+        return value
 
     def _failure_result(self, device: DeviceConfig, old: Optional[DeviceState], attempted: str, exc: BaseException) -> DeviceState:
         LOG.warning("[%s] collection failed: %s",device.id,exc)
