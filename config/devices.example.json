@@ -20,6 +20,10 @@
       "manageable_services": [
         "desk-display.service"
       ],
+      "expected_listeners": [
+        "tcp:22",
+        "tcp:8088"
+      ],
       "integrations": {
         "probe": {
           "enabled": true,
@@ -31,6 +35,14 @@
               "timeout_seconds": 5,
               "interval_seconds": 60,
               "pattern": "\\\"status\\\":\\\"ok\\\""
+            },
+            {
+              "name": "console-cert",
+              "kind": "tls_cert",
+              "host": "pinoc.local",
+              "port": 443,
+              "timeout_seconds": 5,
+              "interval_seconds": 3600
             }
           ]
         }
@@ -72,6 +84,11 @@
         "apt.upgrade"
       ],
       "notes": "North-side receiver",
+      "expected_listeners": [
+        "tcp:22",
+        "tcp:9090",
+        "tcp:30003"
+      ],
       "integrations": {
         "adsb": {
           "enabled": true,

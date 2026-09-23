@@ -14,6 +14,10 @@ from pinoc.actions import ALLOWLISTABLE_ACTIONS
 METHODS = {"local", "ssh"}
 KNOWN_ROLES = {"file_server", "vpn_server", "adsb_receiver", "desk_display",
                "magicmirror", "pinoc", "hotspot", "general"}
+# A device's baseline of ports it is expected to listen on -- see
+# pinoc.collectors.fleet._security_status(). "proto:port", e.g. "tcp:22".
+_LISTENER_RE = re.compile(r"\A(tcp|udp):([0-9]{1,5})\Z")
+MAX_EXPECTED_LISTENERS = 100
 
 
 class DeviceConfigError(ValueError):
@@ -22,6 +26,26 @@ class DeviceConfigError(ValueError):
 
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "device"
+
+
+def _expected_listeners(value: Any, label: str) -> List[str]:
+    if value in (None, []):
+        return []
+    if not isinstance(value, list) or any(not isinstance(x, str) for x in value):
+        raise DeviceConfigError(f"device {label}: expected_listeners must be a list of 'tcp:PORT'/'udp:PORT' strings")
+    if len(value) > MAX_EXPECTED_LISTENERS:
+        raise DeviceConfigError(f"device {label}: at most {MAX_EXPECTED_LISTENERS} expected_listeners are allowed")
+    result: List[str] = []
+    for entry in value:
+        normalized = entry.strip().lower()
+        match = _LISTENER_RE.fullmatch(normalized)
+        if not match or not 1 <= int(match.group(2)) <= 65535:
+            raise DeviceConfigError(
+                f"device {label}: expected_listeners entry {entry!r} must look like 'tcp:22' or 'udp:53' "
+                "(port 1-65535)")
+        if normalized not in result:
+            result.append(normalized)
+    return result
 
 
 def _strings(value: Any, field_name: str, label: str, *, lowercase: bool = True) -> List[str]:
@@ -57,6 +81,13 @@ class DeviceConfig:
     thresholds: Dict[str, float] = field(default_factory=dict)
     integrations: Dict[str, Any] = field(default_factory=dict)
     repositories: Tuple[Dict[str, Any], ...] = ()
+    # Optional baseline of "proto:port" entries this device is expected to
+    # listen on (e.g. "tcp:22"). See pinoc.collectors.fleet for how a
+    # listener outside this set (or a missing expected one) opens a
+    # listener_change alert. Empty means "no baseline configured" -- the
+    # collector still gathers the live listener inventory but never alerts
+    # on it, matching how the rest of PiNOC treats unset optional config.
+    expected_listeners: Tuple[str, ...] = ()
 
     @property
     def cockpit_url(self) -> Optional[str]:
@@ -101,6 +132,7 @@ def parse_device(raw: Dict[str, Any], index: int) -> DeviceConfig:
             f"must be exactly one of {sorted(ALLOWLISTABLE_ACTIONS)}")
     important_paths = _strings(raw.get("important_paths", []), "important_paths", label,
                                lowercase=False)
+    expected_listeners = _expected_listeners(raw.get("expected_listeners"), label)
     if len(raw.get("monitored_services", [])) != len(set(raw.get("monitored_services", []))):
         raise DeviceConfigError(f"device {label}: monitored_services contains duplicates")
     monitored = list(dict.fromkeys(monitored + critical))
@@ -148,7 +180,7 @@ def parse_device(raw: Dict[str, Any], index: int) -> DeviceConfig:
                         bool(raw.get("service_discovery", False)), str(raw.get("notes", "")),
                         tuple(important_paths),
                         bool(raw.get("maintenance", False)), thresholds, integrations,
-                        tuple(repositories))
+                        tuple(repositories), tuple(expected_listeners))
 
 
 def legacy_device(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
