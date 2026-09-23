@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -104,6 +104,17 @@ CREATE INDEX notification_log_device_time ON notification_log(device_id,timestam
 # longer, configurable retention (see HistoryManager.maintenance).
 """CREATE TABLE health_samples(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,device_id TEXT NOT NULL,health TEXT NOT NULL,online INTEGER NOT NULL DEFAULT 0,UNIQUE(device_id,timestamp));
 CREATE INDEX health_samples_device_time ON health_samples(device_id,timestamp);""",
+# Scheduled fleet health reports (enhancement #5, see pinoc/reports.py):
+# report_schedule_state carries each report definition's next/last firing
+# (computed via pinoc.schedules.next_after, the same cron/alias/one-shot
+# engine action_schedules uses) so firing survives a restart the same way
+# action_schedules does; report_editions archives every rendered edition
+# (HTML or CSV content plus its metadata) for the Reports page, independent
+# of whether delivery through the configured notification channel
+# succeeded.
+"""CREATE TABLE report_schedule_state(report_id TEXT PRIMARY KEY,next_run TEXT,last_run TEXT,updated_at TEXT NOT NULL);
+CREATE TABLE report_editions(id INTEGER PRIMARY KEY,report_id TEXT NOT NULL,name TEXT NOT NULL,generated_at TEXT NOT NULL,format TEXT NOT NULL,scope_json TEXT NOT NULL DEFAULT '{}',sections_json TEXT NOT NULL DEFAULT '[]',device_count INTEGER NOT NULL DEFAULT 0,content TEXT NOT NULL DEFAULT '',delivered INTEGER NOT NULL DEFAULT 0,delivery_error TEXT);
+CREATE INDEX report_editions_report_time ON report_editions(report_id,generated_at);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

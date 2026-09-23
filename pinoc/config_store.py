@@ -163,6 +163,15 @@ def validate_slos(value,known_device_ids,known_roles,known_tags):
     try:_validate_slos(value,known_device_ids,known_roles,known_tags)
     except SLOConfigError as exc:raise ValueError(str(exc)) from None
 
+def validate_reports(value,known_roles,known_tags):
+    # Scheduled fleet health reports (enhancement #5): each definition's
+    # channel_id must reference a channel in this same config's
+    # notifications.channels[] -- reused, not duplicated, delivery.
+    from pinoc.reports import ReportConfigError, validate_reports as _validate_reports
+    known_channel_ids={c.get("id") for c in (value.get("notifications") or {}).get("channels") or [] if isinstance(c,dict)}
+    try:_validate_reports(value,known_roles,known_tags,known_channel_ids)
+    except ReportConfigError as exc:raise ValueError(str(exc)) from None
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
@@ -182,6 +191,7 @@ def validate_config(value,base_dir=Path(".")):
     validate_network_topology(value,{d.id for d in devices})
     known_roles={r for d in devices for r in d.roles};known_tags={t for d in devices for t in d.tags}
     validate_slos(value,{d.id for d in devices},known_roles,known_tags)
+    validate_reports(value,known_roles,known_tags)
     return value
 
 def _atomic_write(path,value,backups=3):
