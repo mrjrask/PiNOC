@@ -1532,6 +1532,19 @@ def main() -> None:
         rollout.start()
         extensions["pinoc_rollout"] = rollout
 
+    # Self-monitoring: PiNOC watches its own health (enhancement #11).
+    # Collector success rate + cache staleness read the scheduler's own
+    # per-task bookkeeping (coordinator.scheduler); database size/retention
+    # read history.db.status(); agent reachability and action-queue depth
+    # query history.db directly. A no-op except for opening/resolving
+    # console_self_* alerts through the same alerts table/lifecycle every
+    # device alert uses -- see pinoc/self_monitoring.py.
+    from pinoc.self_monitoring import SelfMonitoringService
+    self_monitoring = SelfMonitoringService(history.db, state=state, scheduler=coordinator.scheduler,
+                                            config=CONFIG.get("self_monitoring"), notifier=notifications)
+    self_monitoring.start()
+    extensions["pinoc_self_monitoring"] = self_monitoring
+
     previous_signal_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
     }
@@ -1558,6 +1571,8 @@ def main() -> None:
                 remediation.stop()
             if rollout is not None:
                 rollout.stop()
+            if self_monitoring is not None:
+                self_monitoring.stop()
             notifications.stop()
             history.stop()
         finally:
