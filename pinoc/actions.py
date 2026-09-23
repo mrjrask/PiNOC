@@ -36,6 +36,7 @@ LOG_NAME_RE=re.compile(r"(?:^|/)[A-Za-z0-9._@:-]*\.log(?:\.\d+)?(?:\.gz)?$|(?:^|
 PATH_REMAINDER_RE=re.compile(r"[A-Za-z0-9/._@:-]+")
 VACUUM_SPEC_RE=re.compile(r"size:\d{1,5}[KMGT]?B?|time:\d{1,6}[smhdwy]")
 JOURNAL_SIZE_RE=re.compile(r"([\d.]+[KMGT]?B?)\s+in the journal")
+INTEGRATION_DEFAULT_SERVICES={"wireguard.restart":"wg-quick@wg0.service","desk_display.restart":"desk-display.service","magicmirror.restart":"magicmirror.service","pi_hotspot.restart":"pi-hotspot.service"}
 
 def _mi(kib: int) -> str:
     """Human size for KiB values in action summaries."""
@@ -70,6 +71,14 @@ class ActionDefinition:
     id:str;label:str;permission:str="actions.execute";confirmation:str="simple";timeout:int=30;conflict:str="device";handler:Callable|None=None
 
 class ActionError(ValueError):pass
+
+def integration_service(device: dict, action: str) -> str:
+    try:default=INTEGRATION_DEFAULT_SERVICES[action]
+    except KeyError:raise ActionError("unsupported integration action") from None
+    name=action.split(".",1)[0];config=(device.get("integrations") or {}).get(name,{})
+    service=config.get("service",default) if isinstance(config,dict) else default
+    if not isinstance(service,str) or not UNIT.fullmatch(service):raise ActionError("integration service is invalid")
+    return service
 
 class ActionDispatcher:
     def __init__(self,db,state,coordinator=None,max_workers=2,runner=subprocess.run):
@@ -118,9 +127,7 @@ class ActionDispatcher:
         if action.startswith("service."):
             if not target or not UNIT.fullmatch(target) or target not in device.get("manageable_services",[]):raise ActionError("service is not approved for management")
         if action.endswith(".restart") and not action.startswith("service."):
-            service={"wireguard.restart":"wg-quick@wg0.service","desk_display.restart":"desk-display.service","magicmirror.restart":"magicmirror.service","pi_hotspot.restart":"pi-hotspot.service"}[action]
-            cfg=(device.get("integrations") or {}).get(action.split(".")[0],{})
-            if isinstance(cfg,dict):service=cfg.get("service",service)
+            service=integration_service(device,action)
             if service not in device.get("manageable_services",[]):raise ActionError("integration service is not approved for management")
         if action=="package.check" and action not in device.get("allowed_actions",[]):raise ActionError("package metadata checks are not approved for this device")
         if action=="apt.upgrade":
@@ -195,8 +202,8 @@ class ActionDispatcher:
         self.coordinator.refresh_device(row["device_id"]) if hasattr(self.coordinator,"refresh_device") else self.coordinator.refresh();return {"exit_code":0,"summary":"Refresh scheduled"}
     def _service(self,row,timeout):return self._command(self.state.device(row["device_id"]),["sudo","-n","systemctl",row["action"].split(".")[1],row["target"]],timeout)
     def _integration_service(self,row,timeout):
-        device=self.state.device(row["device_id"]); default={"wireguard.restart":"wg-quick@wg0.service","desk_display.restart":"desk-display.service","magicmirror.restart":"magicmirror.service","pi_hotspot.restart":"pi-hotspot.service"}[row["action"]]
-        return self._command(device,["sudo","-n","systemctl","restart",default],timeout)
+        device=self.state.device(row["device_id"]);service=integration_service(device,row["action"])
+        return self._command(device,["sudo","-n","systemctl","restart",service],timeout)
     def _package_check(self,row,timeout):return self._command(self.state.device(row["device_id"]),["/usr/bin/apt-get","--just-print","upgrade"],timeout)
     def _fs_stats(self,device,timeout=20):
         """(size, available) in KiB for /, or None when unreadable."""
