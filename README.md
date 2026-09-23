@@ -1347,6 +1347,12 @@ mode-0750 `/etc/pinoc-agent`, a mode-0600 credential configuration, and a
 hardened systemd service. `allow_insecure_http` exists only for isolated local
 testing and exposes credentials and job traffic in plaintext.
 
+The installer adds the unprivileged `pinoc-agent` account to any conventional
+hardware-access groups present on the host (`gpio`, `i2c`, `spi`, `video`, and
+`render`). This lets an explicitly approved device retain its normal group-based
+access after it is bound into the job sandbox; the agent does not bind the rest
+of the host's `/dev` tree.
+
 Remove the agent with `sudo ./uninstall_agent.sh --confirm`; workspaces are
 preserved. Agent credentials can be rotated or revoked independently.
 

@@ -26,5 +26,12 @@ class InstallerDependenciesTest(unittest.TestCase):
         self.assertIn("command -v bwrap", script)
         self.assertIn("apt-get install -y --no-install-recommends bubblewrap", script)
 
+    def test_agent_installer_grants_hardware_group_access(self):
+        script = AGENT_INSTALLER.read_text(encoding="utf-8")
+        self.assertIn("for group in gpio i2c spi video render", script)
+        self.assertIn('getent group "$group"', script)
+        self.assertIn('usermod -aG', script)
+        self.assertLess(script.index("usermod -aG"), script.index("systemctl enable --now"))
+
 if __name__ == "__main__":
     unittest.main()
