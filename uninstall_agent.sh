@@ -41,7 +41,14 @@ fi
 
 systemctl disable --now pinoc-agent.service 2>/dev/null || true
 rm -f /etc/systemd/system/pinoc-agent.service; systemctl daemon-reload
-rm -rf /opt/pinoc-agent /etc/pinoc-agent /var/lib/pinoc-agent
+rm -rf /opt/pinoc-agent /etc/pinoc-agent
+if [[ -d /var/lib/pinoc-agent && ! -L /var/lib/pinoc-agent ]]; then
+  if [[ -n "$(find /var/lib/pinoc-agent -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "Preserving /var/lib/pinoc-agent because it contains user data." >&2
+  else
+    rmdir /var/lib/pinoc-agent
+  fi
+fi
 userdel pinoc-agent 2>/dev/null || true
 
 if [[ "$REVOKED" -eq 1 ]]; then

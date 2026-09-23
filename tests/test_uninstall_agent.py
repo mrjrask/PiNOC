@@ -77,6 +77,11 @@ class ScriptContentTest(unittest.TestCase):
     def test_confirms_revocation_when_it_did_happen(self):
         self.assertIn("revoked server-side", SCRIPT)
 
+    def test_preserves_nonempty_agent_home(self):
+        self.assertNotIn("rm -rf /opt/pinoc-agent /etc/pinoc-agent /var/lib/pinoc-agent", SCRIPT)
+        self.assertIn("Preserving /var/lib/pinoc-agent", SCRIPT)
+        self.assertIn("find /var/lib/pinoc-agent", SCRIPT)
+
 
 if __name__ == "__main__":
     unittest.main()
