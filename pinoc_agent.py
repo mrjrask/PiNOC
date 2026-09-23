@@ -27,7 +27,7 @@ def discover(roots=()):
     return caps,hardware,candidates[:100]
 
 class Executor:
-    def __init__(self):self.processes={};self.cancelled=set();self.lock=threading.Lock()
+    def __init__(self,require_sandbox=False):self.processes={};self.cancelled=set();self.lock=threading.Lock();self.require_sandbox=require_sandbox
     @staticmethod
     def safe_path(root,relative,patterns=SENSITIVE,must_exist=True):
         if not isinstance(relative,str) or not relative or Path(relative).is_absolute():raise ValueError("absolute or empty path rejected")
@@ -48,6 +48,16 @@ class Executor:
         if proc:
             try:os.killpg(proc.pid,signal.SIGTERM);time.sleep(.2);os.killpg(proc.pid,signal.SIGKILL)
             except ProcessLookupError:pass
+    @staticmethod
+    def sandbox_argv(argv,root,required):
+        if not required:return argv
+        bubblewrap=shutil.which("bwrap")
+        if not bubblewrap:raise ValueError("bubblewrap is required for workspace job execution")
+        command=[bubblewrap,"--die-with-parent","--new-session","--unshare-pid","--unshare-ipc","--unshare-uts","--unshare-cgroup","--cap-drop","ALL","--proc","/proc","--dev","/dev","--tmpfs","/tmp"]
+        for path in ("/usr","/bin","/lib","/lib64","/sbin","/etc"):
+            if Path(path).exists():command.extend(["--ro-bind",path,path])
+        command.extend(["--bind",str(root),"/workspace","--chdir","/workspace","--setenv","HOME","/workspace","--setenv","TMPDIR","/tmp","--",*argv])
+        return command
     @staticmethod
     def drain(pipe,limit,state):
         """Drain a child pipe without retaining more than the configured limit."""
@@ -87,7 +97,9 @@ class Executor:
                 except UnicodeDecodeError:raise ValueError("binary file denied")
                 return self.done(started,0,text,"","file read")
             argv=self.argv(job,root)
-            env={"PATH":"/usr/local/bin:/usr/bin:/bin","HOME":str(root),"LANG":"C.UTF-8","LC_ALL":"C.UTF-8","TMPDIR":"/tmp"};env.update(job.get("environment",{}))
+            sandbox_required=self.require_sandbox and kind not in {"service_status","log_read"}
+            argv=self.sandbox_argv(argv,root,sandbox_required)
+            env={"PATH":"/usr/local/bin:/usr/bin:/bin","HOME":"/workspace" if sandbox_required else str(root),"LANG":"C.UTF-8","LC_ALL":"C.UTF-8","TMPDIR":"/tmp"};env.update(job.get("environment",{}))
             proc=subprocess.Popen(argv,cwd=root,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=False,start_new_session=True,preexec_fn=lambda:self.limits(int(job["timeout_seconds"])))
             with self.lock:self.processes[jid]=proc
             out_state={};err_state={};readers=[threading.Thread(target=self.drain,args=(proc.stdout,limit,out_state),daemon=True),threading.Thread(target=self.drain,args=(proc.stderr,limit,err_state),daemon=True)]
@@ -156,7 +168,7 @@ class Executor:
 MAX_DELIVERY_ATTEMPTS=20
 
 class Client:
-    def __init__(self,config):self.c=config;self.executor=Executor();self.current_job=None;self.worker=None
+    def __init__(self,config):self.c=config;self.executor=Executor(require_sandbox=platform.system()=="Linux");self.current_job=None;self.worker=None
     def request(self,path,data=None,signed=True):
         body=json.dumps(data or {},separators=(",",":"),sort_keys=True).encode();headers={"Content-Type":"application/json"}
         if signed:
