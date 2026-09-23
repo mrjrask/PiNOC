@@ -32,5 +32,10 @@ printf '{"server":%s,"discovery_roots":%s}\n' "$(python3 -c 'import json,sys;pri
 chmod 0600 /etc/pinoc-agent/config.json; chown pinoc-agent:pinoc-agent /etc/pinoc-agent/config.json
 /opt/pinoc-agent/venv/bin/python /opt/pinoc-agent/pinoc_agent.py --config /etc/pinoc-agent/config.json --enroll --code "$CODE"
 install -m 0644 "$(dirname "$0")/pinoc-agent.service" /etc/systemd/system/pinoc-agent.service
-systemctl daemon-reload; systemctl enable --now pinoc-agent.service
+systemctl daemon-reload
+systemctl enable pinoc-agent.service
+# Enabling an already-running unit does not refresh its credentials.  Always
+# restart after enrollment so upgrades pick up the new token, protocol, and
+# supplementary hardware groups immediately.
+systemctl restart pinoc-agent.service
 echo "PiNOC agent installed; no SSH credentials were configured."

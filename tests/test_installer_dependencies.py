@@ -31,7 +31,14 @@ class InstallerDependenciesTest(unittest.TestCase):
         self.assertIn("for group in gpio i2c spi video render", script)
         self.assertIn('getent group "$group"', script)
         self.assertIn('usermod -aG', script)
-        self.assertLess(script.index("usermod -aG"), script.index("systemctl enable --now"))
+        self.assertLess(script.index("usermod -aG"), script.index("systemctl restart"))
+
+    def test_agent_installer_restarts_service_after_enrollment(self):
+        script = AGENT_INSTALLER.read_text(encoding="utf-8")
+        enrollment = script.index("--enroll --code")
+        restart = script.index("systemctl restart pinoc-agent.service")
+        self.assertLess(enrollment, restart)
+        self.assertNotIn("systemctl enable --now pinoc-agent.service", script)
 
 if __name__ == "__main__":
     unittest.main()
