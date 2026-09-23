@@ -70,6 +70,19 @@ class DevelopmentGateway:
     def _decrypt_credential(self,token):
         try:return self._fernet.decrypt(str(token).encode()).decode()
         except (InvalidToken,ValueError,TypeError):return None
+    def _encode_environment(self,environment):
+        # Secret-like environment values must remain usable by the agent while
+        # never being stored in plaintext. Non-secret environments retain the
+        # simple JSON representation for backwards-compatible inspection.
+        if redact(environment)!=environment:
+            payload=json.dumps(environment,sort_keys=True,separators=(",",":"))
+            return json.dumps({"__encrypted__":self._fernet.encrypt(payload.encode()).decode()},sort_keys=True)
+        return json.dumps(environment,sort_keys=True)
+    def _decode_environment(self,row):
+        environment=_loads(row,"environment_json",{})
+        if not isinstance(environment,dict) or "__encrypted__" not in environment:return environment
+        try:return json.loads(self._fernet.decrypt(str(environment["__encrypted__"]).encode()).decode())
+        except (InvalidToken,TypeError,ValueError,json.JSONDecodeError) as exc:raise DevError("job environment could not be decrypted","job_environment_unavailable",409) from exc
     def audit(self,identity,ip,device,action,target,params,auth,result=None,error=None):
         self.db.execute("INSERT INTO audit_records(timestamp,user,role,source_ip,device_id,action,target,parameters_json,authorization_result,execution_result,error) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(utcnow(),identity.get("username","agent"),identity.get("role","agent"),ip,device,action,target,json.dumps(redact(params or {}),sort_keys=True),auth,result,redact(error) if error else None))
     def enrollment_code(self,device,actor,ttl=600):
@@ -173,7 +186,7 @@ class DevelopmentGateway:
         timeout=_int(timeout_value,"timeout_seconds");timeout=max(1,min(timeout,self.max_timeout));job_id=str(uuid.uuid4());stamp=utcnow();permissions=[required]
         request_data={"relative_path":body.get("relative_path"),"staged":bool(body.get("staged")),"lines":min(1000,max(1,_int(body.get("lines",200),"lines")))}
         if validate_only:return None
-        self.db.execute("INSERT INTO development_jobs(job_id,parent_job_id,device_id,workspace_id,job_type,profile,argv_json,environment_json,permissions_json,requested_by,api_token_id,source_ip,requested_at,status,timeout_seconds,request_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(job_id,parent,device,wid or None,kind,profile,json.dumps(argv),json.dumps(redact(env)),json.dumps(permissions),identity["username"],identity.get("token_id"),ip,stamp,"queued",timeout,json.dumps(request_data)))
+        self.db.execute("INSERT INTO development_jobs(job_id,parent_job_id,device_id,workspace_id,job_type,profile,argv_json,environment_json,permissions_json,requested_by,api_token_id,source_ip,requested_at,status,timeout_seconds,request_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(job_id,parent,device,wid or None,kind,profile,json.dumps(argv),self._encode_environment(env),json.dumps(permissions),identity["username"],identity.get("token_id"),ip,stamp,"queued",timeout,json.dumps(request_data)))
         if approval_required:
             self.db.execute("UPDATE development_jobs SET queue_reason='waiting_for_approval' WHERE job_id=?",(job_id,));self.db.execute("INSERT INTO job_approvals VALUES(?,?,?,?,?,?,?,?)",(str(uuid.uuid4()),job_id,"pending","hardware_state_change",stamp,None,None,None))
         self.audit(identity,ip,device,"dev.job.submit",job_id,{"workspace":wid,"job_type":kind,"profile":profile,"argv":argv,"permissions":permissions},"allowed","queued");return self.job(job_id)
@@ -236,7 +249,7 @@ class DevelopmentGateway:
         if ws and row.get("profile"):
             definition=ws.get("test_profiles",{}).get(row["profile"],{})
             ws["artifact_patterns"]=definition.get("artifact_patterns",ws.get("artifact_patterns",[]))
-        return {"job_id":row["job_id"],"job_type":row["job_type"],"profile":row.get("profile"),"workspace":ws,"argv":_loads(row,"argv_json",[]),"environment":_loads(row,"environment_json",{}),"request":_loads(row,"request_json",{}),"timeout_seconds":row["timeout_seconds"],"output_limit_bytes":self.output_limit,"file_limit_bytes":self.file_limit,"artifact_limits":{"count":self.artifact_count,"file_bytes":self.artifact_file_limit,"total_bytes":self.artifact_total_limit}}
+        return {"job_id":row["job_id"],"job_type":row["job_type"],"profile":row.get("profile"),"workspace":ws,"argv":_loads(row,"argv_json",[]),"environment":self._decode_environment(row),"request":_loads(row,"request_json",{}),"timeout_seconds":row["timeout_seconds"],"output_limit_bytes":self.output_limit,"file_limit_bytes":self.file_limit,"artifact_limits":{"count":self.artifact_count,"file_bytes":self.artifact_file_limit,"total_bytes":self.artifact_total_limit}}
     def result(self,agent,job_id,body):
         job=self.job(job_id)
         if not job or job["device_id"]!=agent["device_id"]:raise DevError("job not found","job_not_found",404)
