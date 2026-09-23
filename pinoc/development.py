@@ -33,11 +33,14 @@ def _profiles_have_environment(profiles):
 def _redact_test_profiles(profiles):
     """Redact every profile environment value, regardless of its variable name."""
     if not isinstance(profiles,dict):return profiles
-    public=redact(profiles)
+    # Profile names are user-defined identifiers, not field names.  Redact
+    # each definition independently so names such as ``secret-tests`` do not
+    # cause the generic key-name heuristic to replace the whole definition.
+    public={str(name):redact(profile) for name,profile in profiles.items()}
     for name,profile in profiles.items():
         if not isinstance(profile,dict):continue
         environment=profile.get("environment")
-        if isinstance(environment,dict):public[name]["environment"]={str(key):"[REDACTED]" for key in environment}
+        if isinstance(environment,dict):public[str(name)]["environment"]={str(key):"[REDACTED]" for key in environment}
     return public
 
 PROTOCOL_VERSION=1

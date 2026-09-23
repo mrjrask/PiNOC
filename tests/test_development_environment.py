@@ -85,6 +85,26 @@ def test_environment_role_encrypts_and_redacts_unrecognized_key_names(tmp_path):
     }
 
 
+def test_secret_like_profile_name_does_not_redact_the_profile_definition(tmp_path):
+    db = Database(str(tmp_path / "development.sqlite"))
+    assert db.initialize()
+    gateway = DevelopmentGateway(db, str(tmp_path / "jobs"), {}, "stable-key")
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    workspace = gateway.save_workspace({
+        "workspace_id": "project", "device_id": "pi", "path": str(root),
+        "test_profiles": {"api-token-test": {
+            "argv": ["python3", "-V"], "environment": {"API_KEY": "supersecret"}
+        }}
+    })
+
+    assert workspace["test_profiles"]["api-token-test"] == {
+        "argv": ["python3", "-V"], "environment": {"API_KEY": "[REDACTED]"}
+    }
+    assert gateway.workspace("project")["test_profiles"] == workspace["test_profiles"]
+
+
 def test_profile_encryption_requires_a_stable_key(tmp_path):
     db = Database(str(tmp_path / "development.sqlite"))
     assert db.initialize()
