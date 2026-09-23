@@ -1474,6 +1474,11 @@ def main() -> None:
                               anomalies=CONFIG.get("anomaly_detection"), correlation=CONFIG.get("alert_correlation"),
                               network_topology=CONFIG.get("network_topology"))
     state.add_publish_hook(history.submit)
+    # Backfilled after both are constructed: NotificationService is built
+    # before the history Database exists, but incident timelines (see
+    # pinoc/incidents.py) need every notification send persisted to
+    # notification_log to reconstruct a resolved incident after a restart.
+    notifications.db = history.db
     history.start()
     notifications.start()
     coordinator = SharedSnapshotCoordinator(state, history_db=history.db)

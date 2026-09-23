@@ -1,0 +1,1 @@
+{% extends "base.html" %}{% block title %}Incident · PiNOC{% endblock %}{% block content %}<div id="incident-detail" data-incident-id="{{ incident_id }}">Loading…</div>{% endblock %}{% block scripts %}<script>PiNOC.incidentDetail({{ incident_id }});</script>{% endblock %}

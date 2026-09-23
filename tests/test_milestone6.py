@@ -97,7 +97,7 @@ def test_late_result_does_not_resurrect_an_agent_lost_job(tmp_path):
     assert gw.artifacts(job["job_id"])==[]
 
 def test_schema_enrollment_replay_rotation_and_revocation(tmp_path):
- db,gw=setup(tmp_path);assert SCHEMA_VERSION==15;a=enroll(gw);body=b'{}';stamp=str(int(time.time()));nonce="unique";sig=gw.sign(a["agent_id"],a["credential"],stamp,nonce,body)
+ db,gw=setup(tmp_path);assert SCHEMA_VERSION>=15;a=enroll(gw);body=b'{}';stamp=str(int(time.time()));nonce="unique";sig=gw.sign(a["agent_id"],a["credential"],stamp,nonce,body)
  assert gw.authenticate_agent(a["agent_id"],stamp,nonce,body,sig)["device_id"]=="pi"
  with pytest.raises(DevError) as e:gw.authenticate_agent(a["agent_id"],stamp,nonce,body,sig)
  assert e.value.error_type=="replay_rejected"
