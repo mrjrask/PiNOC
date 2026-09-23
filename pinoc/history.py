@@ -11,7 +11,7 @@ LOG=logging.getLogger("pinoc.history"); UTC=timezone.utc
 SEVERITY_RANK={"info":0,"warning":1,"degraded":2,"critical":3}
 
 class HistoryManager:
-    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None,notifier:Any=None,anomalies:Optional[Dict[str,Any]]=None,correlation:Optional[Dict[str,Any]]=None,network_topology:Optional[Dict[str,Any]]=None):
+    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None,notifier:Any=None,anomalies:Optional[Dict[str,Any]]=None,correlation:Optional[Dict[str,Any]]=None,network_topology:Optional[Dict[str,Any]]=None,slos:Optional[Dict[str,Any]]=None):
         self.db=db; self.config=config or {}; self.enabled=bool(self.config.get("enabled",True)); self.notifier=notifier
         self.anomaly=BaselineTracker(db,anomalies)
         self.correlation=CorrelationEngine(db,correlation)
@@ -26,6 +26,13 @@ class HistoryManager:
         self.state=state
         self.intervals={"core":float(self.config.get("core_interval_seconds",60)),"network":float(self.config.get("network_interval_seconds",60)),"storage":float(self.config.get("storage_interval_seconds",300)),"integration":float(self.config.get("integration_interval_seconds",60))}
         self.log_ring_size=min(1000,max(1,int(self.config.get("log_ring_samples",50))))
+        # SLOs and reliability scoring (enhancement #3, see pinoc.slo):
+        # health_samples is sampled on its own interval/retention (a 30-day
+        # SLO window needs far more history than device_metrics's 7-day raw
+        # retention keeps), independent of the metrics intervals above.
+        slo_config=slos or {}
+        self.intervals["health"]=float(slo_config.get("interval_seconds",self.intervals["core"]))
+        self.health_sample_retention_days=max(1,int(slo_config.get("sample_retention_days",35)))
 
     def start(self):
         if self.enabled and self.db.initialize(): self.thread.start(); self.event(None,"pinoc_started","info","PiNOC started")
@@ -117,6 +124,11 @@ class HistoryManager:
         self.last_sample[key]=now;return True
     def _sample(self,d,stamp):
         did=d["id"]
+        if self._due(did,"health",stamp):
+            # Sampled regardless of online status -- an "offline" health
+            # sample is exactly as informative for rolling attainment as a
+            # "healthy" one. See pinoc.slo for what reads this back.
+            self.db.execute("INSERT OR IGNORE INTO health_samples(timestamp,device_id,health,online) VALUES(?,?,?,?)",(stamp,did,d.get("health") or "offline",int(bool(d.get("online")))))
         if d.get("online") and self._due(did,"core",stamp):
             c,m=d.get("cpu",{}),d.get("memory",{})
             self.db.execute("INSERT OR IGNORE INTO device_metrics(timestamp,device_id,cpu_percent,load_1m,load_5m,load_15m,cpu_freq_mhz,cpu_temp_c,soc_temp_c,memory_percent,memory_used_bytes,swap_percent,uptime_seconds) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(stamp,did,c.get("utilization_percent"),c.get("load_1m"),c.get("load_5m"),c.get("load_15m"),c.get("frequency_mhz"),c.get("temperature_c"),c.get("soc_temperature_c"),m.get("percent"),m.get("used"),m.get("swap_percent"),d.get("uptime_seconds")))
@@ -343,6 +355,10 @@ class HistoryManager:
             network=con.execute("SELECT strftime('%Y-%m-%dT%H:00:00+00:00',timestamp) AS bucket,device_id,interface,AVG(rx_rate_bps),AVG(tx_rate_bps),AVG(wifi_signal_dbm),AVG(wifi_quality_percent),COUNT(*) FROM network_metrics WHERE timestamp<? GROUP BY bucket,device_id,interface",(cutoff,)).fetchall()
             con.executemany("INSERT OR REPLACE INTO network_aggregates VALUES(?,'hourly',?,?,?,?,?,?,?)",network)
             con.execute("DELETE FROM device_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM network_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM storage_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM integration_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM media_metrics WHERE timestamp<?",((now-timedelta(days=raw)).isoformat(),));con.execute("DELETE FROM service_logs WHERE timestamp<?",(cutoff,));con.execute("DELETE FROM metric_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),));con.execute("DELETE FROM metric_aggregates WHERE resolution='daily' AND bucket<?",((now-timedelta(days=daily)).isoformat(),));con.execute("DELETE FROM storage_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),));con.execute("DELETE FROM network_aggregates WHERE resolution='hourly' AND bucket<?",((now-timedelta(days=hourly)).isoformat(),))
+            # SLOs and reliability scoring (enhancement #3): health_samples
+            # gets its own, longer retention (see pinoc.slo), not the raw
+            # metrics window above -- an SLO window is commonly 30 days.
+            con.execute("DELETE FROM health_samples WHERE timestamp<?",((now-timedelta(days=self.health_sample_retention_days)).isoformat(),))
         self.db.last_aggregation=self.db.last_retention_cleanup=utcnow()
         self._refresh_cache()
 

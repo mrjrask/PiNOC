@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -94,6 +94,16 @@ CREATE INDEX user_presets_owner_kind ON user_presets(owner,kind);""",
 CREATE INDEX incidents_opened ON incidents(opened_at); CREATE INDEX incidents_resolved ON incidents(resolved_at); CREATE INDEX incidents_severity ON incidents(severity);
 CREATE TABLE notification_log(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,transition TEXT NOT NULL,device_id TEXT,alert_type TEXT,severity TEXT,channel_id TEXT,channel_kind TEXT,ok INTEGER NOT NULL,error TEXT);
 CREATE INDEX notification_log_device_time ON notification_log(device_id,timestamp); CREATE INDEX notification_log_time ON notification_log(timestamp);""",
+# SLOs and reliability scoring (enhancement #3, see pinoc/slo.py): a
+# lightweight periodic point-in-time health sample per device -- nothing
+# upstream of this persisted health at arbitrary past timestamps (device_metrics
+# etc. are raw telemetry, alerts/events are discrete transitions), so rolling
+# attainment/error-budget-burn computation over a configurable window needs
+# its own small table. Kept separate from device_metrics's 7-day raw
+# retention: an SLO window is commonly 30 days, so these get their own,
+# longer, configurable retention (see HistoryManager.maintenance).
+"""CREATE TABLE health_samples(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,device_id TEXT NOT NULL,health TEXT NOT NULL,online INTEGER NOT NULL DEFAULT 0,UNIQUE(device_id,timestamp));
+CREATE INDEX health_samples_device_time ON health_samples(device_id,timestamp);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

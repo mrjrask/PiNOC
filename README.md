@@ -916,12 +916,85 @@ All signals are rendered together on `/console-status`
 existing page stays scoped to the history database specifically;
 `/console-status` is the console's overall health.
 
+## SLOs and reliability scoring
+
+Device health (`pinoc/health.py`) is an instant snapshot — healthy, warning,
+degraded, critical, or offline — plus alerts, with no view of whether a
+device, role, or tag is actually meeting an availability target *over
+time*. `pinoc/slo.py` adds that: define one or more SLOs in the top-level
+`slos` config section, each a target percentage over a rolling window for a
+scope (one device, every device with a given role, or every device with a
+given tag), and PiNOC computes rolling attainment and error-budget burn rate
+from a new `health_samples` history table (a lightweight point-in-time
+health sample HistoryManager writes on every poll — nothing else in PiNOC
+persists health at arbitrary past timestamps, so a 30-day rolling window
+needed its own table, kept independently of `device_metrics`'s much shorter
+7-day raw retention).
+
+Burn-rate alerting uses the standard SRE two-window approach: a short "fast"
+window and a longer "slow" window are both expressed as a multiple of the
+steady, sustainable burn rate (1.0x means "exactly using up the whole error
+budget by the end of the SLO window"); an alert opens only when *both*
+windows are burning too fast at once, which catches a real outage quickly
+without paging on one brief blip. This is a simplified, single-pair version
+of Google's multi-window multi-burn-rate alerting (which typically pairs a
+page-now tier with a slower ticket-now tier) — an MVP simplification.
+
+```json
+"slos": {
+  "enabled": true,
+  "interval_seconds": 60,
+  "sample_retention_days": 35,
+  "definitions": [
+    {
+      "id": "core-uptime",
+      "name": "Core fleet uptime",
+      "scope": {"type": "role", "value": "pinoc"},
+      "target_percent": 99.5,
+      "window_days": 30,
+      "severity": "critical",
+      "burn_rate": {
+        "fast_window_minutes": 60, "fast_threshold": 14.4,
+        "slow_window_minutes": 360, "slow_threshold": 6
+      }
+    },
+    {
+      "id": "display-tag-uptime",
+      "name": "Display devices uptime",
+      "scope": {"type": "tag", "value": "display"},
+      "target_percent": 99,
+      "window_days": 7
+    }
+  ]
+}
+```
+
+`scope.type` is `device` (an exact device id), `role`, or `tag` (matching
+`config/devices.json` entries — see `config/devices.example.json`); `role`/
+`tag` scopes are pooled across every matching device (summed good/bad time,
+not averaged per device), so "critical services >= 99% over 30 days" reads
+as fleet-wide availability across that whole scope. `burn_rate` is optional
+and defaults to the classic 30-day-window constants shown above (2%
+consumed in 1h, or 5% in 6h). A crossed threshold opens an alert through the
+*same* `alerts` table and open/resolve lifecycle every device alert uses —
+tagged onto a synthetic `pinoc-slo` device id, alert type `slo_burn` — so it
+shows up on the alerts page and through every configured notification
+channel exactly like a device alert does.
+
+Reliability scores and error-budget bars are available two ways: a
+`slo_summary` dashboard card (`pinoc/dashboards.py`'s card library — add it
+to any `/dashboards` layout or the `/glance` view) showing one SLO's rolling
+attainment and remaining error budget, and a dedicated `/slos` page
+(`GET /api/slos`, `GET /api/slos/<id>`) listing every configured SLO's
+attainment, target/window, error-budget bar, and fast/slow burn rate in one
+table — useful when there are more SLOs than fit comfortably as cards.
+
 ## Web console and APIs
 
 Primary pages are `/`, `/devices/<id>`, `/integrations`, `/adsb`, `/displays`,
 `/software`, `/network-inventory`, `/alerts`, `/events`, `/audit`, `/settings`,
 `/settings/status`, `/console-status`, `/agents`, `/workspaces`, `/jobs`,
-`/jobs/approvals`, `/dashboards`, and `/glance`.
+`/jobs/approvals`, `/dashboards`, `/glance`, and `/slos`.
 
 ### Customizable dashboards, saved views, and Glance
 
@@ -1212,6 +1285,7 @@ and job data. Back up and remove preserved data manually only when intended.
 | `pinoc/development.py` | Enrollment, agent authentication, workspace/job policy, and artifacts. |
 | `pinoc/self_monitoring.py` | Console self-monitoring: collector health, cache staleness, database, scheduler lag, agent reachability, action-queue depth, and `console_self_*` alerts. |
 | `pinoc/incidents.py` | Incident timelines and automatic post-mortems: synthesizes an incident record on cluster/alert resolution and reconstructs its timeline plus MTTA/MTTR for `/incidents`. |
+| `pinoc/slo.py` | SLOs and reliability scoring: rolling attainment, error-budget burn rate, and `slo_burn` alerts, from the `health_samples` history table. |
 | `config.json`, `config/devices.example.json`, `.env.example` | Runtime and fleet configuration examples. |
 | `install.sh`, `uninstall.sh` | Main service lifecycle. |
 | `install_agent.sh`, `uninstall_agent.sh` | Optional agent lifecycle. |

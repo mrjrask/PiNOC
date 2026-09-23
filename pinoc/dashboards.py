@@ -86,6 +86,12 @@ CARD_TYPES: Dict[str, Dict[str, Any]] = {
         "description": "A short list of the highest-severity active alerts.",
         "fields": [{"name": "limit", "type": "number", "required": False, "default": 5}],
     },
+    "slo_summary": {
+        "label": "SLO reliability",
+        "description": "Rolling attainment and error-budget burn for one configured SLO "
+                        "(see the top-level `slos` config section).",
+        "fields": [{"name": "slo_id", "type": "slo", "required": True}],
+    },
 }
 
 
@@ -181,7 +187,7 @@ def _fleet_storage_forecast(devices: List[Dict[str, Any]], history: Any) -> Opti
     return {"status": status, "estimated_days_remaining": round(min(days), 1) if days else None}
 
 
-def resolve_card(card: Dict[str, Any], state: Any, history: Any = None) -> Dict[str, Any]:
+def resolve_card(card: Dict[str, Any], state: Any, history: Any = None, slo_service: Any = None) -> Dict[str, Any]:
     """Turn one ``{id, type, config}`` card into its live display data.
 
     Never raises: an unknown type, a missing device, or a config that no
@@ -244,14 +250,25 @@ def resolve_card(card: Dict[str, Any], state: Any, history: Any = None) -> Dict[
                 "alerts": [{"device_id": a.get("device_id"), "severity": a.get("severity"),
                             "message": a.get("message")} for a in alerts[:limit]],
             }
+        elif ctype == "slo_summary":
+            slo_id = str(config.get("slo_id") or "")
+            if slo_service is None:
+                result["error"] = "SLO service not available"
+                return result
+            entry = slo_service.get_one(slo_id) if slo_id else None
+            if entry is None:
+                result["error"] = "SLO not found"
+                return result
+            result["data"] = entry
     except Exception as exc:  # noqa: BLE001 - one bad card must not break the page
         result["error"] = str(exc)
         result["data"] = None
     return result
 
 
-def resolve_dashboard(payload: Dict[str, Any], state: Any, history: Any = None) -> List[Dict[str, Any]]:
-    return [resolve_card(card, state, history) for card in (payload or {}).get("cards", [])]
+def resolve_dashboard(payload: Dict[str, Any], state: Any, history: Any = None,
+                       slo_service: Any = None) -> List[Dict[str, Any]]:
+    return [resolve_card(card, state, history, slo_service) for card in (payload or {}).get("cards", [])]
 
 
 def default_glance_cards(state: Any, limit: int = 6) -> Dict[str, Any]:

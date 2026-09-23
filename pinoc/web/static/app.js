@@ -529,6 +529,7 @@ function cardTile(rc){
     case 'fleet_aggregate':{let d=rc.data||{};body=`<div class="glance-tile-value">${esc(humanValue(d.field,d.value))}</div><div class="glance-tile-sub">${esc((d.field||'').replaceAll('_',' '))}</div>`;break}
     case 'storage_forecast':{let d=rc.data;body=d?`<div class="glance-tile-value">${esc(d.status||'—')}</div><div class="glance-tile-sub">${d.estimated_days_remaining!=null?`≈${Math.round(d.estimated_days_remaining)} days to full`:'no history yet'}</div>`:'<p class="muted">History unavailable.</p>';break}
     case 'alert_list':{let d=rc.data||{alerts:[]};body=(d.alerts||[]).length?`<ul class="glance-alert-list">${d.alerts.map(a=>`<li class="severity-${esc(a.severity)}">${esc(a.severity)} · ${esc(a.device_id)} — ${esc(a.message)}</li>`).join('')}</ul>`:'<p class="muted">No active alerts.</p>';break}
+    case 'slo_summary':{let d=rc.data||{};let budget=d.budget_remaining_percent;body=`<div class="glance-tile-value">${d.attainment_percent!=null?d.attainment_percent.toFixed(3)+'%':'—'}</div><div class="glance-tile-sub">target ${esc(d.target_percent)}% / ${esc(d.window_days)}d${d.firing?' · <span class="severity-critical">burning budget</span>':''}</div>${budget!=null?`<div class="budget-bar"><div class="budget-bar-fill${budget<20?' low':''}" style="width:${Math.max(0,Math.min(100,budget))}%"></div></div><div class="glance-tile-sub">${budget.toFixed(1)}% error budget remaining</div>`:''}`;break}
     default:body='<p class="muted">Unsupported card.</p>';
   }
   return `<article class="dashboard-card" data-card-id="${esc(rc.id)}" data-card-type="${esc(rc.type)}"><header>${esc(rc.title||rc.type)}</header><div class="dashboard-card-body">${body}</div></article>`;
@@ -542,10 +543,11 @@ async function dashboards(presetId){
   let listRoot=document.querySelector('#dashboard-list'),editorPanel=document.querySelector('#dashboard-editor-panel');
   if(!listRoot&&!editorPanel)return;
   let nameInput=document.querySelector('#dashboard-name'),typeSelect=document.querySelector('#card-type-select'),configFields=document.querySelector('#card-config-fields'),cardsRoot=document.querySelector('#dashboard-cards'),message=document.querySelector('#dashboard-message'),shareEl=document.querySelector('#dashboard-share'),titleEl=document.querySelector('#dashboard-editor-title');
-  let library=[],devices=[],current={preset_id:presetId||null,name:'',cards:[]};
+  let library=[],devices=[],slos=[],current={preset_id:presetId||null,name:'',cards:[]};
   const note=(text,ok=true)=>{if(message){message.textContent=text;message.className=ok?'muted':'critical-row'}};
   const fieldInput=field=>{
     if(field.type==='device')return `<label>${esc(field.name)} <select data-field="${esc(field.name)}">${devices.map(d=>`<option value="${esc(d.id)}">${esc(d.friendly_name||d.hostname||d.id)}</option>`).join('')}</select></label>`;
+    if(field.type==='slo')return `<label>${esc(field.name)} <select data-field="${esc(field.name)}">${slos.map(s=>`<option value="${esc(s.id)}">${esc(s.name||s.id)}</option>`).join('')||'<option value="">no SLOs configured</option>'}</select></label>`;
     if(field.type==='enum')return `<label>${esc(field.name)} <select data-field="${esc(field.name)}">${(field.options||[]).map(o=>`<option value="${esc(o)}">${esc(o||'(any)')}</option>`).join('')}</select></label>`;
     return `<label>${esc(field.name)} <input data-field="${esc(field.name)}" type="number" value="${field.default??1}"></label>`;
   };
@@ -580,6 +582,7 @@ async function dashboards(presetId){
   if(typeSelect){
     try{let libData=await(await fetch('/api/card-library')).json();library=libData.cards||[]}catch(e){library=[]}
     try{let devData=await(await fetch('/api/devices')).json();devices=devData.devices||[]}catch(e){devices=[]}
+    try{let sloData=await(await fetch('/api/slos')).json();slos=sloData.slos||[]}catch(e){slos=[]}
     typeSelect.innerHTML=library.map(t=>`<option value="${esc(t.type)}">${esc(t.label)}</option>`).join('');
     typeSelect.onchange=renderConfigFields;renderConfigFields();
     let addButton=document.querySelector('#add-card-button');
@@ -606,6 +609,24 @@ async function dashboards(presetId){
     }catch(e){}
   }
   updateShare();await renderCards();await loadList();
+}
+// SLOs and reliability scoring (enhancement #3): a self-contained summary
+// page for /slos, driven by GET /api/slos (pinoc/slo.py's SLOService,
+// through the routes added in pinoc/web/app.py). The dashboard card type
+// (`slo_summary`, see cardTile above) reads the same per-SLO shape one row
+// at a time; this renders every configured SLO as a table.
+async function slos(){
+  let root=document.querySelector('#slos');if(!root)return;
+  let d;try{d=await(await fetch('/api/slos')).json()}catch(e){root.innerHTML='<p>SLOs unavailable.</p>';return}
+  let entries=d.slos||[];
+  if(!entries.length){root.innerHTML='<p class="muted">No SLOs configured yet — add one under the top-level <code>slos.definitions</code> config section.</p>';return}
+  let rows=entries.map(s=>{
+    if(s.error)return `<tr><td>${esc(s.name||s.id)}</td><td colspan="6">${esc(s.error)}</td></tr>`;
+    let budget=s.budget_remaining_percent;
+    let bar=budget==null?'—':`<div class="budget-bar"><div class="budget-bar-fill${budget<20?' low':''}" style="width:${Math.max(0,Math.min(100,budget))}%"></div></div>${budget.toFixed(1)}%`;
+    return `<tr class="${s.firing?'critical-row':''}"><td>${esc(s.name)}</td><td>${esc(s.scope.type)}: ${esc(s.scope.value)} (${s.device_count})</td><td>${s.attainment_percent!=null?s.attainment_percent.toFixed(3)+'%':'insufficient data'}</td><td>${esc(s.target_percent)}% / ${esc(s.window_days)}d</td><td>${bar}</td><td>${s.fast_burn_rate!=null?s.fast_burn_rate.toFixed(1)+'x':'—'} / ${s.fast_threshold}x</td><td>${s.slow_burn_rate!=null?s.slow_burn_rate.toFixed(1)+'x':'—'} / ${s.slow_threshold}x</td><td>${s.firing?'<span class="severity-critical">burning</span>':'ok'}</td></tr>`;
+  });
+  root.innerHTML=`<section class="panel">${table(['SLO','Scope','Attainment','Target/Window','Error budget','Fast burn','Slow burn','Status'],rows)}</section>`;
 }
 // Saved search/filter presets on the fleet page: a small self-contained
 // widget appended to dashboard.html's existing filter bar. It reads/writes
@@ -714,4 +735,4 @@ async function incidentDetail(id){
   let rows=timeline.map(e=>`<tr><td>${localTime(e.time)}</td><td>${esc(e.kind)}</td><td>${esc(e.device_id||'cluster')}</td><td>${esc(e.description)}</td></tr>`);
   root.innerHTML=`<div class="title-row"><span class="dot ${esc(incident.severity)}"></span><div><h1>${esc(incident.title)}</h1><p>${esc(incident.severity)} · opened ${localTime(incident.opened_at)} · resolved ${localTime(incident.resolved_at)}</p></div></div><section class="panel"><dl class="details"><dt>MTTA</dt><dd>${durationMinutes(incident.mtta_seconds)}</dd><dt>MTTR</dt><dd>${durationMinutes(incident.mttr_seconds)}</dd><dt>Devices involved</dt><dd>${esc((incident.device_ids||[]).join(', ')||'none')}</dd></dl><p class="actions"><a class="action" href="/api/incidents/${id}/export.md">Export Markdown</a> <a class="action" href="/api/incidents/${id}/export.json">Export JSON</a> <a class="action" href="/api/incidents/${id}/print" target="_blank" rel="noopener">Printable view</a></p></section><section class="panel"><h2>Timeline</h2>${table(['Time','Kind','Device','Description'],rows)}</section>`;
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,incidents,incidentDetail,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();
+return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,incidents,incidentDetail,slos,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();
