@@ -524,6 +524,40 @@ Enabled by default with conservative settings; override via the optional
   before alerts are presented as a cluster; below that they remain
   ordinary, individually notified alerts.
 
+### Incident timelines and automatic post-mortems
+
+After a multi-alert incident resolves, the story is otherwise scattered
+across the alerts, events, audit, and notification history. PiNOC turns a
+resolved correlated alert cluster — or any standalone alert that resolves
+on its own — into a single **incident** record: a reconstructed
+chronological timeline of every alert open/acknowledge/resolve transition,
+related device events, action jobs, and notification sends, plus computed
+MTTA (time to first acknowledgment), MTTR (time to resolution), and the
+devices involved.
+
+Incidents are synthesized automatically the moment a cluster or alert
+resolves (hooked into the same history-writer reconcile pass that already
+detects the resolution — no separate polling loop) and appear on the
+**Incidents** page (`/incidents`), filterable by device, severity, and
+resolved-date range. Each incident's detail page (`/incidents/<id>`) shows
+the full timeline and can be exported as Markdown or JSON, or opened as a
+standalone printable HTML page (`/api/incidents/<id>/print` — use the
+browser's own Print/Save-as-PDF). A resolved alert on `/alerts` links
+straight to its incident once one has been synthesized.
+
+The incident record itself only stores identifying references (which
+cluster/alert it came from, the devices and alert IDs involved, and the
+computed MTTA/MTTR) — the timeline is reconstructed at read time from the
+existing `alerts`, `events`, `action_jobs`, and `notification_log` tables,
+never duplicated. `notification_log` is a small persisted record of every
+outbound notification send (see "Alert notifications" above), added so a
+resolved incident's timeline still shows what was actually sent after a
+restart.
+
+APIs: `GET /api/incidents` (filters: `device`, `severity`, `since`,
+`until`, plus the usual `page`/`limit`), `GET /api/incidents/<id>`, and
+`GET /api/incidents/<id>/export.md` / `export.json` / `print`.
+
 ### Network topology (device-to-device ping matrix)
 
 Per-device network metrics can look normal on every device individually even
@@ -1177,6 +1211,7 @@ and job data. Back up and remove preserved data manually only when intended.
 | `pinoc/dashboards.py` | Card library, card-data resolution, and preset persistence for `/dashboards` and `/glance`. |
 | `pinoc/development.py` | Enrollment, agent authentication, workspace/job policy, and artifacts. |
 | `pinoc/self_monitoring.py` | Console self-monitoring: collector health, cache staleness, database, scheduler lag, agent reachability, action-queue depth, and `console_self_*` alerts. |
+| `pinoc/incidents.py` | Incident timelines and automatic post-mortems: synthesizes an incident record on cluster/alert resolution and reconstructs its timeline plus MTTA/MTTR for `/incidents`. |
 | `config.json`, `config/devices.example.json`, `.env.example` | Runtime and fleet configuration examples. |
 | `install.sh`, `uninstall.sh` | Main service lifecycle. |
 | `install_agent.sh`, `uninstall_agent.sh` | Optional agent lifecycle. |
