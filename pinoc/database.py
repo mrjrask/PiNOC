@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -104,6 +104,15 @@ CREATE INDEX notification_log_device_time ON notification_log(device_id,timestam
 # longer, configurable retention (see HistoryManager.maintenance).
 """CREATE TABLE health_samples(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,device_id TEXT NOT NULL,health TEXT NOT NULL,online INTEGER NOT NULL DEFAULT 0,UNIQUE(device_id,timestamp));
 CREATE INDEX health_samples_device_time ON health_samples(device_id,timestamp);""",
+# Configuration drift detection and repair (enhancement #6, see
+# pinoc/device_config.py's ConfigDriftSpec and pinoc/collectors/fleet.py's
+# compute_config_drift): one row per (device, path) holding the last
+# known-good capture of a drift-checked file's content, opportunistically
+# saved by HistoryManager whenever the live file matches its configured
+# expected sha256 -- see pinoc.backup.save_config_snapshot/
+# load_config_snapshot. "config_drift.restore_file" (pinoc/actions.py)
+# restores from this row rather than from arbitrary/unverified content.
+"""CREATE TABLE config_snapshots(device_id TEXT NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,content BLOB NOT NULL,size_bytes INTEGER NOT NULL,captured_at TEXT NOT NULL,PRIMARY KEY(device_id,path));""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

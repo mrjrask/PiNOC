@@ -17,7 +17,13 @@ RESCUE_ACTIONS=frozenset({"apt.clean","apt.autoremove","logs.truncate","journal.
 # contain -- i.e. every action ActionDispatcher.validate() actually
 # consults device.get("allowed_actions",[]) for. Keep in sync with
 # validate()'s own checks.
-ALLOWLISTABLE_ACTIONS=RESCUE_ACTIONS|{"package.check","apt.upgrade"}
+# Configuration drift repair actions (enhancement #6, see pinoc.collectors
+# .fleet's compute_config_drift and pinoc.device_config.ConfigDriftSpec):
+# always bounded to the unit/file named in the device's own configured
+# expected-state spec, never an arbitrary unit or path -- see validate()
+# below.
+CONFIG_DRIFT_ACTIONS=frozenset({"config_drift.reenable_unit","config_drift.restore_file"})
+ALLOWLISTABLE_ACTIONS=RESCUE_ACTIONS|CONFIG_DRIFT_ACTIONS|{"package.check","apt.upgrade"}
 # Valid `target` values for apt.upgrade: which packages to bring current.
 # "security" delegates to unattended-upgrades' own configured security-origin
 # allowlist rather than PiNOC re-deriving "is this a security update" itself
@@ -95,6 +101,8 @@ class ActionDispatcher:
           "logs.truncate":ActionDefinition("logs.truncate","Truncate a log file","actions.execute","strong",60,handler=self._logs_truncate),
           "journal.vacuum":ActionDefinition("journal.vacuum","Vacuum the journal","actions.execute","strong",180,handler=self._journal_vacuum),
           "cache.drop":ActionDefinition("cache.drop","Drop page caches","actions.execute","strong",30,handler=self._cache_drop),
+          "config_drift.reenable_unit":ActionDefinition("config_drift.reenable_unit","Re-enable drifted unit","actions.execute","strong",30,handler=self._config_drift_reenable_unit),
+          "config_drift.restore_file":ActionDefinition("config_drift.restore_file","Restore file from backup","actions.execute","strong",30,handler=self._config_drift_restore_file),
         }
         if db and db.available:
             db.execute("UPDATE action_jobs SET status='failed',completed_at=?,error='PiNOC restarted while action was running' WHERE status IN ('running','queued')",(utcnow(),))
@@ -124,6 +132,17 @@ class ActionDispatcher:
                 raise ActionError("log path must be under /var/log or a declared important path")
             if action=="journal.vacuum" and target is not None and not VACUUM_SPEC_RE.fullmatch(str(target)):
                 raise ActionError("journal vacuum target must be like size:100M or time:7d")
+        if action in CONFIG_DRIFT_ACTIONS:
+            if action not in device.get("allowed_actions",[]):raise ActionError("this repair action is not approved for this device")
+            spec=device.get("config_drift_expected") or {}
+            if action=="config_drift.reenable_unit":
+                units=spec.get("expected_units") or []
+                if not target or not UNIT.fullmatch(target) or target not in units:
+                    raise ActionError("unit is not part of this device's expected-state spec")
+            else:
+                files=spec.get("expected_files") or {}
+                if not target or target not in files:
+                    raise ActionError("file is not part of this device's expected-state spec")
         running=self.db.scalar("SELECT COUNT(*) FROM action_jobs WHERE device_id=? AND status IN ('queued','running')",(device_id,)) if self.db else 0
         if running and definition.conflict!="refresh":raise ActionError("a conflicting device action is already pending")
         return definition,device
@@ -283,6 +302,37 @@ class ActionDispatcher:
         if before is not None and after is not None:
             result["summary"]="page caches dropped; MemAvailable "+_mi(before)+" → "+_mi(after)
         return result
+    def _config_drift_reenable_unit(self,row,timeout):
+        """Re-enable (and unmask, if masked) a unit named in this device's
+        own config_drift.expected_units -- validate() already refused any
+        other target, so this never touches an arbitrary unit."""
+        device=self.state.device(row["device_id"]);unit=row["target"]
+        # unmask is best-effort: systemctl exits non-zero when the unit was
+        # never masked in the first place, which is not a failure here --
+        # only enable's own result is reported back.
+        self._raw(device,["sudo","-n","systemctl","unmask",unit],timeout)
+        result=self._command(device,["sudo","-n","systemctl","enable",unit],timeout)
+        if result.get("exit_code")==0:result["summary"]=f"{unit} unmasked and enabled"
+        return result
+    def _config_drift_restore_file(self,row,timeout):
+        """Restore a file named in this device's own config_drift
+        .expected_files from the last snapshot pinoc.backup captured while
+        that file matched its expected hash -- never arbitrary content, and
+        never a file outside the expected-state spec (validate() already
+        checked that)."""
+        from pinoc.backup import load_config_snapshot
+        device=self.state.device(row["device_id"]);path=row["target"]
+        spec=device.get("config_drift_expected") or {}
+        expected_hash=(spec.get("expected_files") or {}).get(path)
+        if not expected_hash:raise ActionError("file is not part of this device's expected-state spec")
+        snapshot=load_config_snapshot(self.db,row["device_id"],path)
+        if not snapshot or snapshot.get("sha256")!=expected_hash:
+            raise ActionError("no known-good snapshot is available for this file yet")
+        content=snapshot["content"]
+        content=content.decode("utf-8") if isinstance(content,(bytes,bytearray)) else str(content)
+        code,output=self._raw(device,["sudo","-n","tee",path],timeout,input_text=content)
+        if code==0:return {"exit_code":0,"summary":f"restored {path} from known-good snapshot ({expected_hash[:12]})","error":None}
+        return {"exit_code":code,"summary":f"Remote system returned exit code {code}","error":redact(output)}
     def set_maintenance(self,device_id,actor,reason="",seconds=None):
         if not self.state.device(device_id):raise ActionError("device not found")
         until=(datetime.now(timezone.utc)+timedelta(seconds=seconds)).isoformat() if seconds else None

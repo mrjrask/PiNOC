@@ -76,6 +76,37 @@ class BackupError(RuntimeError):
     pass
 
 
+# Known-good device config file snapshots (enhancement #6, configuration
+# drift detection/repair): a small, separate store from the system bundle
+# above -- these are per-device *remote* file contents opportunistically
+# captured by pinoc.collectors.fleet whenever a drift-checked file's live
+# sha256 matches its configured expected_files hash, so
+# "config_drift.restore_file" (pinoc/actions.py) has a known-good copy to
+# restore from once the file actually drifts. Bounded to small text config
+# files (sshd_config and the like), not a general-purpose backup mechanism,
+# and kept out of the signed system bundle's own schema/versioning above.
+MAX_CONFIG_SNAPSHOT_BYTES = 65536
+
+
+def save_config_snapshot(db: Database, device_id: str, path: str, sha256: str, content: bytes) -> None:
+    """Persist (or replace) the latest known-good capture of one device file."""
+    if len(content) > MAX_CONFIG_SNAPSHOT_BYTES:
+        raise BackupError(f"config snapshot for {path} is {len(content)} bytes; "
+                          f"exceeds the {MAX_CONFIG_SNAPSHOT_BYTES}-byte limit")
+    db.execute(
+        "INSERT INTO config_snapshots(device_id,path,sha256,content,size_bytes,captured_at) "
+        "VALUES(?,?,?,?,?,?) ON CONFLICT(device_id,path) DO UPDATE SET "
+        "sha256=excluded.sha256,content=excluded.content,size_bytes=excluded.size_bytes,"
+        "captured_at=excluded.captured_at",
+        (device_id, path, sha256, bytes(content), len(content), utcnow()))
+
+
+def load_config_snapshot(db: Database, device_id: str, path: str) -> Optional[Dict[str, Any]]:
+    """The last known-good capture of one device file, or None if never captured."""
+    rows = db.rows("SELECT * FROM config_snapshots WHERE device_id=? AND path=?", (device_id, path))
+    return rows[0] if rows else None
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 

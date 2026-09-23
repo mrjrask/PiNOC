@@ -60,6 +60,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "fleet_seconds": 10,
         "log_tail_seconds": 300,
         "log_tail_lines": 50,
+        "config_drift_check_seconds": 300,
     },
     "remote_host": "192.168.1.200",
     "remote_user": "pi",
@@ -1234,7 +1235,8 @@ class SharedSnapshotCoordinator:
             auth_fail_critical=float(security_monitoring.get("auth_fail_critical", 20)),
             auth_fail_hysteresis=float(security_monitoring.get("auth_fail_hysteresis", 2)),
             listener_change_duration_seconds=float(
-                security_monitoring.get("listener_change_duration_seconds", 60)))
+                security_monitoring.get("listener_change_duration_seconds", 60)),
+            drift_check_seconds=float(polling.get("config_drift_check_seconds", 300)))
         self.configured_fleet_devices = tuple(devices)
         global_thresholds = CONFIG.get("health_thresholds", {})
         try:
