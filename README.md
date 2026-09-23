@@ -1065,12 +1065,70 @@ attainment and remaining error budget, and a dedicated `/slos` page
 attainment, target/window, error-budget bar, and fast/slow burn rate in one
 table — useful when there are more SLOs than fit comfortably as cards.
 
+## Scheduled fleet health reports
+
+Export (`/api/export/<kind>`) and backup bundles are both on-demand, so
+operators only learn about slow trends — filling disks, accumulating
+warnings, drifting patch levels — when they remember to open the console.
+`pinoc/reports.py` adds a recurring state-of-the-fleet document: define one
+or more reports in the top-level `reports` config section, each with a
+firing schedule, a scope, a set of content sections, an output format, and
+an audience notification channel. Firing reuses `pinoc/schedules.py`'s
+cron/alias/one-shot spec parsing directly (no second scheduler), and
+delivery reuses the *exact* ntfy/SMTP/webhook channel implementations
+`pinoc/notifications.py` already has (via a new
+`NotificationService.send_direct` method) — no second delivery mechanism.
+
+```json
+"reports": {
+  "enabled": true,
+  "interval_seconds": 60,
+  "edition_retention": 90,
+  "definitions": [
+    {
+      "id": "weekly-fleet",
+      "name": "Weekly fleet health",
+      "spec": "@weekly",
+      "timezone": "UTC",
+      "scope": {"type": "fleet"},
+      "channel_id": "ops",
+      "sections": ["uptime", "alerts", "capacity", "storage_media", "patch_status"],
+      "format": "html",
+      "window_days": 7
+    }
+  ]
+}
+```
+
+`scope.type` is `fleet` (every device), `role`, or `tag` (same matching as
+SLO scopes above); `channel_id` must reference an id in
+`notifications.channels[]` — reports piggyback on whatever ntfy/SMTP/webhook
+channels are already configured, rather than adding a second set of
+delivery credentials. Each firing renders the chosen `sections` from data
+every other feature already computes — uptime/attainment from the same
+`health_samples` table `pinoc/slo.py` reads, the open-alert summary from the
+`alerts` table, per-mount capacity forecasts from
+`pinoc.history.storage_forecast` (the same function `/api/devices/<id>/storage/forecast`
+uses), storage-media health from the live device snapshot (the same signal
+that opens `media_io_errors` alerts), and patch status from live package
+metadata plus the most recent `pinoc/rollout.py` run touching each device —
+into an HTML or CSV edition, archived in a new `report_editions` table.
+Delivery through the configured channel is a short plain-text summary (open
+alert count, mounts filling up, devices with pending updates, ...) rather
+than the full document, since ntfy/SMTP/webhook are plain-text channels; the
+full edition is viewed or downloaded from the `/reports` page
+(`GET /api/reports`, `POST /api/reports/<id>/run`, `GET /api/reports/editions`,
+`GET /api/reports/editions/<id>/download`). PDF rendering is deliberately
+out of scope for this MVP — an HTML edition opens standalone and downloads
+via the browser's own Print/Save-as-PDF, the same way `pinoc/incidents.py`'s
+printable view avoids a PDF dependency.
+
 ## Web console and APIs
 
 Primary pages are `/`, `/devices/<id>`, `/integrations`, `/adsb`, `/displays`,
 `/software`, `/network-inventory`, `/alerts`, `/events`, `/audit`, `/settings`,
 `/settings/status`, `/console-status`, `/agents`, `/workspaces`, `/jobs`,
-`/jobs/approvals`, `/dashboards`, `/glance`, and `/slos`.
+`/jobs/approvals`, `/dashboards`, `/glance`, `/slos`, and `/reports`.
 
 ### Customizable dashboards, saved views, and Glance
 

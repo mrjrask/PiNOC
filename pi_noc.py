@@ -1562,6 +1562,15 @@ def main() -> None:
     if slo_service is not None:
         slo_service.start()
 
+    # Scheduled fleet health reports (enhancement #5). create_app already
+    # built pinoc.reports.ReportService (a self-contained block reading
+    # CONFIG["reports"], the same way pinoc.slo.SLOService is built inline
+    # there) since it needs no ActionDispatcher either; this only starts/
+    # stops its poll loop, the same as every other background service above.
+    reports_service = extensions.get("pinoc_reports")
+    if reports_service is not None:
+        reports_service.start()
+
     previous_signal_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
     }
@@ -1592,6 +1601,8 @@ def main() -> None:
                 self_monitoring.stop()
             if slo_service is not None:
                 slo_service.stop()
+            if reports_service is not None:
+                reports_service.stop()
             notifications.stop()
             history.stop()
         finally:
