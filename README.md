@@ -1427,6 +1427,14 @@ and job data. Back up and remove preserved data manually only when intended.
 
 ## Development and verification
 
+Install the development dependencies before running the verification commands:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -r requirements-dev.txt
+```
+
 ```sh
 python3 -m pytest -q
 python3 -m unittest discover -s tests -v
