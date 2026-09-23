@@ -42,3 +42,25 @@ def test_secret_environment_is_encrypted_at_rest_and_restored_for_agent(tmp_path
     assert wire["workspace"]["test_profiles"]["unit"]["environment"] == {
         "API_TOKEN": "[REDACTED]"
     }
+
+
+def test_legacy_plaintext_profile_secrets_are_encrypted_on_read(tmp_path):
+    db = Database(str(tmp_path / "development.sqlite"))
+    assert db.initialize()
+    gateway = DevelopmentGateway(db, str(tmp_path / "jobs"), {}, "stable-key")
+    root = tmp_path / "workspace"
+    root.mkdir()
+    gateway.save_workspace({"workspace_id": "legacy", "device_id": "pi", "path": str(root),
+                            "test_profiles": {}})
+    legacy_profiles = {"unit": {"environment": {"API_TOKEN": "legacy-secret"}}}
+    db.execute("UPDATE workspaces SET test_profiles_json=? WHERE workspace_id=?",
+               (json.dumps(legacy_profiles), "legacy"))
+
+    workspace = gateway.workspace("legacy")
+
+    assert workspace["test_profiles"]["unit"]["environment"]["API_TOKEN"] == "[REDACTED]"
+    stored = db.scalar("SELECT test_profiles_json FROM workspaces WHERE workspace_id=?",
+                       ("legacy",))
+    assert "legacy-secret" not in stored
+    assert "__encrypted__" in json.loads(stored)
+    assert gateway.workspace("legacy", include_secrets=True)["test_profiles"] == legacy_profiles

@@ -92,7 +92,16 @@ class DevelopmentGateway:
         return json.dumps(profiles,sort_keys=True)
     def _decode_test_profiles(self,row):
         profiles=_loads(row,"test_profiles_json",{})
-        if not isinstance(profiles,dict) or "__encrypted__" not in profiles:return profiles
+        if not isinstance(profiles,dict) or "__encrypted__" not in profiles:
+            # Workspaces created before profile encryption was introduced have
+            # plaintext JSON in this column.  Migrate secret-bearing payloads
+            # on first read so upgrading does not require an administrator to
+            # re-save every workspace.  The compare-and-swap predicate avoids
+            # overwriting a concurrent workspace update with the stale row.
+            if isinstance(profiles,dict) and redact(profiles)!=profiles and row.get("workspace_id"):
+                plaintext=row.get("test_profiles_json")
+                self.db.execute("UPDATE workspaces SET test_profiles_json=? WHERE workspace_id=? AND test_profiles_json=?",(self._encode_test_profiles(profiles),row["workspace_id"],plaintext))
+            return profiles
         try:return json.loads(self._fernet.decrypt(str(profiles["__encrypted__"]).encode()).decode())
         except (InvalidToken,TypeError,ValueError,json.JSONDecodeError) as exc:raise DevError("test profiles could not be decrypted","test_profiles_unavailable",409) from exc
     def audit(self,identity,ip,device,action,target,params,auth,result=None,error=None):
