@@ -49,11 +49,21 @@ class Executor:
             try:os.killpg(proc.pid,signal.SIGTERM);time.sleep(.2);os.killpg(proc.pid,signal.SIGKILL)
             except ProcessLookupError:pass
     @staticmethod
-    def sandbox_argv(argv,root,required):
+    def sandbox_argv(argv,root,required,hardware_devices=()):
         if not required:return argv
         bubblewrap=shutil.which("bwrap")
         if not bubblewrap:raise ValueError("bubblewrap is required for workspace job execution")
         command=[bubblewrap,"--die-with-parent","--new-session","--unshare-pid","--unshare-ipc","--unshare-uts","--unshare-cgroup","--cap-drop","ALL","--proc","/proc","--dev","/dev","--tmpfs","/tmp"]
+        # Bubblewrap's private /dev deliberately contains no host hardware.
+        # Re-introduce only explicit device nodes from the approved workspace
+        # and test profile.  Never accept directories or arbitrary host paths.
+        allowed=("gpiochip[0-9]*","i2c-[0-9]*","spidev[0-9]*.[0-9]*","video[0-9]*","fb[0-9]*","dri/card[0-9]*","dri/renderD[0-9]*")
+        if any(isinstance(device,str) and device.startswith("/dev/dri/") for device in hardware_devices):command.extend(["--dir","/dev/dri"])
+        for device in hardware_devices:
+            if not isinstance(device,str) or not device.startswith("/dev/") or not any(fnmatch.fnmatch(device[5:],pattern) for pattern in allowed):raise ValueError("hardware device is not approved for sandbox binding")
+            path=Path(device)
+            if not path.exists() or not path.is_char_device():raise ValueError("approved hardware device is unavailable")
+            command.extend(["--dev-bind",device,device])
         for path in ("/usr","/bin","/lib","/lib64","/sbin","/etc"):
             if Path(path).exists():command.extend(["--ro-bind",path,path])
         command.extend(["--bind",str(root),"/workspace","--chdir","/workspace","--setenv","HOME","/workspace","--setenv","TMPDIR","/tmp","--",*argv])
@@ -98,7 +108,7 @@ class Executor:
                 return self.done(started,0,text,"","file read")
             argv=self.argv(job,root)
             sandbox_required=self.require_sandbox and kind not in {"service_status","log_read"}
-            argv=self.sandbox_argv(argv,root,sandbox_required)
+            argv=self.sandbox_argv(argv,root,sandbox_required,job.get("hardware_devices",[]))
             env={"PATH":"/usr/local/bin:/usr/bin:/bin","HOME":"/workspace" if sandbox_required else str(root),"LANG":"C.UTF-8","LC_ALL":"C.UTF-8","TMPDIR":"/tmp"};env.update(job.get("environment",{}))
             proc=subprocess.Popen(argv,cwd=root,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=False,start_new_session=True,preexec_fn=lambda:self.limits(int(job["timeout_seconds"])))
             with self.lock:self.processes[jid]=proc

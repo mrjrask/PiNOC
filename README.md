@@ -1364,7 +1364,12 @@ bare executable. Shells, privilege tools, environment wrappers, executable
 paths, Git configuration aliases, destructive Git operations, and exec-style
 options are rejected. Named tests use administrator-approved argv/environment/
 timeout definitions. State-changing hardware tests also require `dev:hardware`
-and explicit approval. Output, file reads, artifacts, counts, runtime, processes,
+and explicit approval. A workspace can authorize sandbox device nodes with
+`hardware_profile.devices` (for example, `["/dev/gpiochip0", "/dev/i2c-1"]`);
+a hardware test profile can further narrow that list with its own `devices`
+array. Only supported GPIO, I²C, SPI, camera, DRM, and framebuffer character
+devices are bound into the otherwise private sandbox device tree. Output, file
+reads, artifacts, counts, runtime, processes,
 file descriptors, memory, and file size are bounded. Cancellation terminates the
 process group. PiNOC provides no unrestricted shell, filesystem-write endpoint,
 SSH-key export, automatic pull/reset/rollback, or root agent.

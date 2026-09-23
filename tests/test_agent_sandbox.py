@@ -26,6 +26,21 @@ class AgentSandboxTest(unittest.TestCase):
         argv = ["systemctl", "show", "demo.service"]
         self.assertEqual(Executor.sandbox_argv(argv, Path("/tmp/workspace"), False), argv)
 
+    def test_approved_hardware_device_is_bound_into_private_dev(self):
+        root = Path("/tmp/pi-noc-test-workspace")
+        device = Path("/dev/gpiochip0")
+        with mock.patch("pinoc_agent.shutil.which", return_value="/usr/bin/bwrap"), \
+             mock.patch.object(Path, "exists", return_value=True), \
+             mock.patch.object(Path, "is_char_device", return_value=True):
+            argv = Executor.sandbox_argv(["python3", "test.py"], root, True, [str(device)])
+        index = argv.index("--dev-bind")
+        self.assertEqual(argv[index:index + 3], ["--dev-bind", str(device), str(device)])
+
+    def test_arbitrary_hardware_path_is_rejected(self):
+        with mock.patch("pinoc_agent.shutil.which", return_value="/usr/bin/bwrap"):
+            with self.assertRaisesRegex(ValueError, "not approved"):
+                Executor.sandbox_argv(["true"], Path("/tmp/workspace"), True, ["/dev/sda"])
+
 
 if __name__ == "__main__":
     unittest.main()

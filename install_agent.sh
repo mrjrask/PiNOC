@@ -3,6 +3,11 @@ set -Eeuo pipefail
 [[ $EUID -eq 0 ]] || { echo "Run with sudo" >&2; exit 1; }
 SERVER=${1:?Usage: sudo ./install_agent.sh https://pinoc.example enrollment-code [discovery-root ...]}
 CODE=${2:?Enrollment code required}; shift 2
+if ! command -v bwrap >/dev/null 2>&1; then
+  command -v apt-get >/dev/null 2>&1 || { echo "bubblewrap is required, but apt-get is unavailable" >&2; exit 1; }
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bubblewrap
+fi
 id pinoc-agent &>/dev/null || useradd --system --home /var/lib/pinoc-agent --create-home --shell /usr/sbin/nologin pinoc-agent
 install -d -o root -g pinoc-agent -m 0750 /etc/pinoc-agent /opt/pinoc-agent /var/lib/pinoc-agent
 python3 -m venv /opt/pinoc-agent/venv

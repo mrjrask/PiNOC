@@ -215,6 +215,14 @@ def test_wire_job_uses_selected_profile_artifact_patterns(tmp_path):
  gateway.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"test","profile":"screenshots"})
  assert gateway.claim("pi")["workspace"]["artifact_patterns"]==["screens/*.png"]
 
+def test_wire_hardware_devices_are_limited_by_workspace_and_profile(tmp_path):
+ db,gateway=setup(tmp_path);enroll(gateway);root=tmp_path/"repo";root.mkdir();workspace(gateway,root)
+ profiles={"hardware":{"argv":["python3","-V"],"hardware":True,"devices":["/dev/gpiochip0","/dev/sda"]}}
+ hardware={"devices":["/dev/gpiochip0","/dev/i2c-1"]}
+ db.execute("UPDATE workspaces SET test_profiles_json=?,hardware_profile_json=? WHERE workspace_id='project'",(json.dumps(profiles),json.dumps(hardware)))
+ gateway.submit(identity(scopes=identity()["scopes"]+["dev:hardware"]),{"device_id":"pi","workspace_id":"project","job_type":"test","profile":"hardware"})
+ assert gateway.claim("pi")["hardware_devices"]==["/dev/gpiochip0"]
+
 def test_state_changing_profile_requires_hardware_scope_and_approval(tmp_path):
  db,gw=setup(tmp_path);enroll(gw);root=tmp_path/"repo";root.mkdir();workspace(gw,root)
  profiles={"flash":{"argv":["python3","-c","print('flash')"],"state_changing":True}}

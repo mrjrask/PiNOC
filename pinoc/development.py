@@ -233,10 +233,15 @@ class DevelopmentGateway:
         row=rows[0];self.db.execute("UPDATE development_jobs SET status='dispatched',dispatched_at=?,queue_reason=NULL WHERE job_id=? AND status='queued'",(utcnow(),row["job_id"]));return self._wire_job(self.job(row["job_id"]))
     def _wire_job(self,row):
         ws=self.workspace(row["workspace_id"]) if row.get("workspace_id") else None
+        hardware_devices=[]
         if ws and row.get("profile"):
             definition=ws.get("test_profiles",{}).get(row["profile"],{})
             ws["artifact_patterns"]=definition.get("artifact_patterns",ws.get("artifact_patterns",[]))
-        return {"job_id":row["job_id"],"job_type":row["job_type"],"profile":row.get("profile"),"workspace":ws,"argv":_loads(row,"argv_json",[]),"environment":_loads(row,"environment_json",{}),"request":_loads(row,"request_json",{}),"timeout_seconds":row["timeout_seconds"],"output_limit_bytes":self.output_limit,"file_limit_bytes":self.file_limit,"artifact_limits":{"count":self.artifact_count,"file_bytes":self.artifact_file_limit,"total_bytes":self.artifact_total_limit}}
+            if definition.get("hardware") or definition.get("state_changing"):
+                workspace_devices=ws.get("hardware_profile",{}).get("devices",[])
+                profile_devices=definition.get("devices",workspace_devices)
+                if isinstance(workspace_devices,list) and isinstance(profile_devices,list):hardware_devices=[device for device in profile_devices if device in workspace_devices]
+        return {"job_id":row["job_id"],"job_type":row["job_type"],"profile":row.get("profile"),"workspace":ws,"hardware_devices":hardware_devices,"argv":_loads(row,"argv_json",[]),"environment":_loads(row,"environment_json",{}),"request":_loads(row,"request_json",{}),"timeout_seconds":row["timeout_seconds"],"output_limit_bytes":self.output_limit,"file_limit_bytes":self.file_limit,"artifact_limits":{"count":self.artifact_count,"file_bytes":self.artifact_file_limit,"total_bytes":self.artifact_total_limit}}
     def result(self,agent,job_id,body):
         job=self.job(job_id)
         if not job or job["device_id"]!=agent["device_id"]:raise DevError("job not found","job_not_found",404)
