@@ -1430,10 +1430,16 @@ and job data. Back up and remove preserved data manually only when intended.
 Install the development dependencies before running the verification commands:
 
 ```sh
-python3 -m venv .venv
+sudo apt-get update
+sudo apt-get install -y python3-venv python3-cryptography
+python3 -m venv --system-site-packages .venv
 . .venv/bin/activate
 python3 -m pip install -r requirements-dev.txt
 ```
+
+PiNOC uses Debian's `python3-cryptography` package, so the development virtual
+environment must expose system site packages just like the environment created
+by `install.sh`.
 
 ```sh
 python3 -m pytest -q
