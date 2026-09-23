@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -115,6 +115,15 @@ CREATE INDEX health_samples_device_time ON health_samples(device_id,timestamp);"
 """CREATE TABLE report_schedule_state(report_id TEXT PRIMARY KEY,next_run TEXT,last_run TEXT,updated_at TEXT NOT NULL);
 CREATE TABLE report_editions(id INTEGER PRIMARY KEY,report_id TEXT NOT NULL,name TEXT NOT NULL,generated_at TEXT NOT NULL,format TEXT NOT NULL,scope_json TEXT NOT NULL DEFAULT '{}',sections_json TEXT NOT NULL DEFAULT '[]',device_count INTEGER NOT NULL DEFAULT 0,content TEXT NOT NULL DEFAULT '',delivered INTEGER NOT NULL DEFAULT 0,delivery_error TEXT);
 CREATE INDEX report_editions_report_time ON report_editions(report_id,generated_at);""",
+# Configuration drift detection and repair (enhancement #6, see
+# pinoc/device_config.py's ConfigDriftSpec and pinoc/collectors/fleet.py's
+# compute_config_drift): one row per (device, path) holding the last
+# known-good capture of a drift-checked file's content, opportunistically
+# saved by HistoryManager whenever the live file matches its configured
+# expected sha256 -- see pinoc.backup.save_config_snapshot/
+# load_config_snapshot. "config_drift.restore_file" (pinoc/actions.py)
+# restores from this row rather than from arbitrary/unverified content.
+"""CREATE TABLE config_snapshots(device_id TEXT NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,content BLOB NOT NULL,size_bytes INTEGER NOT NULL,captured_at TEXT NOT NULL,PRIMARY KEY(device_id,path));""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

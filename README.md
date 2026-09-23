@@ -215,6 +215,7 @@ fields include:
 | `allowed_actions` | Per-device allowlist for optional actions (package checks, apt updates, disk rescues); none are enabled by default. |
 | `important_paths` | Paths whose read-only mounts are critical. |
 | `expected_listeners` | Optional `"tcp:22"`/`"udp:53"`-style baseline for listener-change alerting (see [Security-surface monitoring](#security-surface-monitoring)); omit/empty to collect the inventory without alerting on it. |
+| `config_drift` | Optional expected-state baseline (units, file hashes, sshd options) for [Configuration drift detection](#configuration-drift-detection-and-repair); omit/empty to skip drift checks entirely. |
 | `thresholds` | Per-device live health threshold overrides. |
 | `integrations` | Per-integration enablement and options. |
 | `repositories` | Named, configured Git working trees for read-only status. |
@@ -719,6 +720,81 @@ is a per-device field (sibling of `important_paths`), and
   "listener_change_duration_seconds": 60
 }
 ```
+
+### Configuration drift detection and repair
+
+PiNOC watches liveness (a service is up, a host answers) but, without this,
+never notices a *correctness* regression: an sshd option flipped back to an
+insecure default, a critical unit silently disabled or masked, or a tuned
+config file reverted to its distro default. A device's optional
+`config_drift` field declares the expected-state baseline PiNOC should hold
+it to:
+
+```json
+"config_drift": {
+  "expected_units": ["ssh.service"],
+  "expected_files": {
+    "/etc/ssh/sshd_config": "44c91857f34b1ec68e246ebcbad66c4b9380b41c3490c719bdfd6696ba7b40b5"
+  },
+  "expected_sshd_options": {
+    "PermitRootLogin": "no",
+    "PasswordAuthentication": "no"
+  }
+}
+```
+
+is a per-device field (sibling of `expected_listeners`): `expected_units`
+(bounded to 20) must be enabled and not masked/disabled; `expected_files`
+(bounded to 10) maps an absolute path to its expected `sha256sum` output;
+`expected_sshd_options` (bounded to 25) maps an sshd config key to its
+expected effective value. All three are optional and independent; a device
+with none configured never runs a drift check at all.
+
+Collection extends the same fleet poll used for everything else:
+unit-enabled state rides along in the existing `systemctl show` call on
+every poll (cheap), while file hashes and the effective sshd configuration
+(`sshd -T`) run on their own low-frequency, bounded cadence
+(`drift_check_seconds`, default 300s) — the same "expensive check, its own
+cadence" pattern `packages`/the journal tail already use. A file's content
+is only ever fetched up to 64 KiB and its hash is always recomputed locally
+from the fetched bytes, never trusted from the remote side.
+
+Any mismatch opens a single **`config_drift`** alert per device through the
+normal alert lifecycle (open → acknowledge/mute → resolve), distinct from a
+liveness/service-failure alert, carrying a readable expected-vs-found diff
+as its message, one line per drifted item:
+
+```text
+unit ssh.service: expected 'enabled', found 'disabled'
+file /etc/ssh/sshd_config: expected '44c91857f34b', found '9f2c7a10e881'
+sshd option permitrootlogin: expected 'no', found 'yes'
+```
+
+It resolves automatically once everything matches again, exactly like any
+other alert type.
+
+Repair is only ever available through two allowlisted actions (per-device
+`allowed_actions`, same opt-in pattern as [disk rescue
+actions](#disk-rescue-actions)), each bounded to exactly what that device's
+own `config_drift` spec names — never an arbitrary unit or path:
+
+| Action | Effect | Target |
+| --- | --- | --- |
+| `config_drift.reenable_unit` | `systemctl unmask` (best-effort) then `systemctl enable` | A unit listed in this device's `expected_units` |
+| `config_drift.restore_file` | Restores a file from its last known-good capture | A path listed in this device's `expected_files` |
+
+Whenever a drift-checked file's live content matches its configured
+expected hash, PiNOC opportunistically captures that content (still capped
+at 64 KiB) as a "known-good" snapshot in a small local store
+(`config_snapshots`, keyed by device + path) — see `pinoc/backup.py`. This
+is what `config_drift.restore_file` restores from: it refuses to run until
+a snapshot whose hash matches the currently configured `expected_files`
+value exists, so it can never write back stale or unverified content.
+**Scope cut:** only text files are restored (content is written back over
+SSH as UTF-8); a file is never captured, and restore is refused, until it
+has been observed once in its known-good state — there is no seeding from
+elsewhere (e.g. the signed system backup bundle above, which only covers
+PiNOC's own config/database, not arbitrary device files).
 
 ## Scheduled actions (cron-style)
 

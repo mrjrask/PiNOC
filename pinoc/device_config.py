@@ -18,6 +18,39 @@ KNOWN_ROLES = {"file_server", "vpn_server", "adsb_receiver", "desk_display",
 # pinoc.collectors.fleet._security_status(). "proto:port", e.g. "tcp:22".
 _LISTENER_RE = re.compile(r"\A(tcp|udp):([0-9]{1,5})\Z")
 MAX_EXPECTED_LISTENERS = 100
+# Configuration drift detection (enhancement #6): a per-device expected-state
+# spec collected/diffed by pinoc.collectors.fleet and repaired only through
+# the allowlisted pinoc.actions "config_drift.*" actions. Bounded the same
+# way expected_listeners/monitored_services are -- a handful of security-
+# relevant units/files/options, not an arbitrary inventory.
+MAX_DRIFT_UNITS = 20
+MAX_DRIFT_FILES = 10
+MAX_DRIFT_SSHD_OPTIONS = 25
+# Unit names checked for drift are re-enabled by pinoc.actions'
+# "config_drift.reenable_unit", which reuses actions.UNIT (".service" only,
+# the same constraint every other unit-management action already has) --
+# keep this in sync so a configured unit can actually be repaired.
+_DRIFT_UNIT_RE = re.compile(r"[A-Za-z0-9_.@:-]{1,122}\.service")
+_DRIFT_PATH_RE = re.compile(r"/[A-Za-z0-9/._@:-]{1,254}")
+_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
+_SSHD_OPTION_RE = re.compile(r"[A-Za-z][A-Za-z0-9]{0,63}")
+_SSHD_VALUE_RE = re.compile(r"[^\r\n]{1,256}")
+
+
+@dataclass(frozen=True)
+class ConfigDriftSpec:
+    """One device's expected-state baseline for drift detection.
+
+    ``expected_files``/``expected_sshd_options`` map name -> expected value
+    (sha256 digest / option value) rather than a list, mirroring
+    ``thresholds``/``integrations`` elsewhere in :class:`DeviceConfig`.
+    """
+    expected_units: Tuple[str, ...] = ()
+    expected_files: Dict[str, str] = field(default_factory=dict)
+    expected_sshd_options: Dict[str, str] = field(default_factory=dict)
+
+    def is_empty(self) -> bool:
+        return not (self.expected_units or self.expected_files or self.expected_sshd_options)
 
 
 class DeviceConfigError(ValueError):
@@ -46,6 +79,57 @@ def _expected_listeners(value: Any, label: str) -> List[str]:
         if normalized not in result:
             result.append(normalized)
     return result
+
+
+def _config_drift(value: Any, label: str) -> ConfigDriftSpec:
+    if value in (None, {}):
+        return ConfigDriftSpec()
+    if not isinstance(value, dict):
+        raise DeviceConfigError(f"device {label}: config_drift must be an object")
+    units = value.get("expected_units", [])
+    if not isinstance(units, list) or any(not isinstance(x, str) for x in units):
+        raise DeviceConfigError(f"device {label}: config_drift.expected_units must be a list of strings")
+    if len(units) > MAX_DRIFT_UNITS:
+        raise DeviceConfigError(f"device {label}: at most {MAX_DRIFT_UNITS} config_drift.expected_units are allowed")
+    normalized_units: List[str] = []
+    for unit in units:
+        unit = unit.strip()
+        if not _DRIFT_UNIT_RE.fullmatch(unit):
+            raise DeviceConfigError(
+                f"device {label}: config_drift.expected_units entry {unit!r} must be a bare "
+                "'<name>.service' unit name")
+        if unit not in normalized_units:
+            normalized_units.append(unit)
+    files = value.get("expected_files", {})
+    if not isinstance(files, dict):
+        raise DeviceConfigError(f"device {label}: config_drift.expected_files must be an object of path -> sha256")
+    if len(files) > MAX_DRIFT_FILES:
+        raise DeviceConfigError(f"device {label}: at most {MAX_DRIFT_FILES} config_drift.expected_files are allowed")
+    normalized_files: Dict[str, str] = {}
+    for path, digest in files.items():
+        if not isinstance(path, str) or ".." in path or not _DRIFT_PATH_RE.fullmatch(path):
+            raise DeviceConfigError(f"device {label}: config_drift.expected_files path {path!r} is invalid")
+        digest = str(digest).strip().lower()
+        if not _SHA256_RE.fullmatch(digest):
+            raise DeviceConfigError(
+                f"device {label}: config_drift.expected_files[{path!r}] must be a 64-hex-character sha256 digest")
+        normalized_files[path] = digest
+    options = value.get("expected_sshd_options", {})
+    if not isinstance(options, dict):
+        raise DeviceConfigError(f"device {label}: config_drift.expected_sshd_options must be an object")
+    if len(options) > MAX_DRIFT_SSHD_OPTIONS:
+        raise DeviceConfigError(
+            f"device {label}: at most {MAX_DRIFT_SSHD_OPTIONS} config_drift.expected_sshd_options are allowed")
+    normalized_options: Dict[str, str] = {}
+    for option, expected in options.items():
+        if not isinstance(option, str) or not _SSHD_OPTION_RE.fullmatch(option):
+            raise DeviceConfigError(f"device {label}: config_drift.expected_sshd_options key {option!r} is invalid")
+        expected = str(expected).strip()
+        if not expected or not _SSHD_VALUE_RE.fullmatch(expected):
+            raise DeviceConfigError(
+                f"device {label}: config_drift.expected_sshd_options[{option!r}] must be a short single-line value")
+        normalized_options[option.lower()] = expected
+    return ConfigDriftSpec(tuple(normalized_units), normalized_files, normalized_options)
 
 
 def _strings(value: Any, field_name: str, label: str, *, lowercase: bool = True) -> List[str]:
@@ -88,6 +172,13 @@ class DeviceConfig:
     # collector still gathers the live listener inventory but never alerts
     # on it, matching how the rest of PiNOC treats unset optional config.
     expected_listeners: Tuple[str, ...] = ()
+    # Optional expected-state baseline for configuration drift detection
+    # (enhancement #6): enabled units, selected file hashes, selected sshd
+    # options. Empty means "not configured" -- the collector never runs the
+    # (bounded, low-frequency) drift checks for this device. See
+    # pinoc.collectors.fleet.compute_config_drift and the "Configuration
+    # drift detection" README section.
+    config_drift: ConfigDriftSpec = field(default_factory=ConfigDriftSpec)
 
     @property
     def cockpit_url(self) -> Optional[str]:
@@ -133,6 +224,7 @@ def parse_device(raw: Dict[str, Any], index: int) -> DeviceConfig:
     important_paths = _strings(raw.get("important_paths", []), "important_paths", label,
                                lowercase=False)
     expected_listeners = _expected_listeners(raw.get("expected_listeners"), label)
+    config_drift = _config_drift(raw.get("config_drift"), label)
     if len(raw.get("monitored_services", [])) != len(set(raw.get("monitored_services", []))):
         raise DeviceConfigError(f"device {label}: monitored_services contains duplicates")
     monitored = list(dict.fromkeys(monitored + critical))
@@ -180,7 +272,7 @@ def parse_device(raw: Dict[str, Any], index: int) -> DeviceConfig:
                         bool(raw.get("service_discovery", False)), str(raw.get("notes", "")),
                         tuple(important_paths),
                         bool(raw.get("maintenance", False)), thresholds, integrations,
-                        tuple(repositories), tuple(expected_listeners))
+                        tuple(repositories), tuple(expected_listeners), config_drift)
 
 
 def legacy_device(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:

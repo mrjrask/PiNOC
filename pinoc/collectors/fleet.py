@@ -1,6 +1,9 @@
 """Transport-neutral, bounded fleet metrics collection."""
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from pinoc.device_config import DeviceConfig
+from pinoc.device_config import DeviceConfig, MAX_DRIFT_FILES
 from pinoc.health import evaluate
 from pinoc.models import DeviceState
 from pinoc.integrations import IntegrationStatus, active_integrations
@@ -28,8 +31,8 @@ SCRIPT = r'''set +e
 # passed only on the (much lower-frequency) cycle a package check is due --
 # `apt-get --just-print upgrade` simulates a dependency resolution over the
 # whole local apt cache and must not run on every fleet poll.
-jlogs_lines=""; jlogs_units=""; apt_due=0; authcheck_due=0
-for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; __apt__) apt_due=1;; __authcheck__) authcheck_due=1;; esac; done
+jlogs_lines=""; jlogs_units=""; apt_due=0; authcheck_due=0; drift_files=""; sshdcheck_due=0
+for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; __apt__) apt_due=1;; __authcheck__) authcheck_due=1;; __driftfiles__:*) drift_files=${arg#__driftfiles__:};; __sshdcheck__) sshdcheck_due=1;; esac; done
 echo __OS__; cat /etc/os-release 2>/dev/null; echo __UNAME__; uname -srm
 echo __MODEL__; tr -d '\000' </proc/device-tree/model 2>/dev/null; echo
 echo __UPTIME__; cat /proc/uptime; echo __LOAD__; cat /proc/loadavg
@@ -87,8 +90,30 @@ if [ "$authcheck_due" = "1" ]; then
     tail -n 500 /var/log/secure 2>/dev/null; } | grep -ciE "Failed password|Invalid user|authentication failure|Failed publickey"
 fi
 if [ "$1" = "__discover__" ]; then shift; discovered=$(systemctl list-unit-files --no-legend --no-pager 2>/dev/null | awk '{print $1}' | grep -E '^(cockpit|ssh|desk-display|piaware|dump1090|readsb|magicmirror|ics_modifier|pi-hotspot|temp-monitor|smb|smbd|nmbd|wg-quick)' | head -30); fi
-echo __SERVICES__; systemctl show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ActiveEnterTimestampMonotonic,NRestarts,MemoryCurrent "$@" $discovered 2>/dev/null
+echo __SERVICES__; systemctl show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ActiveEnterTimestampMonotonic,NRestarts,MemoryCurrent,UnitFileState "$@" $discovered 2>/dev/null
 echo __UNITS__; systemctl list-unit-files --no-legend --no-pager 2>/dev/null
+echo __DRIFTFILES__
+if [ -n "$drift_files" ]; then
+  for f in $(printf '%s' "$drift_files" | tr ',' ' '); do
+    printf '=== %s\n' "$f"
+    if [ -r "$f" ]; then
+      sz=$(stat -c%s "$f" 2>/dev/null)
+      if [ -n "$sz" ] && [ "$sz" -le 65536 ] 2>/dev/null; then
+        printf 'SIZE:%s\n' "$sz"
+        enc=$(base64 "$f" 2>/dev/null | tr -d '\n')
+        printf '%s\n' "${enc:--}"
+      else
+        printf 'SIZE:%s\n' "${sz:-unknown}"
+        printf -- '-\n'
+      fi
+    else
+      printf 'MISSING\n'
+      printf -- '-\n'
+    fi
+  done
+fi
+echo __SSHD__
+if [ "$sshdcheck_due" = "1" ]; then sshd -T 2>/dev/null; fi
 echo __JLOGS__
 if [ -n "$jlogs_lines" ]; then
   for unit in $(printf '%s' "$jlogs_units" | tr ',' ' '); do
@@ -359,7 +384,11 @@ def parse_services(text: str, critical: Iterable[str], system_uptime: float = 0)
                        "sub_state":values.get("SubState"),"main_pid":main_pid or None,
                        "restart_count":numeric_value(values,"NRestarts"),"memory_bytes":numeric_value(values,"MemoryCurrent"),
                        "uptime_seconds":max(0,int(system_uptime-active_mono)) if active_mono else None,
-                       "active_since_monotonic":active_mono or None,"critical":values["Id"] in crit})
+                       "active_since_monotonic":active_mono or None,"critical":values["Id"] in crit,
+                       # unit_file_state feeds configuration drift detection
+                       # (enhancement #6): "enabled"/"static"/... vs.
+                       # "disabled"/"masked" -- see compute_config_drift().
+                       "unit_file_state":values.get("UnitFileState") or None})
     return result
 
 
@@ -419,6 +448,166 @@ def parse_jlogs(text: str) -> List[Dict[str, Any]]:
         entries.append(current)
     return [entry for entry in entries if entry["lines"]][:50]
 
+
+# Configuration drift detection (enhancement #6): a device's actual state
+# for whatever's named in its own ConfigDriftSpec (pinoc.device_config),
+# diffed against that spec below to open a single readable config_drift
+# alert through the normal integration-conditions path
+# (HistoryManager._alerts()), never a parallel mechanism.
+MAX_DRIFT_FILE_BYTES = 65536
+# Unit states that count as "properly enabled" for drift purposes -- systemd
+# reports more than a plain "enabled": a unit pulled in only via another
+# unit's static dependency ("static"), one enabled for this boot only
+# ("enabled-runtime"), or an alias/indirect target are all legitimately
+# non-disabled, non-masked states an administrator would not call drift.
+_UNIT_ENABLED_STATES = frozenset({"enabled", "enabled-runtime", "static", "alias", "indirect"})
+
+
+def parse_drift_files(text: str) -> Dict[str, Dict[str, Any]]:
+    """Parse the bounded __DRIFTFILES__ section (fixed 3-line records: a
+    ``=== path`` header, a ``SIZE:n``/``MISSING`` line, and a base64 content
+    line or ``-``) into per-path actual state. ``sha256``/``content`` stay
+    ``None`` when the file is missing, unreadable, or larger than
+    MAX_DRIFT_FILE_BYTES (too large to safely fetch/verify in a bounded
+    poll) -- the hash is always computed locally from the fetched bytes,
+    never trusted from the remote side.
+    """
+    lines = text.splitlines()
+    result: Dict[str, Dict[str, Any]] = {}
+    i = 0
+    while i < len(lines):
+        header = lines[i]
+        if not header.startswith("=== "):
+            i += 1
+            continue
+        path = header[4:].strip()
+        entry: Dict[str, Any] = {"exists": False, "size": None, "sha256": None, "content": None}
+        meta = lines[i + 1] if i + 1 < len(lines) else ""
+        content_line = lines[i + 2] if i + 2 < len(lines) else "-"
+        i += 3
+        if meta == "MISSING":
+            result[path] = entry
+            continue
+        entry["exists"] = True
+        if meta.startswith("SIZE:"):
+            raw_size = meta[len("SIZE:"):].strip()
+            if raw_size.isdigit():
+                entry["size"] = int(raw_size)
+        content_line = content_line.strip()
+        if content_line and content_line != "-" and entry["size"] is not None and entry["size"] <= MAX_DRIFT_FILE_BYTES:
+            try:
+                content = base64.b64decode(content_line, validate=False)
+            except (ValueError, binascii.Error):
+                content = None
+            if content is not None:
+                entry["content"] = content
+                entry["sha256"] = hashlib.sha256(content).hexdigest()
+        result[path] = entry
+    return result
+
+
+def parse_sshd_options(text: str) -> Dict[str, str]:
+    """Parse ``sshd -T``'s normalized ``key value`` lines (already
+    lowercase, one option per line, defaults resolved) into a dict."""
+    result: Dict[str, str] = {}
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2:
+            result[parts[0].lower()] = parts[1].strip()
+    return result
+
+
+def compute_config_drift(spec: Any, unit_states: Dict[str, Dict[str, Any]],
+                         drift_files: Dict[str, Dict[str, Any]], sshd_options: Dict[str, str],
+                         files_due: bool, sshd_due: bool,
+                         previous: Optional[List[Dict[str, Any]]] = None) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Diff a device's ConfigDriftSpec against its collected actual state.
+
+    Returns ``(drift_items, snapshots)``:
+
+    - ``drift_items``: ``{"type","name","expected","actual"}`` per drifted
+      unit/file/sshd option (empty when nothing has drifted).
+    - ``snapshots``: ``{"path","sha256","content"}`` for files that
+      currently match their expected hash -- fed back into
+      pinoc.backup's known-good file store so "config_drift.restore_file"
+      has something to restore once the file actually drifts.
+
+    Units are checked every call (systemctl show is cheap and always runs
+    for expected_units -- see FleetCollector._command()); files/sshd
+    options only run on the low-frequency ``files_due``/``sshd_due``
+    cadence and otherwise carry forward `previous`'s items for that
+    category, the same not-due fallback `packages`/`security` already use
+    elsewhere in this module, so a config_drift alert doesn't flap
+    open/resolved every poll the expensive check isn't due.
+    """
+    drift: List[Dict[str, Any]] = []
+    snapshots: List[Dict[str, Any]] = []
+    for unit in spec.expected_units:
+        state = unit_states.get(unit)
+        if state is None:
+            drift.append({"type": "unit", "name": unit, "expected": "enabled", "actual": "unit not found"})
+            continue
+        unit_file_state = state.get("unit_file_state")
+        if not unit_file_state:
+            continue  # not reported this cycle -- avoid a false positive
+        if unit_file_state not in _UNIT_ENABLED_STATES:
+            drift.append({"type": "unit", "name": unit, "expected": "enabled", "actual": unit_file_state})
+    if files_due:
+        for path, expected_hash in spec.expected_files.items():
+            actual = drift_files.get(path)
+            if actual is None:
+                continue
+            if not actual["exists"]:
+                drift.append({"type": "file", "name": path, "expected": expected_hash[:12], "actual": "missing"})
+            elif actual["sha256"] is None:
+                drift.append({"type": "file", "name": path, "expected": expected_hash[:12],
+                             "actual": "unreadable or too large to verify"})
+            elif actual["sha256"] != expected_hash:
+                drift.append({"type": "file", "name": path, "expected": expected_hash[:12],
+                             "actual": actual["sha256"][:12]})
+            elif actual.get("content") is not None:
+                snapshots.append({"path": path, "sha256": actual["sha256"], "content": actual["content"]})
+    else:
+        drift.extend(item for item in (previous or []) if item["type"] == "file")
+    if sshd_due:
+        for option, expected_value in spec.expected_sshd_options.items():
+            actual_value = sshd_options.get(option.lower())
+            if actual_value is None:
+                continue
+            if actual_value != expected_value:
+                drift.append({"type": "sshd_option", "name": option, "expected": expected_value, "actual": actual_value})
+    else:
+        drift.extend(item for item in (previous or []) if item["type"] == "sshd_option")
+    return drift, snapshots
+
+
+_DRIFT_LABELS = {"unit": "unit", "file": "file", "sshd_option": "sshd option"}
+
+
+def format_drift_diff(drift_items: Iterable[Dict[str, Any]]) -> str:
+    """One readable ``expected vs. found`` line per drifted item -- the
+    text carried in the config_drift alert's message/metadata."""
+    lines = []
+    for item in drift_items:
+        label = _DRIFT_LABELS.get(item["type"], item["type"])
+        lines.append(f"{label} {item['name']}: expected {item['expected']!r}, found {item['actual']!r}")
+    return "\n".join(lines)
+
+
+def _config_drift_expected_dict(device: DeviceConfig) -> Dict[str, Any]:
+    """JSON-safe form of a device's ConfigDriftSpec, carried through
+    DeviceState.config_drift_expected so pinoc.actions.ActionDispatcher can
+    bound "config_drift.*" repair actions to exactly this device's own
+    configured units/files -- never an arbitrary one. Empty when the device
+    has no expected-state spec configured."""
+    spec = device.config_drift
+    if spec.is_empty():
+        return {}
+    return {"expected_units": list(spec.expected_units),
+            "expected_files": dict(spec.expected_files),
+            "expected_sshd_options": dict(spec.expected_sshd_options)}
+
+
 class FleetCollector:
     def __init__(self, devices: List[DeviceConfig], max_workers: int = 4, timeout: float = 8,
                  password: str = "", runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
@@ -427,7 +616,8 @@ class FleetCollector:
                  packages_check_seconds: float = 21600.0,
                  auth_fail_warning: float = 5, auth_fail_critical: float = 20,
                  auth_fail_hysteresis: float = 2,
-                 listener_change_duration_seconds: float = 60.0) -> None:
+                 listener_change_duration_seconds: float = 60.0,
+                 drift_check_seconds: float = 300.0) -> None:
         self.devices=devices; self.max_workers=max(1,min(int(max_workers),16)); self.timeout=float(timeout)
         self.password=password; self.runner=runner
         # Per-device password override (device_id -> password): compromising
@@ -457,6 +647,13 @@ class FleetCollector:
         # long-documented-but-previously-unused DEFAULT_INTERVALS["packages"]).
         self.packages_check_seconds=max(60.0,float(packages_check_seconds))
         self._last_apt_check: Dict[str, float] = {}
+        # Configuration drift detection (enhancement #6): file-hash/sshd
+        # checks are their own low-frequency, bounded cadence -- unit
+        # enabled/masked state rides along with every poll instead (see
+        # _command() above), the same jlogs-style due-gating idiom as
+        # apt/packages above.
+        self.drift_check_seconds=max(30.0,float(drift_check_seconds))
+        self._last_drift_check: Dict[str, float] = {}
         # Security-surface monitoring (auth failures, listening ports): each
         # threshold/hysteresis pair follows the exact same open-until-you-
         # drop-back-down shape history.HistoryManager._alerts() already uses
@@ -475,8 +672,15 @@ class FleetCollector:
     def _password_for(self, device: DeviceConfig) -> str:
         return self.passwords.get(device.id) or self.password
 
-    def _command(self, device: DeviceConfig, jlogs_due: bool = False, apt_due: bool = False) -> List[str]:
-        args = (["__discover__"] if device.service_discovery else []) + list(device.monitored_services)
+    def _command(self, device: DeviceConfig, jlogs_due: bool = False, apt_due: bool = False,
+                 drift_due: bool = False) -> List[str]:
+        # config_drift.expected_units ride along with monitored_services in
+        # the same single `systemctl show` call (see __SERVICES__ below,
+        # which now also asks for UnitFileState) -- cheap enough to check on
+        # every poll, unlike the file-hash/sshd checks below, which only run
+        # on the low-frequency drift_due cadence.
+        base_units = list(dict.fromkeys(list(device.monitored_services) + list(device.config_drift.expected_units)))
+        args = (["__discover__"] if device.service_discovery else []) + base_units
         if jlogs_due:
             units: List[str] = []
             for name in [str(x) for x in list(device.monitored_services) + list(device.critical_services)]:
@@ -493,6 +697,12 @@ class FleetCollector:
             args.append("__authcheck__")
         if apt_due:
             args.append("__apt__")
+        if drift_due:
+            files = list(device.config_drift.expected_files)[:MAX_DRIFT_FILES]
+            if files:
+                args.append(f"__driftfiles__:{','.join(files)}")
+            if device.config_drift.expected_sshd_options:
+                args.append("__sshdcheck__")
         if device.collection_method == "local": return ["sh", "-s", "--", *args]
         ssh=["ssh","-p",str(device.ssh_port),"-o",f"ConnectTimeout={max(1,int(self.timeout))}","-o","ServerAliveInterval=3"]
         if self._password_for(device): return ["sshpass","-e",*ssh,"-o","BatchMode=no",f"{device.ssh_user}@{device.address}","sh","-s","--",*args]
@@ -510,11 +720,14 @@ class FleetCollector:
         jlogs_due=last_jlogs is None or time.monotonic()-last_jlogs>=self.log_tail_seconds
         last_apt=self._last_apt_check.get(device.id)
         apt_due=last_apt is None or time.monotonic()-last_apt>=self.packages_check_seconds
+        last_drift=self._last_drift_check.get(device.id)
+        drift_due=(not device.config_drift.is_empty()
+                  and (last_drift is None or time.monotonic()-last_drift>=self.drift_check_seconds))
         try:
             env={**os.environ,"LC_ALL":"C"}
             device_password=self._password_for(device)
             if device_password: env["SSHPASS"]=device_password
-            proc=self.runner(self._command(device,jlogs_due,apt_due),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
+            proc=self.runner(self._command(device,jlogs_due,apt_due,drift_due),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
             if proc.returncode: raise RuntimeError((proc.stderr or f"command exited {proc.returncode}").strip()[:240])
             self._last_jlogs[device.id]=time.monotonic()
             # Only reset the apt cadence clock when a check actually ran
@@ -523,6 +736,7 @@ class FleetCollector:
             # last reset", could never reach packages_check_seconds again
             # after the very first collection.
             if apt_due: self._last_apt_check[device.id]=time.monotonic()
+            if drift_due: self._last_drift_check[device.id]=time.monotonic()
             data=sections(proc.stdout); cpu,counter=parse_cpu(data,self.previous_cpu.get(device.id)); self.previous_cpu[device.id]=counter
             os_values={}
             for row in data.get("OS","").splitlines():
@@ -556,6 +770,7 @@ class FleetCollector:
                  "hardware":parse_throttled(data.get("THROTTLED","")),"memory":parse_memory(data.get("MEM","")),
                  "storage":storage,"media":media,"network":network,
                  "important_paths":list(device.important_paths),
+                 "config_drift_expected":_config_drift_expected_dict(device),
                  "services":services,"critical_services":list(device.critical_services),
                  "collector_status":{"system":{"status":"ok"},"storage":{"status":"ok"},
                                      "media_errors":{"status":"ok" if io_errors_available else "unavailable",
@@ -625,6 +840,8 @@ class FleetCollector:
             # contract so it surfaces on the device page and feeds the alert
             # engine exactly like every other integration already does.
             integrations["security"]=self._security_status(device,data,attempted,now,jlogs_due)
+            config_drift_status=self._config_drift_status(device,data,services,attempted,now,drift_due,old)
+            if config_drift_status is not None:integrations["config_drift"]=config_drift_status
             raw["integrations"]=integrations
             raw["logs"]=parse_jlogs(data.get("JLOGS","")) if jlogs_due else (list(old.logs) if old else [])
             health,reasons,stale=evaluate(raw,device.thresholds); raw.update(health=health,health_reasons=reasons,stale=stale)
@@ -701,6 +918,46 @@ class FleetCollector:
         value["conditions"] = conditions
         return value
 
+    def _config_drift_status(self, device: DeviceConfig, data: Dict[str, str], services: List[Dict[str, Any]],
+                             attempted: str, now: str, drift_due: bool,
+                             old: Optional[DeviceState]) -> Optional[Dict[str, Any]]:
+        """Configuration drift detection (enhancement #6) for one device:
+        diff its ConfigDriftSpec against the actual state this same poll
+        already gathered (unit enabled/masked state) or a bounded
+        low-frequency check gathered this cycle (file hashes, sshd
+        options). Returns None when the device has no expected-state spec
+        configured at all -- no integration entry, no alert, matching how
+        `expected_listeners` is treated elsewhere in this module.
+        """
+        spec = device.config_drift
+        if spec.is_empty():
+            return None
+        unit_states = {s["name"]: s for s in services}
+        drift_files = parse_drift_files(data.get("DRIFTFILES", "")) if drift_due and spec.expected_files else {}
+        sshd_options = parse_sshd_options(data.get("SSHD", "")) if drift_due and spec.expected_sshd_options else {}
+        old_status = (old.integrations or {}).get("config_drift") if old else None
+        previous = ((old_status or {}).get("data") or {}).get("drift") if isinstance(old_status, dict) else None
+        drift_items, snapshots = compute_config_drift(
+            spec, unit_states, drift_files, sshd_options,
+            files_due=drift_due and bool(spec.expected_files),
+            sshd_due=drift_due and bool(spec.expected_sshd_options),
+            previous=previous)
+        diff_text = format_drift_diff(drift_items)
+        status = IntegrationStatus(
+            name="config_drift", enabled=True, available=True,
+            health="warning" if drift_items else "healthy",
+            last_success=now, last_attempt=attempted, data_source="ssh",
+            data={"drift": drift_items, "diff": diff_text,
+                 "good_snapshots": [
+                     {"path": s["path"], "sha256": s["sha256"],
+                      "content_b64": base64.b64encode(s["content"]).decode("ascii")}
+                     for s in snapshots]},
+            critical=False)
+        value = status.to_dict()
+        value["conditions"] = [{"type": "config_drift", "severity": "warning",
+                               "message": diff_text[:1000]}] if drift_items else []
+        return value
+
     def _failure_result(self, device: DeviceConfig, old: Optional[DeviceState], attempted: str, exc: BaseException) -> DeviceState:
         LOG.warning("[%s] collection failed: %s",device.id,exc)
         raw=old.to_dict() if old else {"id":device.id,"hostname":device.hostname,"friendly_name":device.friendly_name,
@@ -708,6 +965,7 @@ class FleetCollector:
             "ssh_user":device.ssh_user,"ssh_port":device.ssh_port,"monitored_services":list(device.monitored_services),
             "critical_services":list(device.critical_services),"manageable_services":list(device.manageable_services),
             "allowed_actions":list(device.allowed_actions),
+            "config_drift_expected":_config_drift_expected_dict(device),
             "notes":device.notes,"cockpit_url":device.cockpit_url,"maintenance":device.maintenance}
         raw.update(last_collection_attempt=attempted,error=str(exc),collector_status={"transport":{"status":"error","error":str(exc)}})
         health,reasons,stale=evaluate(raw,device.thresholds)

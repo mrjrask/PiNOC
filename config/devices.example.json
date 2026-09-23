@@ -24,6 +24,22 @@
         "tcp:22",
         "tcp:8088"
       ],
+      "config_drift": {
+        "expected_units": [
+          "ssh.service"
+        ],
+        "expected_files": {
+          "/etc/ssh/sshd_config": "44c91857f34b1ec68e246ebcbad66c4b9380b41c3490c719bdfd6696ba7b40b5"
+        },
+        "expected_sshd_options": {
+          "PermitRootLogin": "no",
+          "PasswordAuthentication": "no"
+        }
+      },
+      "allowed_actions": [
+        "config_drift.reenable_unit",
+        "config_drift.restore_file"
+      ],
       "integrations": {
         "probe": {
           "enabled": true,

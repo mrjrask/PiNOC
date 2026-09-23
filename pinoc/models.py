@@ -47,6 +47,14 @@ class DeviceState:
     critical_services: List[str] = field(default_factory=list)
     manageable_services: List[str] = field(default_factory=list)
     allowed_actions: List[str] = field(default_factory=list)
+    # Configuration drift detection (enhancement #6): the device's own
+    # configured expected-state spec, JSON-safe
+    # ({"expected_units": [...], "expected_files": {...},
+    # "expected_sshd_options": {...}}), carried through so
+    # pinoc.actions.ActionDispatcher can bound "config_drift.*" repair
+    # actions to exactly the unit/file this device declared -- never an
+    # arbitrary one. Empty means "not configured" for this device.
+    config_drift_expected: Dict[str, Any] = field(default_factory=dict)
     notes: str = ""
     cockpit_url: Optional[str] = None
     maintenance: bool = False

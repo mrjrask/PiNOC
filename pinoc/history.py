@@ -1,6 +1,6 @@
 """Non-blocking history writer, transition detector, alerts and maintenance."""
 from __future__ import annotations
-import json, logging, queue, threading, time
+import base64, binascii, json, logging, queue, threading, time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from .anomalies import BaselineTracker
@@ -114,9 +114,34 @@ class HistoryManager:
                 self._write_event(did,"device_rebooted","info","Device reboot detected",{"boot_time":d.get("boot_time")},stamp)
             self._service_transitions(did,old,d,stamp); self._hardware_events(did,old,d,stamp)
         self._sample(d,stamp)
+        self._persist_config_snapshots(d)
         opened,resolved=self._alerts(d,stamp)
         self.previous[did]=d
         self._correlate(opened,resolved,stamp)
+
+    def _persist_config_snapshots(self,d):
+        """Configuration drift detection/repair (enhancement #6): whenever
+        pinoc.collectors.fleet finds a drift-checked file's live content
+        matching its configured expected hash, it hands back the fetched
+        bytes as a "good_snapshots" entry on the config_drift integration --
+        captured here into pinoc.backup's known-good file store so
+        "config_drift.restore_file" (pinoc/actions.py) has something to
+        restore from once the file actually drifts. A capture failure (e.g.
+        an oversized file slipping past the collector's own bound) must
+        never break history logging."""
+        status=(d.get("integrations") or {}).get("config_drift")
+        if not isinstance(status,dict):return
+        snapshots=(status.get("data") or {}).get("good_snapshots") or []
+        if not snapshots:return
+        from .backup import BackupError, save_config_snapshot
+        for entry in snapshots:
+            path=entry.get("path");sha256=entry.get("sha256");content_b64=entry.get("content_b64")
+            if not path or not sha256 or not content_b64:continue
+            try:
+                content=base64.b64decode(content_b64)
+                save_config_snapshot(self.db,d["id"],path,sha256,content)
+            except (BackupError,ValueError,TypeError,binascii.Error) as exc:
+                LOG.warning("could not save config snapshot for %s:%s: %s",d.get("id"),path,exc)
 
     def _due(self,did,kind,stamp):
         now=datetime.fromisoformat(stamp); key=(did,kind); last=self.last_sample.get(key)
