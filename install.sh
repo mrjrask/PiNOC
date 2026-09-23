@@ -229,7 +229,6 @@ configure_ssh_to_cm5() {
 }
 
 main() {
-  (cd "$REPO_DIR" && python3 -m pinoc.validate_config) || fail "PiNOC configuration validation failed"
   need_root
   INSTALL_USER="${SUDO_USER:-pi}"
   id "$INSTALL_USER" >/dev/null 2>&1 || fail "Install user ${INSTALL_USER} does not exist"
@@ -239,9 +238,10 @@ main() {
   configure_web
 
   install_system_dependencies
+  setup_venv
+  (cd "$REPO_DIR" && "$VENV_DIR/bin/python" -m pinoc.validate_config) || fail "PiNOC configuration validation failed"
   enable_i2c
   setup_user_groups
-  setup_venv
   log "Creating persistent history directory (existing databases are preserved)"
   install -d -m 0750 -o "$INSTALL_USER" -g "$INSTALL_USER" "$(dirname "${PINOC_DATABASE_PATH:-$DATA_DIR/pinoc.db}")"
   configure_wireguard_controls
