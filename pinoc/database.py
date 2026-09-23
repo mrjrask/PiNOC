@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -79,6 +79,21 @@ CREATE INDEX rollout_devices_run_status ON rollout_devices(run_id,status);""",
 CREATE INDEX network_matrix_pair_time ON network_matrix_samples(source_id,target_id,timestamp);""",
 """CREATE TABLE user_presets(preset_id TEXT PRIMARY KEY,owner TEXT NOT NULL,kind TEXT NOT NULL,name TEXT NOT NULL,payload_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE INDEX user_presets_owner_kind ON user_presets(owner,kind);""",
+# Incident timelines and automatic post-mortems (see pinoc/incidents.py):
+# a synthesized record per resolved alert cluster or standalone alert. The
+# incident row itself is intentionally small -- it stores only the
+# identifying references (which cluster/alert it came from, the devices and
+# member alert_ids involved) plus the computed MTTA/MTTR; the full timeline
+# is reconstructed at read time from the existing alerts/events/action_jobs/
+# notification_log tables rather than duplicated here. notification_log is
+# a new, minimal persisted record of each outbound notification send (see
+# NotificationService._record in pinoc/notifications.py), needed so a
+# resolved incident's timeline can show what was actually sent, including
+# after a restart.
+"""CREATE TABLE incidents(incident_id INTEGER PRIMARY KEY,kind TEXT NOT NULL,source_id INTEGER,trigger_class TEXT NOT NULL DEFAULT '',title TEXT NOT NULL,severity TEXT NOT NULL,opened_at TEXT NOT NULL,resolved_at TEXT NOT NULL,mtta_seconds REAL,mttr_seconds REAL,device_ids_json TEXT NOT NULL DEFAULT '[]',alert_ids_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,UNIQUE(kind,source_id));
+CREATE INDEX incidents_opened ON incidents(opened_at); CREATE INDEX incidents_resolved ON incidents(resolved_at); CREATE INDEX incidents_severity ON incidents(severity);
+CREATE TABLE notification_log(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,transition TEXT NOT NULL,device_id TEXT,alert_type TEXT,severity TEXT,channel_id TEXT,channel_kind TEXT,ok INTEGER NOT NULL,error TEXT);
+CREATE INDEX notification_log_device_time ON notification_log(device_id,timestamp); CREATE INDEX notification_log_time ON notification_log(timestamp);""",
 # SLOs and reliability scoring (enhancement #3, see pinoc/slo.py): a
 # lightweight periodic point-in-time health sample per device -- nothing
 # upstream of this persisted health at arbitrary past timestamps (device_metrics

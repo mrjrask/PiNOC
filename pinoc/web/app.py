@@ -312,6 +312,13 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     # about PiNOC itself (collector health, db size, queue depth, ...),
     # gated the same as /api/database/status.
     app.config["TOKEN_SCOPE_PERMISSIONS"].update({"api_console_status":"config.write"})
+    # Incident timelines and automatic post-mortems (enhancement #4): reads
+    # alongside the alerts they're synthesized from, so gated the same as
+    # /api/alerts (alerts.read).
+    app.config["TOKEN_SCOPE_PERMISSIONS"].update({
+        "api_incidents":"alerts.read","api_incident":"alerts.read","api_incident_export":"alerts.read",
+        "api_incident_export_markdown":"alerts.read","api_incident_print":"alerts.read",
+    })
     if security:install_security(app,security)
     app.extensions["pinoc_security"]=security;app.extensions["pinoc_actions"]=actions
     app.extensions["pinoc_development"]=development;app.extensions["pinoc_playbooks"]=playbooks
@@ -587,6 +594,11 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
 
     @app.get("/topology")
     def topology_page(): return render_template("topology.html")
+
+    @app.get("/incidents")
+    def incidents_page(): return render_template("incidents.html")
+    @app.get("/incidents/<int:incident_id>")
+    def incident_page(incident_id): return render_template("incident_detail.html",incident_id=incident_id)
 
     @app.get("/settings/status")
     def status_page():
@@ -873,15 +885,24 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
             remediation_status=service.get(row.get("fingerprint"))
         return {**row,"playbook":playbook,"remediation":remediation_status}
 
+    def _with_incident(row):
+        # Once an alert has resolved and its incident has been synthesized
+        # (see pinoc.incidents, hooked in from HistoryManager._correlate),
+        # link the alert card straight to that incident's timeline.
+        if history and history.db.available and row.get("resolved_at"):
+            from pinoc.incidents import incident_id_for_alert
+            return {**row,"incident_id":incident_id_for_alert(history.db,row)}
+        return {**row,"incident_id":None}
+
     @app.get("/api/alerts")
     def api_alerts():
-        if not history:return jsonify({"alerts":[_with_remediation(row) for row in state.alerts()]})
+        if not history:return jsonify({"alerts":[_with_incident(_with_remediation(row)) for row in state.alerts()]})
         page,limit=_page(); where,args=["1=1"],[]
         for field,column in (("device","device_id"),("severity","severity"),("state","state"),("type","alert_type")):
             if request.args.get(field):where.append(f"{column}=?");args.append(request.args[field])
         total=history.db.scalar("SELECT COUNT(*) FROM alerts WHERE "+" AND ".join(where),args) or 0
         rows=history.db.rows("SELECT * FROM alerts WHERE "+" AND ".join(where)+" ORDER BY CASE severity WHEN 'critical' THEN 3 WHEN 'degraded' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END DESC, opened_at DESC LIMIT ? OFFSET ?",args+[limit,(page-1)*limit])
-        return jsonify({"alerts":[_with_remediation(row) for row in rows],"page":page,"limit":limit,"total":total})
+        return jsonify({"alerts":[_with_incident(_with_remediation(row)) for row in rows],"page":page,"limit":limit,"total":total})
 
     def _page():
         try:return max(1,int(request.args.get("page",1))),min(200,max(1,int(request.args.get("limit",50))))
@@ -891,7 +912,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def api_alert(alert_id):
         rows=history.db.rows("SELECT * FROM alerts WHERE alert_id=?",(alert_id,)) if history else []
         if not rows:return jsonify({"error":"alert not found"}),404
-        return jsonify(_with_remediation(rows[0]))
+        return jsonify(_with_incident(_with_remediation(rows[0])))
 
     @app.get("/api/remediations")
     def api_remediations():
@@ -1421,6 +1442,71 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     @app.get("/slos")
     def slos_page():
         return render_template("slos.html")
+
+    # -- Incident timelines and automatic post-mortems (enhancement #4) -----
+    # Self-contained, additive block: pinoc.incidents synthesizes one
+    # incident record per resolved alert cluster or standalone alert (hooked
+    # into HistoryManager._correlate -- see pinoc/history.py) and
+    # reconstructs its timeline at read time from the existing alerts/
+    # events/action_jobs/notification_log tables. Nothing here touches the
+    # routes/helpers above beyond the small _with_incident() alert-card link.
+    def _incident_permission_ok():
+        return security is None or security.allowed(g.identity,"alerts.read")
+
+    @app.get("/api/incidents")
+    def api_incidents():
+        if not _incident_permission_ok():return jsonify({"error":"permission denied"}),403
+        if not history or not history.db.available:return jsonify({"incidents":[],"page":1,"limit":50,"total":0})
+        from pinoc.incidents import list_incidents
+        page,limit=_page()
+        rows,total=list_incidents(history.db,device=request.args.get("device"),severity=request.args.get("severity"),
+                                   since=request.args.get("since"),until=request.args.get("until"),
+                                   limit=limit,offset=(page-1)*limit)
+        return jsonify({"incidents":rows,"page":page,"limit":limit,"total":total})
+
+    def _load_incident(incident_id):
+        from pinoc.incidents import build_timeline, get_incident
+        if not history or not history.db.available:return None,None
+        incident=get_incident(history.db,incident_id)
+        if incident is None:return None,None
+        return incident,build_timeline(history.db,incident)
+
+    @app.get("/api/incidents/<int:incident_id>")
+    def api_incident(incident_id):
+        if not _incident_permission_ok():return jsonify({"error":"permission denied"}),403
+        incident,timeline=_load_incident(incident_id)
+        if incident is None:return jsonify({"error":"incident not found"}),404
+        return jsonify({"incident":incident,"timeline":timeline})
+
+    @app.get("/api/incidents/<int:incident_id>/export.json")
+    def api_incident_export(incident_id):
+        if not _incident_permission_ok():return jsonify({"error":"permission denied"}),403
+        from pinoc.incidents import to_json
+        incident,timeline=_load_incident(incident_id)
+        if incident is None:return jsonify({"error":"incident not found"}),404
+        response=jsonify(to_json(incident,timeline))
+        response.headers["Content-Disposition"]=f'attachment; filename="pinoc-incident-{incident_id}.json"'
+        return response
+
+    @app.get("/api/incidents/<int:incident_id>/export.md")
+    def api_incident_export_markdown(incident_id):
+        if not _incident_permission_ok():return jsonify({"error":"permission denied"}),403
+        from pinoc.incidents import to_markdown
+        incident,timeline=_load_incident(incident_id)
+        if incident is None:return jsonify({"error":"incident not found"}),404
+        return Response(to_markdown(incident,timeline),mimetype="text/markdown",
+                        headers={"Content-Disposition":f'attachment; filename="pinoc-incident-{incident_id}.md"'})
+
+    @app.get("/api/incidents/<int:incident_id>/print")
+    def api_incident_print(incident_id):
+        # A standalone, print-friendly HTML view (no nav chrome) -- open it
+        # and use the browser's own Print/Save-as-PDF, rather than pulling
+        # in a PDF generation dependency for an MVP.
+        if not _incident_permission_ok():return jsonify({"error":"permission denied"}),403
+        from pinoc.incidents import to_html
+        incident,timeline=_load_incident(incident_id)
+        if incident is None:return jsonify({"error":"incident not found"}),404
+        return Response(to_html(incident,timeline),mimetype="text/html")
 
     return app
 

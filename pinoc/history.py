@@ -244,7 +244,12 @@ class HistoryManager:
         for fp,row in existing.items():
             if fp not in seen and fp not in preserve:
                 self.db.execute("UPDATE alerts SET resolved_at=?,state='resolved' WHERE alert_id=?",(stamp,row["alert_id"]));self._write_event(did,"alert_resolved","info",f"Recovered: {row['message']}",{"alert_id":row["alert_id"]},stamp)
-                resolved.append(row)
+                # row was fetched before this UPDATE, so its own resolved_at
+                # is still stale (None) -- fold in the real resolution stamp
+                # so downstream consumers (incident synthesis: see
+                # pinoc.incidents.synthesize_alert) see the correct time
+                # instead of falling back to wall-clock now().
+                resolved.append({**row,"resolved_at":stamp,"state":"resolved"})
         return opened,resolved
     def _topology(self):
         """Build a fresh pinoc.topology.NetworkTopology from the current
@@ -275,8 +280,10 @@ class HistoryManager:
         for row in resolved:
             if row["alert_id"] not in absorbed_resolve:
                 self._notify(self.previous.get(row["device_id"],{}),row["device_id"],"resolve",row)
+                self._synthesize_incident_alert(row)
         if outcome:
             for event in outcome.events:self._notify_cluster(event)
+            for cluster in outcome.resolved_clusters:self._synthesize_incident_cluster(cluster)
     def _notify(self,d,did,transition,row):
         if self.notifier is None:return
         name=d.get("friendly_name") or d.get("hostname") or did
@@ -305,6 +312,21 @@ class HistoryManager:
         except Exception as exc:LOG.warning("cluster notification enqueue failed: %s",exc);return
         flag="notified_open" if transition=="open" else "notified_resolved"
         self.db.execute(f"UPDATE alert_clusters SET {flag}=1 WHERE cluster_id=?",(cluster["cluster_id"],))
+    def _synthesize_incident_alert(self,row):
+        # Incident timelines and automatic post-mortems (see
+        # pinoc.incidents): triggered inline off the same resolve path as
+        # notifications, not a separate poll, so an incident exists as soon
+        # as the resolving reconcile pass commits. A synthesis bug must
+        # never take down history logging, hence the broad catch.
+        try:
+            from .incidents import synthesize_alert
+            synthesize_alert(self.db,row)
+        except Exception:LOG.warning("incident synthesis failed for alert %s",row.get("alert_id"),exc_info=True)
+    def _synthesize_incident_cluster(self,cluster):
+        try:
+            from .incidents import synthesize_cluster
+            synthesize_cluster(self.db,cluster)
+        except Exception:LOG.warning("incident synthesis failed for cluster %s",cluster.get("cluster_id"),exc_info=True)
     def _write_event(self,did,typ,sev,msg,metadata,stamp):self.db.execute("INSERT INTO events(timestamp,device_id,event_type,severity,message,metadata_json) VALUES(?,?,?,?,?,?)",(stamp,did,typ,sev,msg,json.dumps(metadata)))
     def _refresh_cache(self):
         if self.state:

@@ -113,6 +113,13 @@ class CorrelationOutcome:
         self.absorbed_open: Set[int] = set()
         self.absorbed_resolve: Set[int] = set()
         self.events: List[Dict[str, Any]] = []
+        # Every cluster that finished resolving on this pass, regardless of
+        # whether it ever notified (``events`` only carries a "resolve" entry
+        # when ``notified_open`` was set) -- incident synthesis (see
+        # pinoc.incidents, hooked in from HistoryManager._correlate) needs to
+        # see a resolved cluster even when notifications are disabled or the
+        # cluster never crossed the min_members notification threshold.
+        self.resolved_clusters: List[Dict[str, Any]] = []
 
 
 class CorrelationEngine:
@@ -181,8 +188,10 @@ class CorrelationEngine:
                 self.db.execute(
                     "UPDATE alert_clusters SET resolved_at=?,last_seen_at=? WHERE cluster_id=?",
                     (stamp, stamp, cluster["cluster_id"]))
+                resolved_cluster = {**cluster, "resolved_at": stamp}
+                outcome.resolved_clusters.append(resolved_cluster)
                 if cluster.get("notified_open"):
-                    outcome.events.append({"type": "resolve", "cluster": {**cluster, "resolved_at": stamp}})
+                    outcome.events.append({"type": "resolve", "cluster": resolved_cluster})
 
     def _open_cluster_for(self, cls: str, key: str, value: str) -> Optional[Dict[str, Any]]:
         rows = self.db.rows(

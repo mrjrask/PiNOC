@@ -125,7 +125,7 @@ async function alerts(){
       if(response.ok){a.remediation=result.remediation;showRunbook(a)}
     };
   }
-  async function load(){let q=state==='all'?'':`?state=${state}`,d=await(await fetch('/api/alerts'+q)).json();lastAlerts=d.alerts;root.innerHTML=table(['Severity','Device','Type','Message','Opened','Last seen','State','Actions'],lastAlerts.map((a,i)=>`<tr><td class="severity-${esc(a.severity)}">${esc(a.severity)}</td><td>${esc(a.device_id)}</td><td>${esc(a.alert_type)}</td><td>${esc(a.message)}</td><td>${localTime(a.opened_at)}</td><td>${localTime(a.last_seen_at)}</td><td>${esc(a.state)}</td><td>${a.playbook?`<button data-runbook="${i}">Runbook</button> `:''}${a.resolved_at?'':`<button data-ack="${a.alert_id}">Acknowledge</button> <button data-mute="${a.alert_id}">Mute 1h</button>`}</td></tr>`))}
+  async function load(){let q=state==='all'?'':`?state=${state}`,d=await(await fetch('/api/alerts'+q)).json();lastAlerts=d.alerts;root.innerHTML=table(['Severity','Device','Type','Message','Opened','Last seen','State','Actions'],lastAlerts.map((a,i)=>`<tr><td class="severity-${esc(a.severity)}">${esc(a.severity)}</td><td>${esc(a.device_id)}</td><td>${esc(a.alert_type)}</td><td>${esc(a.message)}</td><td>${localTime(a.opened_at)}</td><td>${localTime(a.last_seen_at)}</td><td>${esc(a.state)}</td><td>${a.playbook?`<button data-runbook="${i}">Runbook</button> `:''}${a.resolved_at?(a.incident_id?`<a href="/incidents/${a.incident_id}">Incident</a>`:''):`<button data-ack="${a.alert_id}">Acknowledge</button> <button data-mute="${a.alert_id}">Mute 1h</button>`}</td></tr>`))}
   document.querySelector('#alert-filters').onclick=e=>{if(e.target.dataset.state){state=e.target.dataset.state;document.querySelectorAll('.filter').forEach(x=>x.classList.toggle('selected',x===e.target));load()}};
   root.onclick=async e=>{
     if(e.target.dataset.runbook!==undefined){showRunbook(lastAlerts[+e.target.dataset.runbook]);return}
@@ -702,4 +702,37 @@ async function topology(){
   if(segRoot)segRoot.innerHTML=segments.map(s=>`<section class="panel cluster-card ${s.status==='critical'?'sev-critical':s.status==='degraded'?'sev-warning':''}"><div class="cluster-head"><span class="dot ${statusClass(s.status)}"></span><div><h3>${esc(s.name)}</h3><p class="muted">${(s.devices||[]).length} device${(s.devices||[]).length===1?'':'s'}${s.gateway?` · gateway ${esc(s.gateway)}`:''} · ${esc(s.status)}</p></div></div><ul>${(s.pairs||[]).map(pairLine).join('')||'<li class="muted">No sampled pairs yet</li>'}</ul></section>`).join('')||'<p class="muted">No segments configured.</p>';
   if(matrixRoot)matrixRoot.innerHTML=table(['Source','Target','Status','Latency','Loss','Error'],pairs.map(p=>{const latest=p.latest||{};return `<tr class="${p.severity==='critical'?'severity-critical':p.severity==='warning'?'severity-warning':''}"><td>${esc(p.source_id)}</td><td>${esc(p.target_id)}</td><td>${esc(p.severity)}</td><td>${latest.latency_ms==null?'—':Number(latest.latency_ms).toFixed(1)+' ms'}</td><td>${latest.loss_percent==null?'—':Number(latest.loss_percent).toFixed(0)+'%'}</td><td>${esc(latest.error||'')}</td></tr>`}));
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets,slos}})();
+// Incident timelines and automatic post-mortems (enhancement #4): a
+// synthesized record per resolved alert cluster or standalone alert (see
+// pinoc/incidents.py). The list page filters by device/severity/date
+// range; the detail page shows the full reconstructed timeline plus
+// Markdown/JSON/print export links. Self-contained: only alerts()'s row
+// template above gained a small "Incident" link for already-resolved,
+// already-synthesized alerts.
+async function incidents(){
+  let root=document.querySelector('#incidents-table'),filterRoot=document.querySelector('#incident-filters');
+  if(!root)return;
+  const durationMinutes=v=>v==null?'n/a':`${Math.round(v/60)}m`;
+  filterRoot.innerHTML=`<input type="text" id="incident-device" placeholder="Device id"><select id="incident-severity"><option value="">All severities</option>${['info','warning','degraded','critical'].map(s=>`<option value="${s}">${esc(s)}</option>`).join('')}</select><input type="date" id="incident-since" aria-label="Resolved since"><input type="date" id="incident-until" aria-label="Resolved until"><button id="incident-apply">Filter</button>`;
+  async function load(){
+    let query=new URLSearchParams();
+    let device=filterRoot.querySelector('#incident-device').value.trim(),severity=filterRoot.querySelector('#incident-severity').value;
+    let since=filterRoot.querySelector('#incident-since').value,until=filterRoot.querySelector('#incident-until').value;
+    if(device)query.set('device',device);if(severity)query.set('severity',severity);
+    if(since)query.set('since',since);if(until)query.set('until',`${until}T23:59:59`);
+    let qs=query.toString(),d=await(await fetch('/api/incidents'+(qs?`?${qs}`:''))).json();
+    root.innerHTML=table(['Severity','Incident','Devices','Opened','Resolved','MTTA','MTTR'],(d.incidents||[]).map(i=>`<tr><td class="severity-${esc(i.severity)}">${esc(i.severity)}</td><td><a href="/incidents/${i.incident_id}">${esc(i.title)}</a></td><td>${esc((i.device_ids||[]).join(', ')||'—')}</td><td>${localTime(i.opened_at)}</td><td>${localTime(i.resolved_at)}</td><td>${durationMinutes(i.mtta_seconds)}</td><td>${durationMinutes(i.mttr_seconds)}</td></tr>`));
+  }
+  filterRoot.querySelector('#incident-apply').onclick=load;
+  load();
+}
+async function incidentDetail(id){
+  let root=document.querySelector('#incident-detail');if(!root)return;
+  const durationMinutes=v=>v==null?'n/a':`${Math.round(v/60)} min`;
+  let response=await fetch(`/api/incidents/${id}`);
+  if(!response.ok){root.innerHTML='<h1>Incident not found</h1>';return}
+  let d=await response.json(),incident=d.incident,timeline=d.timeline||[];
+  let rows=timeline.map(e=>`<tr><td>${localTime(e.time)}</td><td>${esc(e.kind)}</td><td>${esc(e.device_id||'cluster')}</td><td>${esc(e.description)}</td></tr>`);
+  root.innerHTML=`<div class="title-row"><span class="dot ${esc(incident.severity)}"></span><div><h1>${esc(incident.title)}</h1><p>${esc(incident.severity)} · opened ${localTime(incident.opened_at)} · resolved ${localTime(incident.resolved_at)}</p></div></div><section class="panel"><dl class="details"><dt>MTTA</dt><dd>${durationMinutes(incident.mtta_seconds)}</dd><dt>MTTR</dt><dd>${durationMinutes(incident.mttr_seconds)}</dd><dt>Devices involved</dt><dd>${esc((incident.device_ids||[]).join(', ')||'none')}</dd></dl><p class="actions"><a class="action" href="/api/incidents/${id}/export.md">Export Markdown</a> <a class="action" href="/api/incidents/${id}/export.json">Export JSON</a> <a class="action" href="/api/incidents/${id}/print" target="_blank" rel="noopener">Printable view</a></p></section><section class="panel"><h2>Timeline</h2>${table(['Time','Kind','Device','Description'],rows)}</section>`;
+}
+return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,incidents,incidentDetail,slos,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();

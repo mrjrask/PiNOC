@@ -37,11 +37,19 @@ class NotificationService:
         state: Any = None,
         sender: Optional[Callable[[str, Dict[str, Any], Dict[str, Any]], Any]] = None,
         timeout: float = 10.0,
+        db: Any = None,
     ):
         self.config = config or {}
         self.state = state
         self.sender = sender
         self.timeout = timeout
+        # Optional history Database: when set, every send attempt is also
+        # persisted to `notification_log` (best-effort, never allowed to
+        # break delivery) so incident timelines (pinoc/incidents.py) can show
+        # what was actually sent, even after a restart. None (the default)
+        # preserves every existing behavior exactly -- callers that predate
+        # this feature never pass it.
+        self.db = db
         self.enabled = bool(self.config.get("enabled"))
         self.open_severities = set(self.config.get("open_severities") or [])
         self.resolve_severities = set(self.config.get("resolve_severities") or [])
@@ -222,6 +230,15 @@ class NotificationService:
                                       "alert_type": message["alert_type"], "device": message["device_name"],
                                       "ok": ok, "error": error})
             status["recent"] = status["recent"][-_RECENT_LIMIT:]
+        if self.db is not None:
+            try:
+                self.db.execute(
+                    "INSERT INTO notification_log(timestamp,transition,device_id,alert_type,severity,channel_id,channel_kind,ok,error) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (stamp, message["transition"], message.get("device_id"), message["alert_type"], message["severity"],
+                     channel.get("id"), channel.get("kind"), int(bool(ok)), error))
+            except Exception:  # persistence must never break notification delivery
+                LOG.warning("failed to persist notification_log entry", exc_info=True)
 
     # -- introspection / manual tests -------------------------------------
     def status(self) -> Dict[str, Any]:
