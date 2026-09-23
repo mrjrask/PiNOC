@@ -1472,7 +1472,7 @@ def main() -> None:
     notifications = NotificationService(CONFIG.get("notifications", {}), state=state)
     history = HistoryManager(Database(database_path), history_config, state, notifier=notifications,
                               anomalies=CONFIG.get("anomaly_detection"), correlation=CONFIG.get("alert_correlation"),
-                              network_topology=CONFIG.get("network_topology"))
+                              network_topology=CONFIG.get("network_topology"), slos=CONFIG.get("slos"))
     state.add_publish_hook(history.submit)
     history.start()
     notifications.start()
@@ -1545,6 +1545,16 @@ def main() -> None:
     self_monitoring.start()
     extensions["pinoc_self_monitoring"] = self_monitoring
 
+    # SLOs and reliability scoring (enhancement #3). create_app already
+    # built pinoc.slo.SLOService (a self-contained block reading
+    # CONFIG["slos"], mirroring how pinoc.onboarding.OnboardingService is
+    # built inline there) since, unlike remediation/rollout, it needs no
+    # ActionDispatcher; this only starts/stops its poll loop, the same as
+    # every other background service above.
+    slo_service = extensions.get("pinoc_slo")
+    if slo_service is not None:
+        slo_service.start()
+
     previous_signal_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
     }
@@ -1573,6 +1583,8 @@ def main() -> None:
                 rollout.stop()
             if self_monitoring is not None:
                 self_monitoring.stop()
+            if slo_service is not None:
+                slo_service.stop()
             notifications.stop()
             history.stop()
         finally:

@@ -158,6 +158,11 @@ def validate_network_topology(value,known_device_ids):
     try:parse_topology_config(section,known_device_ids)
     except TopologyConfigError as exc:raise ValueError(str(exc)) from None
 
+def validate_slos(value,known_device_ids,known_roles,known_tags):
+    from pinoc.slo import SLOConfigError, validate_slos as _validate_slos
+    try:_validate_slos(value,known_device_ids,known_roles,known_tags)
+    except SLOConfigError as exc:raise ValueError(str(exc)) from None
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
@@ -175,6 +180,8 @@ def validate_config(value,base_dir=Path(".")):
     devices,errors=load_devices(value,Path(base_dir))
     if errors:raise ValueError("; ".join(errors))
     validate_network_topology(value,{d.id for d in devices})
+    known_roles={r for d in devices for r in d.roles};known_tags={t for d in devices for t in d.tags}
+    validate_slos(value,{d.id for d in devices},known_roles,known_tags)
     return value
 
 def _atomic_write(path,value,backups=3):

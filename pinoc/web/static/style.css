@@ -54,3 +54,8 @@ body.glance-body{margin:0;background:radial-gradient(circle at 85% -10%,#12354a 
 .glance-grid .glance-tile-sub{font-size:16px}
 @media(max-width:900px){.dashboards-layout{grid-template-columns:1fr}}
 @media(max-width:600px){#glance-root{padding:14px}.glance-head h1{font-size:20px}.glance-grid .glance-tile-value{font-size:30px}}
+/* SLOs and reliability scoring (enhancement #3): error-budget bar used by
+   the /slos table and the slo_summary dashboard card. */
+.budget-bar{background:#0d2432;border:1px solid var(--line);border-radius:6px;height:10px;overflow:hidden;margin:4px 0}
+.budget-bar-fill{height:100%;background:var(--green);border-radius:6px}
+.budget-bar-fill.low{background:var(--red)}

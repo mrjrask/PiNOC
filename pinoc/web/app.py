@@ -1218,7 +1218,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         body=request.get_json(silent=True) or {}
         try:payload=validate_dashboard_payload(body if isinstance(body.get("cards"),list) else {"cards":body.get("cards",[])})
         except ValueError as exc:return jsonify({"error":str(exc)}),400
-        return jsonify({"cards":resolve_dashboard(payload,state,history)})
+        return jsonify({"cards":resolve_dashboard(payload,state,history,app.extensions.get("pinoc_slo"))})
 
     @app.get("/api/dashboards")
     def api_dashboards():
@@ -1266,7 +1266,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         preset=presets.get(preset_id)
         if preset is None or preset["kind"]!="dashboard" or preset["owner"]!=_preset_owner():
             return jsonify({"error":"dashboard not found"}),404
-        return jsonify({"dashboard":preset,"cards":resolve_dashboard(preset["payload"],state,history)})
+        return jsonify({"dashboard":preset,"cards":resolve_dashboard(preset["payload"],state,history,app.extensions.get("pinoc_slo"))})
 
     @app.get("/api/fleet-filters")
     def api_fleet_filters():
@@ -1321,7 +1321,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
             preset=None
         payload=preset["payload"] if preset is not None else default_glance_cards(state)
         return jsonify({"name":preset["name"] if preset is not None else "Glance",
-                        "cards":resolve_dashboard(payload,state,history),
+                        "cards":resolve_dashboard(payload,state,history,app.extensions.get("pinoc_slo")),
                         "generated_at":datetime.now(timezone.utc).isoformat()})
 
     # -- Onboarding wizard (device discovery) --------------------------------
@@ -1390,6 +1390,37 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         actions.audit(g.identity["username"],g.identity["role"],request.remote_addr,None,"onboarding.confirm",None,
                      {"added":added,"updated":updated},"allowed","succeeded") if actions else None
         return jsonify({"ok":True,"added":added,"updated":updated,"restart_required":True}),201
+
+    # -- SLOs and reliability scoring (enhancement #3) -----------------------
+    # Self-contained block: pinoc.slo.SLOService owns its own poll loop
+    # (computing rolling attainment/error-budget burn from the health_samples
+    # table written by HistoryManager, and opening/resolving slo_burn alerts
+    # through the same alerts table every device alert uses); built here the
+    # same way onboarding's OnboardingService is (no ActionDispatcher
+    # dependency), started/stopped by pi_noc.py alongside self_monitoring.
+    # Nothing here touches the routes/helpers above -- resolve_card()'s new
+    # "slo_summary" card type (pinoc/dashboards.py) reads this same service.
+    from pinoc.slo import SLOService
+    app.extensions["pinoc_slo"] = SLOService(
+        history.db, state=state, config=(app.config.get("PINOC_CONFIG") or {}).get("slos"),
+        notifier=notifications) if history is not None else None
+    app.config["TOKEN_SCOPE_PERMISSIONS"].update({"api_slos":"view","api_slo_detail":"view"})
+
+    @app.get("/api/slos")
+    def api_slos():
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        service=app.extensions.get("pinoc_slo")
+        return jsonify(service.snapshot() if service is not None else {"generated_at":None,"slos":[]})
+    @app.get("/api/slos/<slo_id>")
+    def api_slo_detail(slo_id):
+        if not _preset_view_allowed():return jsonify({"error":"permission denied"}),403
+        service=app.extensions.get("pinoc_slo")
+        entry=service.get_one(slo_id) if service is not None else None
+        if entry is None:return jsonify({"error":"SLO not found"}),404
+        return jsonify({"slo":entry})
+    @app.get("/slos")
+    def slos_page():
+        return render_template("slos.html")
 
     return app
 
