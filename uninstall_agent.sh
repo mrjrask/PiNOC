@@ -42,9 +42,16 @@ fi
 systemctl disable --now pinoc-agent.service 2>/dev/null || true
 rm -f /etc/systemd/system/pinoc-agent.service; systemctl daemon-reload
 rm -rf /opt/pinoc-agent /etc/pinoc-agent
-if [[ -d /var/lib/pinoc-agent && ! -L /var/lib/pinoc-agent ]]; then
+if [[ -L /var/lib/pinoc-agent ]]; then
+  # Remove only the redirect, never the user-data volume it points at.
+  rm -f -- /var/lib/pinoc-agent
+elif [[ -d /var/lib/pinoc-agent ]]; then
   if [[ -n "$(find /var/lib/pinoc-agent -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
     echo "Preserving /var/lib/pinoc-agent because it contains user data." >&2
+    # The account is removed below. Give retained data a stable owner first
+    # so its numeric uid/gid cannot become orphaned or later be reassigned to
+    # an unrelated account.
+    chown -R root:root -- /var/lib/pinoc-agent
   else
     rmdir /var/lib/pinoc-agent
   fi

@@ -46,6 +46,20 @@ def _loads(row,key,default):
     try:return json.loads(row.get(key) or json.dumps(default))
     except (TypeError,json.JSONDecodeError):return default
 
+def _restore_redacted(incoming,current):
+    """Replace API redaction sentinels with their previously stored values."""
+    if incoming=="[REDACTED]":
+        if current is None:raise DevError("redacted profile secret has no stored value")
+        return current
+    if isinstance(incoming,dict):
+        old=current if isinstance(current,dict) else {}
+        return {key:_restore_redacted(value,old.get(key)) for key,value in incoming.items()}
+    if isinstance(incoming,list):
+        old=current if isinstance(current,list) else []
+        return [_restore_redacted(value,old[index] if index<len(old) else None)
+                for index,value in enumerate(incoming)]
+    return incoming
+
 class DevelopmentGateway:
     def __init__(self,db,artifact_root="data/jobs",config=None,credential_key=None):
         self.db=db;self.config=config or {};self.root=Path(artifact_root).resolve();self.root.mkdir(parents=True,exist_ok=True)
@@ -76,13 +90,45 @@ class DevelopmentGateway:
         # simple JSON representation for backwards-compatible inspection.
         if redact(environment)!=environment:
             payload=json.dumps(environment,sort_keys=True,separators=(",",":"))
-            return json.dumps({"__encrypted__":self._fernet.encrypt(payload.encode()).decode()},sort_keys=True)
-        return json.dumps(environment,sort_keys=True)
+            envelope={"version":1,"encoding":"fernet","payload":self._fernet.encrypt(payload.encode()).decode()}
+        else:
+            envelope={"version":1,"encoding":"plain","payload":environment}
+        # Every new value uses an envelope, so an allowed environment key can
+        # never be mistaken for storage metadata.
+        return json.dumps({"__pinoc_environment__":envelope},sort_keys=True)
     def _decode_environment(self,row):
         environment=_loads(row,"environment_json",{})
-        if not isinstance(environment,dict) or "__encrypted__" not in environment:return environment
-        try:return json.loads(self._fernet.decrypt(str(environment["__encrypted__"]).encode()).decode())
+        if isinstance(environment,dict) and set(environment)=={"__pinoc_environment__"}:
+            envelope=environment["__pinoc_environment__"]
+            if not isinstance(envelope,dict) or envelope.get("version")!=1:raise DevError("job environment envelope is unsupported","job_environment_unavailable",409)
+            if envelope.get("encoding")=="plain":return envelope.get("payload",{})
+            if envelope.get("encoding")!="fernet":raise DevError("job environment envelope is unsupported","job_environment_unavailable",409)
+            token=envelope.get("payload")
+        elif isinstance(environment,dict) and set(environment)=={"__encrypted__"}:
+            # Decode ciphertext written before the versioned envelope was
+            # introduced. New ordinary environments cannot enter this path.
+            token=environment["__encrypted__"]
+        else:return environment
+        try:return json.loads(self._fernet.decrypt(str(token).encode()).decode())
         except (InvalidToken,TypeError,ValueError,json.JSONDecodeError) as exc:raise DevError("job environment could not be decrypted","job_environment_unavailable",409) from exc
+    def _encode_profiles(self,profiles):
+        if redact(profiles)!=profiles:
+            payload=json.dumps(profiles,sort_keys=True,separators=(",",":"))
+            envelope={"version":1,"encoding":"fernet","payload":self._fernet.encrypt(payload.encode()).decode()}
+        else:
+            envelope={"version":1,"encoding":"plain","payload":profiles}
+        # Wrap every new value. A user profile named like the metadata key is
+        # consequently nested in payload and cannot be mistaken for metadata.
+        return json.dumps({"__pinoc_profiles__":envelope},sort_keys=True)
+    def _decode_profiles(self,row):
+        profiles=_loads(row,"test_profiles_json",{})
+        if not isinstance(profiles,dict) or set(profiles)!={"__pinoc_profiles__"}:return profiles
+        envelope=profiles["__pinoc_profiles__"]
+        if not isinstance(envelope,dict) or envelope.get("version")!=1:raise DevError("workspace profile envelope is unsupported","workspace_profile_unavailable",409)
+        if envelope.get("encoding")=="plain":return envelope.get("payload",{})
+        if envelope.get("encoding")!="fernet":raise DevError("workspace profile envelope is unsupported","workspace_profile_unavailable",409)
+        try:return json.loads(self._fernet.decrypt(str(envelope.get("payload")).encode()).decode())
+        except (InvalidToken,TypeError,ValueError,json.JSONDecodeError) as exc:raise DevError("workspace profiles could not be decrypted","workspace_profile_unavailable",409) from exc
     def audit(self,identity,ip,device,action,target,params,auth,result=None,error=None):
         self.db.execute("INSERT INTO audit_records(timestamp,user,role,source_ip,device_id,action,target,parameters_json,authorization_result,execution_result,error) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(utcnow(),identity.get("username","agent"),identity.get("role","agent"),ip,device,action,target,json.dumps(redact(params or {}),sort_keys=True),auth,result,redact(error) if error else None))
     def enrollment_code(self,device,actor,ttl=600):
@@ -139,14 +185,21 @@ class DevelopmentGateway:
     def save_workspace(self,data):
         wid=str(data.get("workspace_id", ""));device=str(data.get("device_id", ""));path=str(data.get("path", ""));mode=str(data.get("mode","read_only"))
         if not all((wid,device,path)) or mode not in {"read_only","development"} or not path.startswith("/") or not all(c.isalnum() or c in "_.-" for c in wid):raise DevError("invalid workspace")
-        fields=(wid,device,path,str(data.get("repository", ""))[:512],mode,data.get("execution_user"),json.dumps(data.get("allowed_job_types",sorted(READ_TYPES|TEST_TYPES))),json.dumps(data.get("allowed_commands",[])),json.dumps(data.get("allowed_env",[])),json.dumps(data.get("test_profiles",{})),json.dumps(data.get("services",[])),json.dumps(data.get("artifact_patterns",[])),json.dumps(data.get("sensitive_patterns",SENSITIVE)),json.dumps(data.get("hardware_profile",{})),int(bool(data.get("approved",True))),utcnow(),utcnow())
-        self.db.execute("INSERT INTO workspaces VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET device_id=excluded.device_id,path=excluded.path,repository=excluded.repository,mode=excluded.mode,execution_user=excluded.execution_user,allowed_job_types_json=excluded.allowed_job_types_json,allowed_commands_json=excluded.allowed_commands_json,allowed_env_json=excluded.allowed_env_json,test_profiles_json=excluded.test_profiles_json,services_json=excluded.services_json,artifact_patterns_json=excluded.artifact_patterns_json,sensitive_patterns_json=excluded.sensitive_patterns_json,hardware_profile_json=excluded.hardware_profile_json,approved=excluded.approved,updated_at=excluded.updated_at",fields);return self.workspace(wid)
+        hardware_profile=data.get("hardware_profile",{})
+        if not isinstance(hardware_profile,dict):raise DevError("hardware_profile must be an object")
+        profiles=data.get("test_profiles",{})
+        if not isinstance(profiles,dict):raise DevError("test_profiles must be an object")
+        current=self.workspace(wid)
+        if current:profiles=_restore_redacted(profiles,current.get("test_profiles",{}))
+        fields=(wid,device,path,str(data.get("repository", ""))[:512],mode,data.get("execution_user"),json.dumps(data.get("allowed_job_types",sorted(READ_TYPES|TEST_TYPES))),json.dumps(data.get("allowed_commands",[])),json.dumps(data.get("allowed_env",[])),self._encode_profiles(profiles),json.dumps(data.get("services",[])),json.dumps(data.get("artifact_patterns",[])),json.dumps(data.get("sensitive_patterns",SENSITIVE)),json.dumps(hardware_profile),int(bool(data.get("approved",True))),utcnow(),utcnow())
+        self.db.execute("INSERT INTO workspaces VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id) DO UPDATE SET device_id=excluded.device_id,path=excluded.path,repository=excluded.repository,mode=excluded.mode,execution_user=excluded.execution_user,allowed_job_types_json=excluded.allowed_job_types_json,allowed_commands_json=excluded.allowed_commands_json,allowed_env_json=excluded.allowed_env_json,test_profiles_json=excluded.test_profiles_json,services_json=excluded.services_json,artifact_patterns_json=excluded.artifact_patterns_json,sensitive_patterns_json=excluded.sensitive_patterns_json,hardware_profile_json=excluded.hardware_profile_json,approved=excluded.approved,updated_at=excluded.updated_at",fields);return redact(self.workspace(wid))
     def workspace(self,wid):
         rows=self.db.rows("SELECT * FROM workspaces WHERE workspace_id=?",(wid,));return self._workspace(rows[0]) if rows else None
-    def workspaces(self,approved=True):return [self._workspace(x) for x in self.db.rows("SELECT * FROM workspaces"+(" WHERE approved=1" if approved else "")+" ORDER BY device_id,workspace_id")]
+    def workspaces(self,approved=True):return [redact(self._workspace(x)) for x in self.db.rows("SELECT * FROM workspaces"+(" WHERE approved=1" if approved else "")+" ORDER BY device_id,workspace_id")]
     def _workspace(self,row):
         out=dict(row)
-        for key in ("allowed_job_types_json","allowed_commands_json","allowed_env_json","test_profiles_json","services_json","artifact_patterns_json","sensitive_patterns_json","hardware_profile_json"):out[key[:-5]]=_loads(row,key,{} if key in {"test_profiles_json","hardware_profile_json"} else []);out.pop(key,None)
+        for key in ("allowed_job_types_json","allowed_commands_json","allowed_env_json","services_json","artifact_patterns_json","sensitive_patterns_json","hardware_profile_json"):out[key[:-5]]=_loads(row,key,{} if key=="hardware_profile_json" else []);out.pop(key,None)
+        out["test_profiles"]=self._decode_profiles(row);out.pop("test_profiles_json",None)
         return out
     def _restricted(self,identity,device,wid,kind):
         for key,value in (("devices",device),("workspaces",wid),("job_types",kind)):

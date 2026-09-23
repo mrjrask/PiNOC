@@ -825,6 +825,8 @@ class FleetCollector:
                             critical=bool(cfg.get("critical",False))).to_dict()
                     continue
                 candidates={"adsb":["piaware.service","dump1090-fa.service","readsb.service"],"desk_display":["desk-display.service"],"magicmirror":["magicmirror.service"],"ics_modifier":["ics_modifier.service"],"pi_hotspot":["pi-hotspot.service"],"wireguard":["wg-quick@wg0.service"],"samba":["smbd.service","smb.service"]}.get(name,[])
+                configured_service=cfg.get("service")
+                if isinstance(configured_service,str):candidates=[configured_service]
                 found=[find_service(services,x) for x in candidates]; found=[x for x in found if x]
                 available=bool(found) if candidates else False
                 failed=any(x.get("state") not in ("running","activating") for x in found)
@@ -834,6 +836,9 @@ class FleetCollector:
                     data_source="systemd" if candidates else None,
                     error=None if available else "optional data source not discovered",
                     data={"services":found},critical=bool(cfg.get("critical",False))).to_dict()
+                # Runtime state replaces DeviceConfig.integrations, so carry
+                # the configured action target forward for the dispatcher.
+                if configured_service is not None:integrations[name]["service"]=configured_service
             # Security-surface monitoring runs for every device unconditionally
             # (it is a baseline signal, not an opt-in role integration like the
             # ones above), reusing the same IntegrationStatus/"conditions"

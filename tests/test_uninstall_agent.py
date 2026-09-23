@@ -81,6 +81,14 @@ class ScriptContentTest(unittest.TestCase):
         self.assertNotIn("rm -rf /opt/pinoc-agent /etc/pinoc-agent /var/lib/pinoc-agent", SCRIPT)
         self.assertIn("Preserving /var/lib/pinoc-agent", SCRIPT)
         self.assertIn("find /var/lib/pinoc-agent", SCRIPT)
+        self.assertIn("chown -R root:root -- /var/lib/pinoc-agent", SCRIPT)
+        self.assertLess(SCRIPT.index("chown -R root:root -- /var/lib/pinoc-agent"),
+                        SCRIPT.index("userdel pinoc-agent"))
+
+    def test_unlinks_redirected_agent_home_without_traversing_it(self):
+        self.assertIn("[[ -L /var/lib/pinoc-agent ]]", SCRIPT)
+        self.assertIn("rm -f -- /var/lib/pinoc-agent", SCRIPT)
+        self.assertNotIn("rm -rf /var/lib/pinoc-agent", SCRIPT)
 
 
 if __name__ == "__main__":

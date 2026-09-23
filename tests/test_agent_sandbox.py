@@ -14,8 +14,15 @@ class AgentSandboxTest(unittest.TestCase):
         self.assertIn("--bind", argv)
         self.assertIn(str(root), argv)
         self.assertIn("/workspace", argv)
+        self.assertIn(["--bind", str(root), str(root)],
+                      [argv[index:index + 3] for index in range(len(argv) - 2)])
         self.assertIn("--cap-drop", argv)
         self.assertEqual(argv[-4:], ["--", "python3", "-c", "print('ok')"])
+
+    def test_workspace_root_does_not_duplicate_workspace_mount(self):
+        with mock.patch("pinoc_agent.shutil.which", return_value="/usr/bin/bwrap"):
+            argv = Executor.sandbox_argv(["git", "status"], Path("/workspace"), True)
+        self.assertEqual(argv.count("--bind"), 1)
 
     def test_production_sandbox_fails_closed_when_bubblewrap_is_missing(self):
         with mock.patch("pinoc_agent.shutil.which", return_value=None):

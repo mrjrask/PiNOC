@@ -56,7 +56,15 @@ class Executor:
         command=[bubblewrap,"--die-with-parent","--new-session","--unshare-pid","--unshare-ipc","--unshare-uts","--unshare-cgroup","--cap-drop","ALL","--proc","/proc","--dev","/dev","--tmpfs","/tmp"]
         for path in ("/usr","/bin","/lib","/lib64","/sbin","/etc"):
             if Path(path).exists():command.extend(["--ro-bind",path,path])
-        command.extend(["--bind",str(root),"/workspace","--chdir","/workspace","--setenv","HOME","/workspace","--setenv","TMPDIR","/tmp","--",*argv])
+        root=Path(root).resolve()
+        command.extend(["--bind",str(root),"/workspace"])
+        # Validation intentionally permits command arguments that name the
+        # configured workspace by its absolute host path (for example
+        # ``git -C /srv/project``).  Keep that path valid inside bwrap as
+        # well as providing the stable /workspace alias used for cwd/HOME.
+        if root!=Path("/workspace"):
+            command.extend(["--bind",str(root),str(root)])
+        command.extend(["--chdir","/workspace","--setenv","HOME","/workspace","--setenv","TMPDIR","/tmp","--",*argv])
         return command
     @staticmethod
     def drain(pipe,limit,state):

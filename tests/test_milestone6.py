@@ -25,6 +25,14 @@ def enroll(gw):
 def workspace(gw,path,mode="development"):
  return gw.save_workspace({"workspace_id":"project","device_id":"pi","path":str(path),"mode":mode,"approved":True,"allowed_job_types":["file_read","git_status","git_diff","command","test","pytest","artifact_collect"],"allowed_commands":["python3","git"],"allowed_env":["HEADLESS"],"test_profiles":{"unit":{"argv":["python3","-c","print('ok')"],"timeout":10}},"artifact_patterns":["out/*.png"]})
 
+@pytest.mark.parametrize("hardware_profile",[None,[],"gpio"])
+def test_workspace_rejects_non_object_hardware_profile(tmp_path,hardware_profile):
+ _,gw=setup(tmp_path);root=tmp_path/"repo";root.mkdir()
+ with pytest.raises(DevError,match="hardware_profile must be an object"):
+  gw.save_workspace({"workspace_id":"project","device_id":"pi","path":str(root),
+                     "hardware_profile":hardware_profile})
+ assert gw.workspace("project") is None
+
 def identity(**kw):return {"username":"codex","role":"administrator","token":True,"token_id":"t","scopes":["dev:read","dev:test","dev:command","dev:artifacts","dev:cancel"],"devices":[],"workspaces":[],"job_types":[],**kw}
 
 def test_reenrolling_a_device_replaces_its_agent_row(tmp_path):
@@ -235,7 +243,7 @@ def test_test_profile_controls_environment_and_timeout(tmp_path):
  profile={"unit":{"argv":["python3","-V"],"environment":{"HEADLESS":"1"},"timeout":10}}
  gw.db.execute("UPDATE workspaces SET test_profiles_json=? WHERE workspace_id='project'",(json.dumps(profile),))
  job=gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"test","profile":"unit","environment":{},"timeout_seconds":999})
- assert json.loads(job["environment_json"])=={"HEADLESS":"1"}
+ assert gw._decode_environment(job)=={"HEADLESS":"1"}
  assert job["timeout_seconds"]==10
 
 def test_file_read_rejects_oversize_file_without_unbounded_read(tmp_path,monkeypatch):
