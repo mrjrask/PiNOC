@@ -246,7 +246,7 @@ def fleet_aggregates(devices: List[Dict[str, Any]], history: Any = None) -> Dict
     return result
 
 
-def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None, backups: Any = None, schedules: Any = None, remediation: Any = None, rollout: Any = None) -> Flask:
+def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, history: Any = None, coordinator: Any = None, notifications: Any = None, backups: Any = None, schedules: Any = None, remediation: Any = None, rollout: Any = None, self_monitoring: Any = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config.update(config or {})
     trusted_proxy_count=int(app.config.get("TRUSTED_PROXY_COUNT",0))
@@ -308,11 +308,16 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         "api_onboarding_scan":"config.write","api_onboarding_fingerprint":"config.write",
         "api_onboarding_confirm":"config.write",
     })
+    # Console self-monitoring (enhancement #11): read-only operational data
+    # about PiNOC itself (collector health, db size, queue depth, ...),
+    # gated the same as /api/database/status.
+    app.config["TOKEN_SCOPE_PERMISSIONS"].update({"api_console_status":"config.write"})
     if security:install_security(app,security)
     app.extensions["pinoc_security"]=security;app.extensions["pinoc_actions"]=actions
     app.extensions["pinoc_development"]=development;app.extensions["pinoc_playbooks"]=playbooks
     app.extensions["pinoc_backups"]=backups;app.extensions["pinoc_schedules"]=schedules
     app.extensions["pinoc_remediation"]=remediation;app.extensions["pinoc_rollout"]=rollout
+    app.extensions["pinoc_self_monitoring"]=self_monitoring
     # Onboarding wizard (device discovery): fully self-contained, no DB or
     # ActionDispatcher dependency, so it is built here rather than threaded
     # through create_app's constructor kwargs like schedules/remediation/
@@ -587,6 +592,15 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def status_page():
         if security and not security.allowed(g.identity,"config.write"):abort(403)
         return render_template("status.html")
+
+    # Console self-monitoring (enhancement #11): a separate page from
+    # /settings/status above -- that page is scoped to the history database
+    # specifically, while this one is the console's own overall health
+    # (collectors, cache, database, scheduler, agents, action queue).
+    @app.get("/console-status")
+    def console_status_page():
+        if security and not security.allowed(g.identity,"config.write"):abort(403)
+        return render_template("console_status.html")
 
     @app.get("/settings")
     def settings_page():
@@ -1162,6 +1176,19 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def database_status():
         if security and not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
         return jsonify(history.db.status() if history else {"status":"disabled"})
+
+    # -- Console self-monitoring (enhancement #11) --------------------------
+    # Self-contained block: pinoc.self_monitoring.SelfMonitoringService owns
+    # its own poll loop (opening/resolving console_self_* alerts through the
+    # same alerts table every device alert uses); this route only reads its
+    # latest computed snapshot for the status page. Nothing here touches the
+    # routes/helpers above.
+    @app.get("/api/console-status")
+    def api_console_status():
+        if security and not security.allowed(g.identity,"config.write"):return jsonify({"error":"permission denied"}),403
+        service=app.extensions.get("pinoc_self_monitoring")
+        if service is None:return jsonify({"error":"self-monitoring is not available"}),503
+        return jsonify(service.snapshot())
 
     # -- Customizable dashboards, saved views, and the Glance page ---------
     # (enhancement #13). Self-contained block: a small card-data library

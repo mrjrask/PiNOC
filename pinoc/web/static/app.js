@@ -135,6 +135,39 @@ async function alerts(){
 }
 async function events(){let d=await(await fetch('/api/events')).json();document.querySelector('#events-table').innerHTML=table(['Time','Device','Type','Severity','Message'],d.events.map(x=>`<tr><td>${localTime(x.timestamp)}</td><td>${esc(x.device_id)}</td><td>${esc(x.event_type)}</td><td class="severity-${esc(x.severity)}">${esc(x.severity)}</td><td>${esc(x.message)}</td></tr>`))}
 async function databaseStatus(){let d=await(await fetch('/api/database/status')).json();document.querySelector('#database-status').innerHTML=Object.entries(d).map(([k,v])=>`<dt>${esc(k.replaceAll('_',' '))}</dt><dd>${esc(v)}</dd>`).join('')}
+// Console self-monitoring (enhancement #11): renders pinoc/self_monitoring.py's
+// snapshot -- collector health, cache staleness, database, scheduler, agents,
+// action queue -- as a set of small panels. Self-contained: touches only the
+// #console-status root on the new /console-status page.
+async function consoleStatus(){
+  let root=document.querySelector('#console-status');if(!root)return;
+  let d=await(await fetch('/api/console-status')).json();
+  if(d.error){root.innerHTML=`<p>${esc(d.error)}</p>`;return}
+  let age=s=>s==null?'—':`${Math.round(s)}s`;
+  let flag=(bad,label)=>`<span class="${bad?'severity-warning':''}">${esc(label)}</span>`;
+  let collectors=Object.entries(d.collectors||{}).map(([name,c])=>`<tr><td>${esc(name)}</td><td>${c.success_rate==null?'—':pct(c.success_rate*100)}</td><td>${c.consecutive_errors}</td><td>${flag(c.failing,c.failing?'failing':'ok')}</td><td>${esc(c.last_error)}</td></tr>`);
+  let cache=Object.entries(d.cache||{}).map(([name,c])=>`<tr><td>${esc(name)}</td><td>${age(c.age_seconds)}</td><td>${age(c.stale_after_seconds)}</td><td>${flag(c.stale,c.stale?'stale':'fresh')}</td></tr>`);
+  let agents=(d.agents||[]).map(a=>`<tr><td>${esc(a.hostname||a.device_id)}</td><td>${esc(a.status)}</td><td>${age(a.age_seconds)}</td><td>${flag(a.offline,a.offline?'offline':'ok')}</td></tr>`);
+  root.innerHTML=`<section class="panel"><h2>Database</h2><dl class="details">
+      <dt>Status</dt><dd>${esc(d.database.status)}</dd>
+      <dt>Size</dt><dd>${bytes(d.database.size_bytes)} / ${bytes(d.database.size_ceiling_bytes)} ${flag(d.database.over_size_ceiling,d.database.over_size_ceiling?'over ceiling':'ok')}</dd>
+      <dt>Retention cleanup</dt><dd>${d.database.last_retention_cleanup?age(d.database.retention_age_seconds)+' ago':'never run'} ${flag(d.database.retention_lagging,d.database.retention_lagging?'lagging':'ok')}</dd>
+      <dt>Row counts</dt><dd>${Object.entries(d.database.row_counts||{}).map(([k,v])=>`${esc(k)}: ${v==null?'—':v}`).join(', ')||'—'}</dd>
+    </dl></section>
+    <section class="panel"><h2>Scheduler</h2><dl class="details">
+      <dt>Heartbeat age</dt><dd>${age(d.scheduler.heartbeat_age_seconds)}</dd>
+      <dt>Max task lag</dt><dd>${age(d.scheduler.max_task_lag_seconds)}</dd>
+      <dt>Status</dt><dd>${flag(d.scheduler.lagging,d.scheduler.lagging?'lagging':'on time')}</dd>
+    </dl></section>
+    <section class="panel"><h2>Action queue</h2><dl class="details">
+      <dt>Depth</dt><dd>${d.queue.depth} (${d.queue.queued} queued, ${d.queue.running} running)</dd>
+      <dt>Oldest queued</dt><dd>${age(d.queue.oldest_queued_age_seconds)}</dd>
+      <dt>Status</dt><dd>${flag(d.queue.backlogged,d.queue.backlogged?'backlogged':'ok')}</dd>
+    </dl></section>
+    <section class="panel"><h2>Collectors</h2>${table(['Domain','Success rate','Consecutive errors','Status','Last error'],collectors)}</section>
+    <section class="panel"><h2>Cache staleness</h2>${table(['Domain','Age','Stale after','Status'],cache)}</section>
+    <section class="panel"><h2>Agents</h2>${table(['Agent','Status','Last seen','Reachability'],agents)}</section>`;
+}
 function plot(canvas,points,keys,colors){let ctx=canvas.getContext('2d'),w=canvas.width=canvas.clientWidth*devicePixelRatio,h=canvas.height=canvas.clientHeight*devicePixelRatio;ctx.clearRect(0,0,w,h);let values=points.flatMap(x=>keys.map(k=>Number(x[k])).filter(Number.isFinite));if(!values.length){ctx.fillStyle='#8fa4b5';ctx.fillText('No historical data',15,30);return}let lo=Math.min(...values),hi=Math.max(...values);if(lo===hi){lo--;hi++}keys.forEach((key,j)=>{ctx.strokeStyle=colors[j];ctx.beginPath();let begun=false;points.forEach((x,i)=>{let v=Number(x[key]);if(!Number.isFinite(v)){begun=false;return}let px=10+i*(w-20)/Math.max(1,points.length-1),py=h-10-(v-lo)*(h-20)/(hi-lo);begun?ctx.lineTo(px,py):ctx.moveTo(px,py);begun=true});ctx.stroke()})}
 async function loadHistory(id,range){let r=await fetch(`/api/devices/${encodeURIComponent(id)}/metrics?range=${range}`),d=await r.json(),charts=document.querySelector('#charts');if(!r.ok){charts.innerHTML=`<p>${esc(d.error)}</p>`;return}let defs=[['CPU %',['cpu_percent'],d.core],['Temperature °C',['cpu_temp_c','soc_temp_c'],d.core],['Memory %',['memory_percent'],d.core],['Storage %',['percent_used'],d.storage],['Network B/s',['rx_rate_bps','tx_rate_bps'],d.network],['Wi-Fi dBm',['wifi_signal_dbm'],d.network]];charts.innerHTML=defs.map((x,i)=>`<div class="chart"><strong>${x[0]}</strong><canvas id="chart-${i}"></canvas></div>`).join('');defs.forEach((x,i)=>plot(document.querySelector(`#chart-${i}`),x[2],x[1],['#62d3ff','#edc84b']));document.querySelector('#history-stats').innerHTML=Object.entries(d.statistics).map(([k,v])=>`<article><strong>${v==null?'—':esc(k.startsWith('temperature_')?temperature(v):Number(v).toFixed(1)+'%')}</strong><span>${esc(k.replaceAll('_',' '))}</span></article>`).join('')}
 async function deviceHistory(id){let ranges=['1h','6h','24h','7d','30d'],root=document.querySelector('#ranges');root.innerHTML=ranges.map(x=>`<button class="filter ${x==='24h'?'selected':''}" data-range="${x}">${x}</button>`).join('');root.onclick=e=>{if(e.target.dataset.range){root.querySelectorAll('button').forEach(x=>x.classList.toggle('selected',x===e.target));loadHistory(id,e.target.dataset.range)}};loadHistory(id,'24h');let [fr,er]=await Promise.all([fetch(`/api/devices/${encodeURIComponent(id)}/storage/forecast`),fetch(`/api/devices/${encodeURIComponent(id)}/events?limit=10`)]),f=await fr.json(),ev=await er.json();document.querySelector('#forecasts').innerHTML=table(['Mount','Trend','Growth/day','Days remaining','Confidence'],(f.forecasts||[]).map(x=>`<tr><td>${esc(x.mount_point)}</td><td>${esc(x.status)}</td><td>${x.daily_growth_bytes==null?'—':(x.daily_growth_bytes/1073741824).toFixed(2)+' GiB'}</td><td>${x.estimated_days_remaining==null?'—':Math.round(x.estimated_days_remaining)}</td><td>${esc(x.forecast_confidence)}</td></tr>`));document.querySelector('#device-events').innerHTML=table(['Time','Type','Message'],(ev.events||[]).map(x=>`<tr><td>${localTime(x.timestamp)}</td><td>${esc(x.event_type)}</td><td>${esc(x.message)}</td></tr>`))}
@@ -648,4 +681,4 @@ async function topology(){
   if(segRoot)segRoot.innerHTML=segments.map(s=>`<section class="panel cluster-card ${s.status==='critical'?'sev-critical':s.status==='degraded'?'sev-warning':''}"><div class="cluster-head"><span class="dot ${statusClass(s.status)}"></span><div><h3>${esc(s.name)}</h3><p class="muted">${(s.devices||[]).length} device${(s.devices||[]).length===1?'':'s'}${s.gateway?` · gateway ${esc(s.gateway)}`:''} · ${esc(s.status)}</p></div></div><ul>${(s.pairs||[]).map(pairLine).join('')||'<li class="muted">No sampled pairs yet</li>'}</ul></section>`).join('')||'<p class="muted">No segments configured.</p>';
   if(matrixRoot)matrixRoot.innerHTML=table(['Source','Target','Status','Latency','Loss','Error'],pairs.map(p=>{const latest=p.latest||{};return `<tr class="${p.severity==='critical'?'severity-critical':p.severity==='warning'?'severity-warning':''}"><td>${esc(p.source_id)}</td><td>${esc(p.target_id)}</td><td>${esc(p.severity)}</td><td>${latest.latency_ms==null?'—':Number(latest.latency_ms).toFixed(1)+' ms'}</td><td>${latest.loss_percent==null?'—':Number(latest.loss_percent).toFixed(0)+'%'}</td><td>${esc(latest.error||'')}</td></tr>`}));
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();
+return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();
