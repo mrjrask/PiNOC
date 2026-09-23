@@ -254,7 +254,8 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
         # Only trust forwarded client addresses when the operator explicitly
         # declares how many reverse proxies are in front of this application.
         app.wsgi_app=ProxyFix(app.wsgi_app,x_for=trusted_proxy_count)
-    app.secret_key=app.config.get("SECRET_KEY") or os.getenv("PINOC_SECRET_KEY") or secrets.token_hex(32)
+    stable_secret_key=app.config.get("SECRET_KEY") or os.getenv("PINOC_SECRET_KEY")
+    app.secret_key=stable_secret_key or secrets.token_hex(32)
     app.config.update(SESSION_COOKIE_SECURE=bool(app.config.get("SESSION_COOKIE_SECURE",False)),SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE="Lax")
     auth_enabled=bool(app.config.get("AUTH_ENABLED",False))
     security_db=history.db if history else app.config.get("DATABASE")
@@ -263,7 +264,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     if security_db and not security_db.available:security_db.initialize()
     security=SecurityManager(security_db,auth_enabled,app.config.get("RATE_LIMIT")) if security_db else None
     actions=ActionDispatcher(history.db,state,coordinator,int(app.config.get("ACTION_WORKERS",2))) if history else None
-    development=DevelopmentGateway(history.db,app.config.get("DEV_ARTIFACT_ROOT","data/jobs"),app.config.get("DEV_CONFIG",{}),app.secret_key) if history else None
+    development=DevelopmentGateway(history.db,app.config.get("DEV_ARTIFACT_ROOT","data/jobs"),app.config.get("DEV_CONFIG",{}),stable_secret_key) if history else None
     # Only actions ActionDispatcher itself would run without a "strong"
     # confirmation are safe to offer through remediation's "auto" policy;
     # everything else -- a reboot, a service stop, a destructive disk rescue

@@ -235,7 +235,8 @@ def test_test_profile_controls_environment_and_timeout(tmp_path):
  profile={"unit":{"argv":["python3","-V"],"environment":{"HEADLESS":"1"},"timeout":10}}
  gw.db.execute("UPDATE workspaces SET test_profiles_json=? WHERE workspace_id='project'",(json.dumps(profile),))
  job=gw.submit(identity(),{"device_id":"pi","workspace_id":"project","job_type":"test","profile":"unit","environment":{},"timeout_seconds":999})
- assert json.loads(job["environment_json"])=={"HEADLESS":"1"}
+ assert "HEADLESS" not in job["environment_json"]
+ assert gw._decode_environment(job)=={"HEADLESS":"1"}
  assert job["timeout_seconds"]==10
 
 def test_file_read_rejects_oversize_file_without_unbounded_read(tmp_path,monkeypatch):

@@ -23,6 +23,23 @@ def redact(value):
         return re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~-]+",r"\1[REDACTED]",value)
     return value
 
+def _profiles_have_environment(profiles):
+    """Return whether a profile payload contains values destined for a job environment."""
+    return isinstance(profiles,dict) and any(
+        isinstance(profile,dict) and bool(profile.get("environment"))
+        for profile in profiles.values()
+    )
+
+def _redact_test_profiles(profiles):
+    """Redact every profile environment value, regardless of its variable name."""
+    if not isinstance(profiles,dict):return profiles
+    public=redact(profiles)
+    for name,profile in profiles.items():
+        if not isinstance(profile,dict):continue
+        environment=profile.get("environment")
+        if isinstance(environment,dict):public[name]["environment"]={str(key):"[REDACTED]" for key in environment}
+    return public
+
 PROTOCOL_VERSION=1
 AGENT_VERSION="1.0.0"
 STATUSES={"queued","dispatched","running","succeeded","failed","timed_out","cancelled","agent_lost","rejected"}
@@ -61,6 +78,7 @@ class DevelopmentGateway:
         # included in backup bundles (see backup.py's env-manifest, which
         # records only .env key *names*), so a database-only leak yields
         # ciphertext that cannot be used to forge signed agent requests.
+        self._has_stable_key=bool(credential_key)
         self._fernet=Fernet(_fernet_key(credential_key or secrets.token_hex(32)))
         self.default_timeout=max(1,int(self.config.get("default_timeout_seconds",300)));self.max_timeout=max(self.default_timeout,min(1800,int(self.config.get("max_timeout_seconds",1800))))
         self.output_limit=max(1024,int(self.config.get("output_limit_bytes",262144)));self.file_limit=max(1024,int(self.config.get("file_read_limit_bytes",1048576)))
@@ -71,10 +89,11 @@ class DevelopmentGateway:
         try:return self._fernet.decrypt(str(token).encode()).decode()
         except (InvalidToken,ValueError,TypeError):return None
     def _encode_environment(self,environment):
-        # Secret-like environment values must remain usable by the agent while
-        # never being stored in plaintext. Non-secret environments retain the
-        # simple JSON representation for backwards-compatible inspection.
-        if redact(environment)!=environment:
+        # Environment variable names are application-defined, so every
+        # non-empty environment is treated as sensitive rather than relying on
+        # a name-based secret heuristic.
+        if environment:
+            if not self._has_stable_key:raise DevError("a stable secret key is required to encrypt job environments","secret_key_required",503)
             payload=json.dumps(environment,sort_keys=True,separators=(",",":"))
             return json.dumps({"__encrypted__":self._fernet.encrypt(payload.encode()).decode()},sort_keys=True)
         return json.dumps(environment,sort_keys=True)
@@ -86,7 +105,8 @@ class DevelopmentGateway:
     def _encode_test_profiles(self,profiles):
         # Profiles are persisted independently of jobs, so their environment
         # secrets need the same database-at-rest protection as job copies.
-        if redact(profiles)!=profiles:
+        if _profiles_have_environment(profiles):
+            if not self._has_stable_key:raise DevError("a stable secret key is required to encrypt test profiles","secret_key_required",503)
             payload=json.dumps(profiles,sort_keys=True,separators=(",",":"))
             return json.dumps({"__encrypted__":self._fernet.encrypt(payload.encode()).decode()},sort_keys=True)
         return json.dumps(profiles,sort_keys=True)
@@ -98,7 +118,7 @@ class DevelopmentGateway:
             # on first read so upgrading does not require an administrator to
             # re-save every workspace.  The compare-and-swap predicate avoids
             # overwriting a concurrent workspace update with the stale row.
-            if isinstance(profiles,dict) and redact(profiles)!=profiles and row.get("workspace_id"):
+            if _profiles_have_environment(profiles) and self._has_stable_key and row.get("workspace_id"):
                 plaintext=row.get("test_profiles_json")
                 self.db.execute("UPDATE workspaces SET test_profiles_json=? WHERE workspace_id=? AND test_profiles_json=?",(self._encode_test_profiles(profiles),row["workspace_id"],plaintext))
             return profiles
@@ -169,7 +189,7 @@ class DevelopmentGateway:
         out=dict(row)
         for key in ("allowed_job_types_json","allowed_commands_json","allowed_env_json","services_json","artifact_patterns_json","sensitive_patterns_json","hardware_profile_json"):out[key[:-5]]=_loads(row,key,{} if key=="hardware_profile_json" else []);out.pop(key,None)
         profiles=self._decode_test_profiles(row)
-        out["test_profiles"]=profiles if include_secrets else redact(profiles);out.pop("test_profiles_json",None)
+        out["test_profiles"]=profiles if include_secrets else _redact_test_profiles(profiles);out.pop("test_profiles_json",None)
         return out
     def _restricted(self,identity,device,wid,kind):
         for key,value in (("devices",device),("workspaces",wid),("job_types",kind)):
@@ -272,7 +292,7 @@ class DevelopmentGateway:
         if ws and row.get("profile"):
             definition=ws.get("test_profiles",{}).get(row["profile"],{})
             ws["artifact_patterns"]=definition.get("artifact_patterns",ws.get("artifact_patterns",[]))
-        if ws:ws["test_profiles"]=redact(ws.get("test_profiles",{}))
+        if ws:ws["test_profiles"]=_redact_test_profiles(ws.get("test_profiles",{}))
         return {"job_id":row["job_id"],"job_type":row["job_type"],"profile":row.get("profile"),"workspace":ws,"argv":_loads(row,"argv_json",[]),"environment":self._decode_environment(row),"request":_loads(row,"request_json",{}),"timeout_seconds":row["timeout_seconds"],"output_limit_bytes":self.output_limit,"file_limit_bytes":self.file_limit,"artifact_limits":{"count":self.artifact_count,"file_bytes":self.artifact_file_limit,"total_bytes":self.artifact_total_limit}}
     def result(self,agent,job_id,body):
         job=self.job(job_id)

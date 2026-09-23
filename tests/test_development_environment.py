@@ -1,7 +1,9 @@
 import json
 
+import pytest
+
 from pinoc.database import Database
-from pinoc.development import DevelopmentGateway, PROTOCOL_VERSION
+from pinoc.development import DevelopmentGateway, DevError, PROTOCOL_VERSION
 
 
 def _identity():
@@ -64,3 +66,35 @@ def test_legacy_plaintext_profile_secrets_are_encrypted_on_read(tmp_path):
     assert "legacy-secret" not in stored
     assert "__encrypted__" in json.loads(stored)
     assert gateway.workspace("legacy", include_secrets=True)["test_profiles"] == legacy_profiles
+
+
+def test_environment_role_encrypts_and_redacts_unrecognized_key_names(tmp_path):
+    db = Database(str(tmp_path / "development.sqlite"))
+    assert db.initialize()
+    gateway = DevelopmentGateway(db, str(tmp_path / "jobs"), {}, "stable-key")
+    root = tmp_path / "workspace"
+    root.mkdir()
+    gateway.save_workspace({"workspace_id": "project", "device_id": "pi", "path": str(root),
+                            "test_profiles": {"unit": {"environment": {"API_KEY": "supersecret"}}}})
+
+    stored = db.scalar("SELECT test_profiles_json FROM workspaces WHERE workspace_id=?", ("project",))
+    assert "supersecret" not in stored
+    assert "__encrypted__" in json.loads(stored)
+    assert gateway.workspace("project")["test_profiles"]["unit"]["environment"] == {
+        "API_KEY": "[REDACTED]"
+    }
+
+
+def test_profile_encryption_requires_a_stable_key(tmp_path):
+    db = Database(str(tmp_path / "development.sqlite"))
+    assert db.initialize()
+    gateway = DevelopmentGateway(db, str(tmp_path / "jobs"))
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    with pytest.raises(DevError) as error:
+        gateway.save_workspace({"workspace_id": "project", "device_id": "pi", "path": str(root),
+                                "test_profiles": {"unit": {"environment": {"API_KEY": "secret"}}}})
+    assert error.value.error_type == "secret_key_required"
+
+    assert db.scalar("SELECT COUNT(*) FROM workspaces") == 0
