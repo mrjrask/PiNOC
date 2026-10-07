@@ -1576,6 +1576,196 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def reports_page():
         return render_template("reports.html")
 
+    # -- Project model and project registry (PiNOC 2.0 Phase 1, P1-R01) --
+    # Self-contained block: pinoc.projects.ProjectService owns the
+    # projects/project_members tables; these routes only validate input,
+    # enforce auth/CSRF, and read the shared state cache / history database
+    # -- no remote work happens in a request thread (Phase 1 invariant).
+    # Reads gate on "view"; every write (create/update/archive/restore/
+    # membership) gates on "config.write" like the other registry-style
+    # endpoints, and is audited by the service into audit_records.
+    from pinoc.projects import ProjectError, ProjectService
+    app.extensions["pinoc_projects"] = ProjectService(
+        history.db, state=state, audit=actions.audit if actions else None
+    ) if history is not None else None
+    app.config["TOKEN_SCOPE_PERMISSIONS"].update({
+        "api_v1_projects": "view", "api_v1_projects_create": "config.write",
+        "api_v1_project": "view", "api_v1_project_update": "config.write",
+        "api_v1_project_archive": "config.write", "api_v1_project_restore": "config.write",
+        "api_v1_project_health": "view", "api_v1_project_graph": "view",
+        "api_v1_project_members_add": "config.write", "api_v1_project_members_remove": "config.write",
+        "api_v1_projects_unassigned": "view",
+        "api_v1_dashboard_overview": "view", "api_v1_project_summary": "view",
+    })
+
+    def _projects_service() -> Optional[ProjectService]:
+        return app.extensions.get("pinoc_projects")
+
+    def _actor() -> str:
+        identity = g.get("identity")
+        return identity["username"] if identity else "trusted-lan"
+
+    def _project_project_error(exc: ProjectError):
+        if "not found" in str(exc):
+            return jsonify({"error": str(exc)}), 404
+        if ("already taken" in str(exc) or "read-only" in str(exc)
+                or "can be restored" in str(exc)):
+            return jsonify({"error": str(exc)}), 409
+        return jsonify({"error": str(exc)}), 400
+
+    @app.get("/api/v1/projects")
+    def api_v1_projects():
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _projects_service()
+        if service is None:
+            return jsonify({"error": "project registry is not available"}), 503
+        try:
+            return jsonify({"projects": service.list_projects(
+                include_archived=request.args.get("include_archived") == "true",
+                lifecycle=request.args.get("lifecycle"))})
+        except ProjectError as exc:
+            return _project_project_error(exc)
+
+    @app.post("/api/v1/projects")
+    def api_v1_projects_create():
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _projects_service()
+        if service is None or not service._available():
+            return jsonify({"error": "project registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            project = service.create(body, actor=_actor())
+        except ProjectError as exc:
+            return _project_project_error(exc)
+        return jsonify({"project": project}), 201
+
+    @app.get("/api/v1/projects/unassigned")
+    def api_v1_projects_unassigned():
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _projects_service()
+        if service is None:
+            return jsonify({"error": "project registry is not available"}), 503
+        try:
+            return jsonify(service.unassigned(str(request.args.get("kind") or "device")))
+        except ProjectError as exc:
+            return _project_project_error(exc)
+
+    @app.get("/api/v1/projects/<project_id>")
+    def api_v1_project(project_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _projects_service()
+        if service is None:
+            return jsonify({"error": "project registry is not available"}), 503
+        try:
+            project = service.get(project_id)
+        except ProjectError as exc:
+            return _project_project_error(exc)
+        if project is None:
+            return jsonify({"error": "project not found"}), 404
+        return jsonify({"project": project})
+
+    @app.patch("/api/v1/projects/<project_id>")
+    @app.put("/api/v1/projects/<project_id>")
+    def api_v1_project_update(project_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _projects_service()
+        if service is None:
+            return jsonify({"error": "project registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            project = service.update(project_id, body, actor=_actor())
+        except ProjectError as exc:
+            return _project_project_error(exc)
+        return jsonify({"project": project})
+
+    def _project_lifecycle_action(project_id, action):
+        service = _projects_service()
+        if service is None:
+            return jsonify({"error": "project registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            project = (service.archive(project_id, actor=_actor(),
+                                       reason=str(body.get("reason") or "")) if action == "archive"
+                       else service.restore(project_id, actor=_actor()))
+        except ProjectError as exc:
+            return _project_project_error(exc)
+        return jsonify({"project": project})
+
+    @app.post("/api/v1/projects/<project_id>/archive")
+    def api_v1_project_archive(project_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        return _project_lifecycle_action(project_id, "archive")
+
+    @app.post("/api/v1/projects/<project_id>/restore")
+    def api_v1_project_restore(project_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        return _project_lifecycle_action(project_id, "restore")
+
+    @app.post("/api/v1/projects/<project_id>/members")
+    def api_v1_project_members_add(project_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _projects_service()
+        if service is None:
+            return jsonify({"error": "project registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            result = service.add_members(project_id, str(body.get("kind") or "device"),
+                                         body.get("object_ids") or [], actor=_actor())
+        except ProjectError as exc:
+            return _project_project_error(exc)
+        return jsonify(result), 201
+
+    @app.delete("/api/v1/projects/<project_id>/members")
+    def api_v1_project_members_remove(project_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _projects_service()
+        if service is None:
+            return jsonify({"error": "project registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            result = service.remove_members(project_id, str(body.get("kind") or "device"),
+                                            body.get("object_ids") or [], actor=_actor())
+        except ProjectError as exc:
+            return _project_project_error(exc)
+        return jsonify(result)
+
+    @app.get("/api/v1/projects/<project_id>/health")
+    def api_v1_project_health(project_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _projects_service()
+        if service is None:
+            return jsonify({"error": "project registry is not available"}), 503
+        try:
+            return jsonify(service.health(project_id))
+        except ProjectError as exc:
+            return _project_project_error(exc)
+
+    @app.get("/api/v1/projects/<project_id>/graph")
+    def api_v1_project_graph(project_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _projects_service()
+        if service is None:
+            return jsonify({"error": "project registry is not available"}), 503
+        try:
+            return jsonify(service.graph(project_id))
+        except ProjectError as exc:
+            return _project_project_error(exc)
+
+    @app.get("/projects")
+    def projects_page():
+        return render_template("projects.html")
+
     return app
 
 
