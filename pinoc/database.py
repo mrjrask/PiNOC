@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -124,6 +124,18 @@ CREATE INDEX report_editions_report_time ON report_editions(report_id,generated_
 # load_config_snapshot. "config_drift.restore_file" (pinoc/actions.py)
 # restores from this row rather than from arbitrary/unverified content.
 """CREATE TABLE config_snapshots(device_id TEXT NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,content BLOB NOT NULL,size_bytes INTEGER NOT NULL,captured_at TEXT NOT NULL,PRIMARY KEY(device_id,path));""",
+# Project model and project registry (PiNOC 2.0 Phase 1, see pinoc/projects.py):
+# projects are the top-level organizational object grouping devices,
+# applications, repositories, feeds, hardware, services, and runbooks.
+# ``projects`` holds the normalized current state (one row per project, keyed
+# by a stable auto-increment id plus a unique human-readable slug); the
+# generic many-to-many ``project_members`` table keeps membership history by
+# soft-removing (removed_at) instead of deleting, so archiving a project
+# preserves its entire membership history.
+"""CREATE TABLE projects(project_id INTEGER PRIMARY KEY,slug TEXT NOT NULL UNIQUE,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',lifecycle TEXT NOT NULL DEFAULT 'planned',criticality TEXT NOT NULL DEFAULT 'standard',tags_json TEXT NOT NULL DEFAULT '[]',owner TEXT,links_json TEXT NOT NULL DEFAULT '[]',notes TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,archived_at TEXT,archived_reason TEXT);
+CREATE TABLE project_members(project_id INTEGER NOT NULL,kind TEXT NOT NULL,object_id TEXT NOT NULL,added_by TEXT,added_at TEXT NOT NULL,removed_at TEXT,PRIMARY KEY(project_id,kind,object_id),FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE);
+CREATE INDEX project_members_kind ON project_members(kind,object_id);
+CREATE INDEX projects_lifecycle ON projects(lifecycle);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

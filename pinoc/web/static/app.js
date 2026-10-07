@@ -768,4 +768,48 @@ async function reports(){
   };
   await Promise.all([renderList(),renderEditions()]);
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,incidents,incidentDetail,slos,reports,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();
+// Project registry view (Phase 1 P1-R01): the card grid, plus a detail
+// panel for the selected project. Every value comes from /api/v1/projects*
+// -- cache/DB reads only; nothing remote happens in this page.
+async function projects(){
+  const root=document.querySelector('#projects');if(!root)return;
+  const detailRoot=document.querySelector('#project-detail');
+  const KINDS={device:'Device',application:'Application',repository:'Repository',feed:'Feed',hardware:'Hardware',service:'Service',runbook:'Runbook'};
+  const loadGrid=async()=>{
+    let data;try{data=await(await fetch('/api/v1/projects')).json()}catch(e){root.innerHTML='<p class="muted">Project registry unavailable.</p>';return}
+    const list=data.projects||[];
+    if(!list.length){root.innerHTML='<p class="muted">No projects yet — create one via the API (<code>POST /api/v1/projects</code>).</p>';return}
+    root.innerHTML=`<div class="device-grid">`+list.map(p=>{
+      const counts=Object.entries(p.member_counts||{}).map(([k,v])=>`${KINDS[k]||k} ${v}`).join(' · ')||'no members';
+      const alerts=(p.active_alert_count||0)>0?`<span class="severity-critical">${p.active_alert_count} active alert${p.active_alert_count>1?'s':''}</span>`:'<span class="muted">no active alerts</span>';
+      return `<a class="device-card project-card" href="#project=${esc(p.id)}" data-id="${esc(p.id)}"><div class="device-head"><span class="dot ${esc(p.health||'unknown')}"></span><div><h3>${esc(p.name)}</h3><small>${esc(p.lifecycle)} · ${esc(p.criticality)}${p.archived?' · archived':''}</small></div>${alerts}</div><dl><dt>Members</dt><dd>${esc(counts)}</dd>${(p.reasons||[]).length?`<dt>Reasons</dt><dd>${p.reasons.map(esc).join('; ')}</dd>`:''}</dl></a>`;
+    }).join('')+'</div>';
+    root.querySelectorAll('.project-card').forEach(card=>{card.onclick=()=>select(card.dataset.id)});
+  };
+  const select=async id=>{
+    let data;try{data=await(await fetch(`/api/v1/projects/${encodeURIComponent(id)}/graph`)).json()}catch(e){return}
+    if(!detailRoot)return;
+    const p=data.project||{},h=data.health||{};
+    detailRoot.hidden=false;
+    const memberRows=Object.entries(data.members||{}).flatMap(([kind,entries])=>entries.map(m=>`<tr><td>${KINDS[kind]||kind}</td><td>${esc(m.name||m.object_id)}</td><td><span class="dot ${esc(m.health)}"></span>${esc(m.health)}</td><td>${(m.reasons||[]).map(esc).join('; ')||'—'}</td></tr>`));
+    const alertRows=(h.active_alerts||[]).map(a=>`<tr><td>${esc(a.device_id)}</td><td>${esc(a.alert_type)}</td><td>${esc(a.severity)}</td><td>${esc(a.message)}</td><td>${localTime(a.opened_at)}</td></tr>`);
+    const facts=[['owner',p.owner],['tags',(p.tags||[]).join(', ')],['links',(p.links||[]).map(l=>`${l.label} → ${l.url}`).join(', ')],['created',localTime(p.created_at)],['updated',localTime(p.updated_at)],['archived',p.archived_at?localTime(p.archived_at)+(p.archived_reason?` (${p.archived_reason})`:''):null]];
+    detailRoot.innerHTML=`<div class="device-head"><span class="dot ${esc(h.health)}"></span><div><h2>${esc(p.name)}</h2><small>${esc(p.lifecycle)} · criticality ${esc(p.criticality)}${p.archived?' · archived (read-only)':''}</small></div><span class="row-actions">${p.archived?`<button class="link-button" data-action="restore">Restore</button>`:`<button class="link-button" data-action="archive">Archive</button>`}</span></div>
+    ${(p.description||p.notes)?`<p>${esc(p.description)}${p.description&&p.notes?' — ':''}${esc(p.notes)}</p>`:''}
+    ${(h.reasons||[]).length?`<p class="critical-row">Reasons: ${h.reasons.map(esc).join('; ')}</p>`:''}
+    <dl class="details">${facts.filter(([,v])=>v).map(([k,v])=>`<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
+    ${alertRows.length?`<h3>Active alerts</h3>${table(['Device','Type','Severity','Message','Opened'],alertRows)}`:''}
+    <h3>Members</h3>${table(['Kind','Object','Health','Reasons'],memberRows)}`;
+    detailRoot.querySelectorAll('button[data-action]').forEach(btn=>btn.onclick=async()=>{
+      const response=await mutate(`/api/v1/projects/${encodeURIComponent(p.id)}/${btn.dataset.action}`,{method:'POST'});
+      const result=await response.json().catch(()=>({}));
+      if(!response.ok){alert(result.error||'action failed');return}
+      await Promise.all([loadGrid(),select(id)]);
+    });
+  };
+  await loadGrid();
+  const match=location.hash.match(/project=([^&]+)/);
+  if(match)await select(decodeURIComponent(match[1]));
+  startAutoRefresh(loadGrid);
+}
+return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,incidents,incidentDetail,slos,reports,projects,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();

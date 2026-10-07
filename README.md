@@ -17,6 +17,14 @@ other collection domains.
   SSH collection; CPU, temperature, memory, storage, storage-media wear and
   I/O-error status, networking, systemd services, Raspberry Pi power/throttling
   state, roles, tags, and Cockpit links.
+- **Projects:** the environment's operational units, each grouping devices,
+  applications, repositories, feeds, hardware, services, and runbooks through
+  one audited membership table. Projects carry a lifecycle (planned, active,
+  maintenance, retired, archived) and a criticality that escalates member
+  states in the health rollup; archiving preserves the full history and makes
+  the project read-only until restored. Every state-changing operation is
+  audited, and the console shows a project card grid (health, member counts,
+  active alerts), a drill-down view, and an unassigned-inventory view.
 - **Operational history:** SQLite/WAL storage, configurable sampling and
   retention, graphs, storage forecasts, transition events, persistent alert
   lifecycles (active, acknowledged, muted, and resolved), outbound alert
@@ -34,9 +42,9 @@ other collection domains.
 - **Web operations console:** a responsive, accessible Flask/Waitress interface
   with fleet health summaries, fleet-wide aggregates (average CPU, memory, and
   temperature; storage totals with growth forecast; combined network throughput;
-  uptime range) plus a 24-hour trend chart, search and filters, device
-  drill-downs, history, integrations, alerts, events, safe actions, and
-  development workflows.
+  uptime range) plus a 24-hour trend chart, search and filters, a project
+  registry with health rollups and drill-downs, device drill-downs, history,
+  integrations, alerts, events, safe actions, and development workflows.
 
 ## Architecture
 
