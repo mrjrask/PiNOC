@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -136,6 +136,24 @@ CREATE INDEX report_editions_report_time ON report_editions(report_id,generated_
 CREATE TABLE project_members(project_id INTEGER NOT NULL,kind TEXT NOT NULL,object_id TEXT NOT NULL,added_by TEXT,added_at TEXT NOT NULL,removed_at TEXT,PRIMARY KEY(project_id,kind,object_id),FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE);
 CREATE INDEX project_members_kind ON project_members(kind,object_id);
 CREATE INDEX projects_lifecycle ON projects(lifecycle);""",
+# Application model (PiNOC 2.0 Phase 1, see pinoc/applications.py):
+# ``applications`` is the logical software capability ("is Desk Display
+# working?") and ``application_instances`` binds one application to a device
+# plus its implementation (systemd unit, PM2 app, container, or process).
+# One application may have instances on many devices, each with independent
+# state; the normalized health columns hold the *last known answer* -- a
+# failed check never erases them, it only ages them (pinoc.envstates).
+"""CREATE TABLE applications(app_id INTEGER PRIMARY KEY,slug TEXT NOT NULL UNIQUE,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',project_slug TEXT,lifecycle TEXT NOT NULL DEFAULT 'active',criticality TEXT NOT NULL DEFAULT 'standard',version_source TEXT NOT NULL DEFAULT 'manual',version TEXT,repository TEXT,health_strategy_json TEXT NOT NULL DEFAULT '{"type":"composite","strategies":[]}',endpoints_json TEXT NOT NULL DEFAULT '[]',tags_json TEXT NOT NULL DEFAULT '[]',owner TEXT,health TEXT NOT NULL DEFAULT 'unknown',health_reasons_json TEXT NOT NULL DEFAULT '[]',last_success_at TEXT,last_checked_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,archived_at TEXT,archived_reason TEXT);
+CREATE TABLE application_instances(instance_id INTEGER PRIMARY KEY,app_slug TEXT NOT NULL,device_id TEXT NOT NULL,mechanism TEXT NOT NULL DEFAULT 'systemd',target TEXT NOT NULL DEFAULT '',critical INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,strategy_json TEXT NOT NULL DEFAULT '{}',health TEXT NOT NULL DEFAULT 'unknown',health_reasons_json TEXT NOT NULL DEFAULT '[]',last_success_at TEXT,last_checked_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(app_slug,device_id,mechanism,target));
+CREATE INDEX app_instances_app ON application_instances(app_slug);
+CREATE INDEX app_instances_device ON application_instances(device_id);
+-- Bounded point-in-time health snapshots (one per instance per poll): the
+-- durable record of *why* an application's health changed, carrying the
+-- phase-wide observation contract fields (source, observed/checked times,
+-- freshness TTL, confidence). HistoryManager.maintenance() prunes them.
+CREATE TABLE application_health_snapshots(snapshot_id INTEGER PRIMARY KEY,app_slug TEXT NOT NULL,instance_id INTEGER,device_id TEXT,health TEXT NOT NULL,reasons_json TEXT NOT NULL DEFAULT '[]',strategy TEXT NOT NULL,source TEXT NOT NULL DEFAULT 'strategy',observed_at TEXT NOT NULL,checked_at TEXT NOT NULL,ttl_seconds INTEGER,confidence REAL NOT NULL DEFAULT 1.0);
+CREATE INDEX app_snapshots_app_time ON application_health_snapshots(app_slug,checked_at);
+CREATE INDEX app_snapshots_instance_time ON application_health_snapshots(instance_id,checked_at);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

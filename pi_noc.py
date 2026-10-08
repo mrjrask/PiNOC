@@ -1225,6 +1225,7 @@ class SharedSnapshotCoordinator:
         ssh_passwords = {device.id: value for device in devices
                          if (value := read_env_value(device_ssh_password_env_key(device.id)))}
         security_monitoring = CONFIG.get("security_monitoring", {})
+        applications_config = CONFIG.get("applications", {})
         self.fleet_collector = FleetCollector(
             devices, int(CONFIG.get("fleet_max_workers", 4)),
             float(CONFIG.get("ssh_command_timeout", 8)), read_env_value("CM5_SSH_PASS"),
@@ -1236,7 +1237,8 @@ class SharedSnapshotCoordinator:
             auth_fail_hysteresis=float(security_monitoring.get("auth_fail_hysteresis", 2)),
             listener_change_duration_seconds=float(
                 security_monitoring.get("listener_change_duration_seconds", 60)),
-            drift_check_seconds=float(polling.get("config_drift_check_seconds", 300)))
+            drift_check_seconds=float(polling.get("config_drift_check_seconds", 300)),
+            apps_check_seconds=float(applications_config.get("check_seconds", 300)))
         self.configured_fleet_devices = tuple(devices)
         global_thresholds = CONFIG.get("health_thresholds", {})
         try:
@@ -1474,7 +1476,8 @@ def main() -> None:
     notifications = NotificationService(CONFIG.get("notifications", {}), state=state)
     history = HistoryManager(Database(database_path), history_config, state, notifier=notifications,
                               anomalies=CONFIG.get("anomaly_detection"), correlation=CONFIG.get("alert_correlation"),
-                              network_topology=CONFIG.get("network_topology"), slos=CONFIG.get("slos"))
+                              network_topology=CONFIG.get("network_topology"), slos=CONFIG.get("slos"),
+                              applications=CONFIG.get("applications"))
     state.add_publish_hook(history.submit)
     # Backfilled after both are constructed: NotificationService is built
     # before the history Database exists, but incident timelines (see
@@ -1571,6 +1574,16 @@ def main() -> None:
     if reports_service is not None:
         reports_service.start()
 
+    # Applications (PiNOC 2.0 Phase 1). create_app already built
+    # pinoc.applications.ApplicationService (a self-contained block reading
+    # CONFIG["applications"], the same way SLOService/ReportService are built
+    # inline there) and hooked its spec map onto the fleet collector's
+    # due-gated __APPS__ section; this only starts/stops its poll loop,
+    # the same as every other background service above.
+    applications_service = extensions.get("pinoc_applications")
+    if applications_service is not None:
+        applications_service.start()
+
     previous_signal_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
     }
@@ -1603,6 +1616,8 @@ def main() -> None:
                 slo_service.stop()
             if reports_service is not None:
                 reports_service.stop()
+            if applications_service is not None:
+                applications_service.stop()
             notifications.stop()
             history.stop()
         finally:

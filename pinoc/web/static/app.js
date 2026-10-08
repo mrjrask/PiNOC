@@ -812,4 +812,44 @@ async function projects(){
   if(match)await select(decodeURIComponent(match[1]));
   startAutoRefresh(loadGrid);
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,incidents,incidentDetail,slos,reports,projects,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();
+
+async function applications(){
+  const root=document.querySelector('#applications');if(!root)return;
+  const detailRoot=document.querySelector('#application-detail');
+  const MECH={systemd:'systemd unit',pm2:'PM2 app',container:'container',process:'process'};
+  const loadGrid=async()=>{
+    let data;try{data=await(await fetch('/api/v1/applications')).json()}catch(e){root.innerHTML='<p class="muted">Application registry unavailable.</p>';return}
+    const list=data.applications||[];
+    if(!list.length){root.innerHTML='<p class="muted">No applications yet — create one via the API (<code>POST /api/v1/applications</code>).</p>';return}
+    root.innerHTML=`<div class="device-grid">`+list.map(a=>{
+      const version=a.version?`<dt>Version</dt><dd>${esc(a.version)}${a.version_source&&a.version_source!=='manual'?` <span class="muted">(${esc(a.version_source)})</span>`:''}</dd>`:'';
+      return `<a class="device-card application-card" href="#application=${esc(a.id)}" data-id="${esc(a.id)}"><div class="device-head"><span class="dot ${esc(a.health||'unknown')}"></span><div><h3>${esc(a.name)}</h3><small>${esc(a.lifecycle)} · ${esc(a.criticality)}${a.archived?' · archived':''}</small></div><span class="muted">${a.instance_count||0} instance${(a.instance_count||0)===1?'':'s'}</span></div><dl>${version}<dt>Last checked</dt><dd>${a.last_checked_at?localTime(a.last_checked_at):'never'}</dd>${(a.health_reasons||[]).length?`<dt>Reasons</dt><dd>${a.health_reasons.map(esc).join('; ')}</dd>`:''}</dl></a>`;
+    }).join('')+'</div>';
+    root.querySelectorAll('.application-card').forEach(card=>{card.onclick=()=>select(card.dataset.id)});
+  };
+  const select=async id=>{
+    let data;try{data=await(await fetch(`/api/v1/applications/${encodeURIComponent(id)}/health`)).json()}catch(e){return}
+    if(!detailRoot)return;
+    const a=data;
+    detailRoot.hidden=false;
+    const instRows=(a.instances||[]).map(i=>`<tr><td>${esc(i.device?.friendly_name||i.device?.hostname||i.device_id)}</td><td>${MECH[i.mechanism]||esc(i.mechanism)} ${esc(i.target)}</td><td>${i.critical?'<span class="severity-critical">critical</span> ':''}${i.enabled?'':'<span class="muted">disabled</span>'}</td><td><span class="dot ${esc(i.health)}"></span>${esc(i.health)}</td><td>${i.last_success_at?localTime(i.last_success_at):'never'}</td><td>${(i.health_reasons||[]).map(esc).join('; ')||'—'}</td></tr>`);
+    const snapRows=(a.snapshots||[]).slice(0,15).map(s=>`<tr><td>${localTime(s.checked_at)}</td><td>${esc(s.device_id||'')}</td><td><span class="dot ${esc(s.health_normalized||s.health)}"></span>${esc(s.health)}</td><td>${esc(s.strategy)}</td><td>${(s.reasons||[]).map(esc).join('; ')||'—'}</td></tr>`);
+    const facts=[['owner',a.owner],['project',a.project],['tags',(a.tags||[]).join(', ')],['version',a.version?`${a.version} (${a.version_source})`:null],['repository',a.repository],['endpoints',(a.endpoints||[]).join(', ')],['created',localTime(a.created_at)],['updated',localTime(a.updated_at)],['archived',a.archived_at?localTime(a.archived_at)+(a.archived_reason?` (${a.archived_reason})`:''):null]];
+    detailRoot.innerHTML=`<div class="device-head"><span class="dot ${esc(a.health)}"></span><div><h2>${esc(a.name)}</h2><small>${esc(a.lifecycle)} · criticality ${esc(a.criticality)}${a.archived?' · archived (read-only)':''}</small></div><span class="row-actions">${a.archived?`<button class="link-button" data-action="restore">Restore</button>`:`<button class="link-button" data-action="archive">Archive</button>`}</span></div>
+    ${(a.reasons||[]).length?`<p class="critical-row">Reasons: ${a.reasons.map(esc).join('; ')}</p>`:''}
+    <dl class="details">${facts.filter(([,v])=>v).map(([k,v])=>`<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
+    <h3>Instances</h3>${table(['Device','Implementation','Flags','Health','Last success','Reasons'],instRows)}
+    ${snapRows.length?`<h3>Recent checks</h3>${table(['Checked','Device','Health','Strategy','Reasons'],snapRows)}`:''}`;
+    detailRoot.querySelectorAll('button[data-action]').forEach(btn=>btn.onclick=async()=>{
+      const response=await mutate(`/api/v1/applications/${encodeURIComponent(a.id)}/${btn.dataset.action}`,{method:'POST'});
+      const result=await response.json().catch(()=>({}));
+      if(!response.ok){alert(result.error||'action failed');return}
+      await Promise.all([loadGrid(),select(id)]);
+    });
+  };
+  await loadGrid();
+  const match=location.hash.match(/application=([^&]+)/);
+  if(match)await select(decodeURIComponent(match[1]));
+  startAutoRefresh(loadGrid);
+}
+return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,incidents,incidentDetail,slos,reports,projects,applications,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();

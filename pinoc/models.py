@@ -35,6 +35,11 @@ class DeviceState:
     important_paths: List[str] = field(default_factory=list)
     network: Dict[str, Any] = field(default_factory=dict)
     services: List[Dict[str, Any]] = field(default_factory=list)
+    # Bounded app-implementation checks reported by the fleet collector's
+    # due-gated __APPS__ section (see pinoc/collectors/fleet.py): one entry
+    # per (name, kind) the host asked for, where kind is systemd/pm2/
+    # container/process. Feeds the "process" application health strategy.
+    app_checks: List[Dict[str, Any]] = field(default_factory=list)
     applications: Dict[str, Any] = field(default_factory=dict)
     integrations: Dict[str, Any] = field(default_factory=dict)
     alerts: List[Dict[str, Any]] = field(default_factory=list)

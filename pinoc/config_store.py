@@ -172,6 +172,32 @@ def validate_reports(value,known_roles,known_tags):
     try:_validate_reports(value,known_roles,known_tags,known_channel_ids)
     except ReportConfigError as exc:raise ValueError(str(exc)) from None
 
+def validate_applications(value):
+    section=value.get("applications")
+    if section is None:return
+    if not isinstance(section,dict):raise ValueError("applications must be an object")
+    if "enabled" in section and not isinstance(section.get("enabled"),bool):raise ValueError("applications.enabled must be a boolean")
+    for name,low,high in (("poll_seconds",5,86400),("http_timeout_seconds",0.5,300),("tcp_timeout_seconds",0.5,300),("freshness_seconds",10,2592000)):
+        setting=section.get(name)
+        if setting is not None and (isinstance(setting,bool) or not isinstance(setting,(int,float)) or not low<=setting<=high):
+            raise ValueError(f"applications.{name} must be a number between {low} and {high}")
+    retention=section.get("snapshot_retention_days")
+    if retention is not None and (isinstance(retention,bool) or not isinstance(retention,int) or not 1<=retention<=3650):
+        raise ValueError("applications.snapshot_retention_days must be an integer between 1 and 3650")
+    templates=section.get("command_templates")
+    if templates is None:return
+    if not isinstance(templates,dict):raise ValueError("applications.command_templates must be an object")
+    if len(templates)>100:raise ValueError("at most 100 applications.command_templates entries are allowed")
+    for name,entry in templates.items():
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}",str(name)):raise ValueError(f"invalid applications.command_templates name: {name}")
+        if not isinstance(entry,dict):raise ValueError(f"applications.command_templates.{name} must be an object")
+        command=entry.get("command")
+        if not isinstance(command,str) or not command.strip() or len(command)>512 or "\x00" in command:
+            raise ValueError(f"applications.command_templates.{name}.command must be a non-empty string of at most 512 characters")
+        timeout=entry.get("timeout_seconds",30)
+        if isinstance(timeout,bool) or not isinstance(timeout,(int,float)) or not 1<=timeout<=300:
+            raise ValueError(f"applications.command_templates.{name}.timeout_seconds must be a number between 1 and 300")
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
@@ -192,6 +218,7 @@ def validate_config(value,base_dir=Path(".")):
     known_roles={r for d in devices for r in d.roles};known_tags={t for d in devices for t in d.tags}
     validate_slos(value,{d.id for d in devices},known_roles,known_tags)
     validate_reports(value,known_roles,known_tags)
+    validate_applications(value)
     return value
 
 def _atomic_write(path,value,backups=3):

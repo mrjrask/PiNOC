@@ -11,7 +11,7 @@ LOG=logging.getLogger("pinoc.history"); UTC=timezone.utc
 SEVERITY_RANK={"info":0,"warning":1,"degraded":2,"critical":3}
 
 class HistoryManager:
-    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None,notifier:Any=None,anomalies:Optional[Dict[str,Any]]=None,correlation:Optional[Dict[str,Any]]=None,network_topology:Optional[Dict[str,Any]]=None,slos:Optional[Dict[str,Any]]=None):
+    def __init__(self,db:Database,config:Optional[Dict[str,Any]]=None,state:Any=None,notifier:Any=None,anomalies:Optional[Dict[str,Any]]=None,correlation:Optional[Dict[str,Any]]=None,network_topology:Optional[Dict[str,Any]]=None,slos:Optional[Dict[str,Any]]=None,applications:Optional[Dict[str,Any]]=None):
         self.db=db; self.config=config or {}; self.enabled=bool(self.config.get("enabled",True)); self.notifier=notifier
         self.anomaly=BaselineTracker(db,anomalies)
         self.correlation=CorrelationEngine(db,correlation)
@@ -33,6 +33,12 @@ class HistoryManager:
         slo_config=slos or {}
         self.intervals["health"]=float(slo_config.get("interval_seconds",self.intervals["core"]))
         self.health_sample_retention_days=max(1,int(slo_config.get("sample_retention_days",35)))
+        # Application health snapshots (PiNOC 2.0 Phase 1, see
+        # pinoc.applications): point-in-time health the same way
+        # health_samples is kept -- a longer retention than raw metrics,
+        # pruned by maintenance() below.
+        applications_config=applications or {}
+        self.app_snapshot_retention_days=max(1,int(applications_config.get("snapshot_retention_days",35)))
 
     def start(self):
         if self.enabled and self.db.initialize(): self.thread.start(); self.event(None,"pinoc_started","info","PiNOC started")
@@ -384,6 +390,7 @@ class HistoryManager:
             # gets its own, longer retention (see pinoc.slo), not the raw
             # metrics window above -- an SLO window is commonly 30 days.
             con.execute("DELETE FROM health_samples WHERE timestamp<?",((now-timedelta(days=self.health_sample_retention_days)).isoformat(),))
+            con.execute("DELETE FROM application_health_snapshots WHERE checked_at<?",((now-timedelta(days=self.app_snapshot_retention_days)).isoformat(),))
         self.db.last_aggregation=self.db.last_retention_cleanup=utcnow()
         self._refresh_cache()
 
