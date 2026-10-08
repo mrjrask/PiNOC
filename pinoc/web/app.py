@@ -1766,6 +1766,210 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def projects_page():
         return render_template("projects.html")
 
+    # -- Applications (PiNOC 2.0 Phase 1, P1-R02) ------------------------------
+    # Self-contained block: pinoc.applications.ApplicationService owns the
+    # application/instance registry plus its own health poll (checks run on
+    # its poll thread, never in a request thread -- the health endpoint and
+    # the page read the poll-persisted state and age it under the freshness
+    # floor). Built here the same way SLOService/ReportService are (it needs
+    # no ActionDispatcher for its own work; the audit callable is passed for
+    # policy changes), started/stopped by pi_noc.py. Its device_app_specs()
+    # map is hooked onto the fleet collector's due-gated __APPS__ section so
+    # one poll re-reports every device's app implementations.
+    #
+    # Safe-pattern notes (the "no history / no DATABASE" contract):
+    # the service is None without a history database; reads gate on
+    # _preset_view_allowed(); writes gate on config.write; actor comes from
+    # the session identity with a trusted-lan fallback; every output passes
+    # through the security layer's recursive redact() so a strategy URL or
+    # repository credential can never reach the browser (spec: "redact
+    # secrets").
+    from pinoc.applications import ApplicationError, ApplicationService
+    app.extensions["pinoc_applications"] = ApplicationService(
+        history.db, state=state, history=history,
+        config=(app.config.get("PINOC_CONFIG") or {}).get("applications"),
+        audit=actions.audit if actions else None,
+        redact=redact if security is not None else None,
+    ) if history is not None else None
+    applications_service = app.extensions["pinoc_applications"]
+    if applications_service is not None and coordinator is not None \
+            and getattr(coordinator, "fleet_collector", None) is not None:
+        coordinator.fleet_collector.application_specs = applications_service.device_app_specs
+    app.config["TOKEN_SCOPE_PERMISSIONS"].update({
+        "api_v1_applications": "view", "api_v1_applications_create": "config.write",
+        "api_v1_application": "view", "api_v1_application_update": "config.write",
+        "api_v1_application_archive": "config.write", "api_v1_application_restore": "config.write",
+        "api_v1_application_instances": "view", "api_v1_application_instances_create": "config.write",
+        "api_v1_application_instance": "config.write",
+        "api_v1_application_instance_delete": "config.write",
+        "api_v1_application_health": "view",
+    })
+
+    def _applications_service() -> Optional[ApplicationService]:
+        return app.extensions.get("pinoc_applications")
+
+    def _redact(value: Any) -> Any:
+        return redact(value) if security is not None else value
+
+    def _application_error(exc: ApplicationError):
+        if "not found" in str(exc):
+            return jsonify({"error": str(exc)}), 404
+        if ("already taken" in str(exc) or "already exists" in str(exc)
+                or "read-only" in str(exc) or "can be restored" in str(exc)
+                or "not found" in str(exc) or "at most" in str(exc)):
+            return jsonify({"error": str(exc)}), 409
+        return jsonify({"error": str(exc)}), 400
+
+    @app.get("/api/v1/applications")
+    def api_v1_applications():
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _applications_service()
+        if service is None:
+            return jsonify({"error": "application registry is not available"}), 503
+        try:
+            apps = service.list(
+                include_archived=request.args.get("include_archived") == "true",
+                lifecycle=request.args.get("lifecycle"),
+                project=request.args.get("project"))
+        except ApplicationError as exc:
+            return _application_error(exc)
+        return jsonify({"applications": _redact(apps)})
+
+    @app.post("/api/v1/applications")
+    def api_v1_applications_create():
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _applications_service()
+        if service is None or not service._available():
+            return jsonify({"error": "application registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            application = service.create(body, actor=_actor())
+        except ApplicationError as exc:
+            return _application_error(exc)
+        return jsonify({"application": _redact(application)}), 201
+
+    @app.get("/api/v1/applications/<app_id>")
+    def api_v1_application(app_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _applications_service()
+        if service is None:
+            return jsonify({"error": "application registry is not available"}), 503
+        application = service.get(app_id)
+        if application is None:
+            return jsonify({"error": "application not found"}), 404
+        return jsonify({"application": _redact(application)})
+
+    @app.patch("/api/v1/applications/<app_id>")
+    @app.put("/api/v1/applications/<app_id>")
+    def api_v1_application_update(app_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _applications_service()
+        if service is None:
+            return jsonify({"error": "application registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            application = service.update(app_id, body, actor=_actor())
+        except ApplicationError as exc:
+            return _application_error(exc)
+        return jsonify({"application": _redact(application)})
+
+    def _application_lifecycle_action(app_id, action):
+        service = _applications_service()
+        if service is None:
+            return jsonify({"error": "application registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            application = (service.archive(app_id, actor=_actor(),
+                                           reason=str(body.get("reason") or "")) if action == "archive"
+                           else service.restore(app_id, actor=_actor()))
+        except ApplicationError as exc:
+            return _application_error(exc)
+        return jsonify({"application": _redact(application)})
+
+    @app.post("/api/v1/applications/<app_id>/archive")
+    def api_v1_application_archive(app_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        return _application_lifecycle_action(app_id, "archive")
+
+    @app.post("/api/v1/applications/<app_id>/restore")
+    def api_v1_application_restore(app_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        return _application_lifecycle_action(app_id, "restore")
+
+    @app.get("/api/v1/applications/<app_id>/instances")
+    def api_v1_application_instances(app_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _applications_service()
+        if service is None:
+            return jsonify({"error": "application registry is not available"}), 503
+        try:
+            return jsonify({"instances": _redact(service.instances(app_id))})
+        except ApplicationError as exc:
+            return _application_error(exc)
+
+    @app.post("/api/v1/applications/<app_id>/instances")
+    def api_v1_application_instances_create(app_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _applications_service()
+        if service is None:
+            return jsonify({"error": "application registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            instance = service.add_instance(app_id, body, actor=_actor())
+        except ApplicationError as exc:
+            return _application_error(exc)
+        return jsonify({"instance": _redact(instance)}), 201
+
+    @app.patch("/api/v1/applications/<app_id>/instances/<instance_id>")
+    def api_v1_application_instance(app_id, instance_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _applications_service()
+        if service is None:
+            return jsonify({"error": "application registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            instance = service.update_instance(app_id, instance_id, body, actor=_actor())
+        except ApplicationError as exc:
+            return _application_error(exc)
+        return jsonify({"instance": _redact(instance)})
+
+    @app.delete("/api/v1/applications/<app_id>/instances/<instance_id>")
+    def api_v1_application_instance_delete(app_id, instance_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _applications_service()
+        if service is None:
+            return jsonify({"error": "application registry is not available"}), 503
+        try:
+            return jsonify(service.delete_instance(app_id, instance_id, actor=_actor()))
+        except ApplicationError as exc:
+            return _application_error(exc)
+
+    @app.get("/api/v1/applications/<app_id>/health")
+    def api_v1_application_health(app_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _applications_service()
+        if service is None:
+            return jsonify({"error": "application registry is not available"}), 503
+        try:
+            return jsonify(_redact(service.health(app_id)))
+        except ApplicationError as exc:
+            return _application_error(exc)
+
+    @app.get("/applications")
+    def applications_page():
+        return render_template("applications.html")
+
     return app
 
 

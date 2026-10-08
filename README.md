@@ -25,6 +25,19 @@ other collection domains.
   the project read-only until restored. Every state-changing operation is
   audited, and the console shows a project card grid (health, member counts,
   active alerts), a drill-down view, and an unassigned-inventory view.
+- **Application model:** the software capabilities you actually operate (desk
+  display, MagicMirror, Sense, ...), each bound to one or more *instances*
+  across devices -- a systemd unit, a PM2 app, a container, or a plain
+  process -- with fully independent state per instance. Health checks run
+  on their own poll cadence through registered strategies only (service,
+  process, HTTP, TCP, config-registered command templates, integration,
+  composite): the UI can never inject an arbitrary command. A stopped
+  critical unit degrades its instance, a running sibling never masks a
+  critical failing member, a failed check never erases the last success,
+  application versions are tracked independently of the host OS, secret
+  material in endpoints is redacted in every API response, and every
+  policy change is audited. The console shows an application card grid and
+  a drill-down (application → instances → devices → services).
 - **Operational history:** SQLite/WAL storage, configurable sampling and
   retention, graphs, storage forecasts, transition events, persistent alert
   lifecycles (active, acknowledged, muted, and resolved), outbound alert

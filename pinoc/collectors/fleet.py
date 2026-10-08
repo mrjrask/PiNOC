@@ -31,8 +31,8 @@ SCRIPT = r'''set +e
 # passed only on the (much lower-frequency) cycle a package check is due --
 # `apt-get --just-print upgrade` simulates a dependency resolution over the
 # whole local apt cache and must not run on every fleet poll.
-jlogs_lines=""; jlogs_units=""; apt_due=0; authcheck_due=0; drift_files=""; sshdcheck_due=0
-for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; __apt__) apt_due=1;; __authcheck__) authcheck_due=1;; __driftfiles__:*) drift_files=${arg#__driftfiles__:};; __sshdcheck__) sshdcheck_due=1;; esac; done
+jlogs_lines=""; jlogs_units=""; apt_due=0; authcheck_due=0; drift_files=""; sshdcheck_due=0; apps_due=0; apps_specs=""
+for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; __apt__) apt_due=1;; __authcheck__) authcheck_due=1;; __driftfiles__:*) drift_files=${arg#__driftfiles__:};; __sshdcheck__) sshdcheck_due=1;; __APPS__:*) apps_due=1; apps_specs=${arg#__APPS__:};; esac; done
 echo __OS__; cat /etc/os-release 2>/dev/null; echo __UNAME__; uname -srm
 echo __MODEL__; tr -d '\000' </proc/device-tree/model 2>/dev/null; echo
 echo __UPTIME__; cat /proc/uptime; echo __LOAD__; cat /proc/loadavg
@@ -92,6 +92,24 @@ fi
 if [ "$1" = "__discover__" ]; then shift; discovered=$(systemctl list-unit-files --no-legend --no-pager 2>/dev/null | awk '{print $1}' | grep -E '^(cockpit|ssh|desk-display|piaware|dump1090|readsb|magicmirror|ics_modifier|pi-hotspot|temp-monitor|smb|smbd|nmbd|wg-quick)' | head -30); fi
 echo __SERVICES__; systemctl show --no-pager --property=Id,LoadState,ActiveState,SubState,MainPID,ActiveEnterTimestampMonotonic,NRestarts,MemoryCurrent,UnitFileState "$@" $discovered 2>/dev/null
 echo __UNITS__; systemctl list-unit-files --no-legend --no-pager 2>/dev/null
+echo __APPS__
+# Application-implementation checks (PiNOC 2.0 Phase 1): passed only on the
+# low-frequency cycle the host selects, as a bounded "kind|name,kind|name"
+# list -- kind is systemd|pm2|container|process. pm2/docker/pgrep are all
+# optional: anything missing reports "unknown" rather than an error.
+if [ "$apps_due" = "1" ] && [ -n "$apps_specs" ]; then
+  printf '%s\n' "$apps_specs" | tr ',' '\n' | head -50 | while IFS='|' read -r kind name; do
+    [ -n "$kind" ] && [ -n "$name" ] || continue
+    status=unknown
+    case "$kind" in
+      systemd) status=$(systemctl is-active "$name" 2>/dev/null | head -1);;
+      pm2) pid=$(pm2 pid "$name" 2>/dev/null | tail -1); case "$pid" in ''|*[!0-9]*) status=unknown;; 0) status=stopped;; *) status=running;; esac;;
+      container) status=$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null | head -1); [ -n "$status" ] || status=unknown;;
+      process) c=$(pgrep -c -f "$name" 2>/dev/null); case "$c" in ''|*[!0-9]*) status=unknown;; 0) status=stopped;; *) status=running;; esac;;
+    esac
+    [ -n "$status" ] && printf '%s|%s|%s\n' "$name" "$kind" "$status"
+  done
+fi
 echo __DRIFTFILES__
 if [ -n "$drift_files" ]; then
   for f in $(printf '%s' "$drift_files" | tr ',' ' '); do
@@ -393,6 +411,31 @@ def parse_services(text: str, critical: Iterable[str], system_uptime: float = 0)
 
 
 _UNIT_RE = re.compile(r"[A-Za-z0-9@:_.\-]{1,128}")
+
+
+def parse_app_checks(text: str, max_entries: int = 50) -> List[Dict[str, Any]]:
+    """Parse the bounded __APPS__ section into per-implementation state.
+
+    One line per requested implementation: ``name|kind|status``. The name
+    and kind were supplied by PiNOC itself (never device-controlled), and
+    status is the verbatim output of the host's probe -- running/stopped/
+    unknown for pm2/pgrep, a ``systemctl is-active`` state, or a docker
+    container state. A host without the tool reports ``unknown`` rather
+    than an error, so the application service can tell "checked, problem"
+    from "not checkable" instead of guessing.
+    """
+    result=[]
+    for row in text.splitlines():
+        parts=[part.strip() for part in row.split("|")]
+        if len(parts) < 3:
+            continue
+        name, kind, status = parts[0], parts[1], parts[2]
+        if not name or not kind or not status:
+            continue
+        result.append({"name":name[:128],"kind":kind[:16],"status":status[:32]})
+        if len(result) >= max_entries:
+            break
+    return result
 _AUTHORIZATION_RE = re.compile(
     r"(?i)(?P<assignment>(?P<key_quote>['\"]?)[A-Za-z0-9_-]*authorization[A-Za-z0-9_-]*"
     r"(?P=key_quote)\s*[:=]\s*)"
@@ -617,7 +660,8 @@ class FleetCollector:
                  auth_fail_warning: float = 5, auth_fail_critical: float = 20,
                  auth_fail_hysteresis: float = 2,
                  listener_change_duration_seconds: float = 60.0,
-                 drift_check_seconds: float = 300.0) -> None:
+                 drift_check_seconds: float = 300.0,
+                 apps_check_seconds: float = 300.0) -> None:
         self.devices=devices; self.max_workers=max(1,min(int(max_workers),16)); self.timeout=float(timeout)
         self.password=password; self.runner=runner
         # Per-device password override (device_id -> password): compromising
@@ -654,6 +698,21 @@ class FleetCollector:
         # apt/packages above.
         self.drift_check_seconds=max(30.0,float(drift_check_seconds))
         self._last_drift_check: Dict[str, float] = {}
+        # Application-implementation checks (PiNOC 2.0 Phase 1): same
+        # due-gating idiom as jlogs/drift above -- the host re-reports its
+        # app implementations (systemd is-active / pm2 pid / docker container
+        # state / pgrep) only on this low-frequency cycle. *Which*
+        # implementations each device checks is owned by the application
+        # service (pinoc.applications): it hands the collector a
+        # device_id -> ["kind|name", ...] map through the `application_specs`
+        # hook, and collect() refreshes it once per cycle. The dict is
+        # replaced wholesale on the collect() thread and only read per-device
+        # in collect_device()'s pool workers -- the same shared-dict
+        # invariant as _last_jlogs/previous_cpu above.
+        self.apps_check_seconds=max(30.0,float(apps_check_seconds))
+        self._last_apps_check: Dict[str, float] = {}
+        self.app_specs: Dict[str, List[str]] = {}
+        self.application_specs: Optional[Callable[[], Dict[str, List[str]]]] = None
         # Security-surface monitoring (auth failures, listening ports): each
         # threshold/hysteresis pair follows the exact same open-until-you-
         # drop-back-down shape history.HistoryManager._alerts() already uses
@@ -673,7 +732,7 @@ class FleetCollector:
         return self.passwords.get(device.id) or self.password
 
     def _command(self, device: DeviceConfig, jlogs_due: bool = False, apt_due: bool = False,
-                 drift_due: bool = False) -> List[str]:
+                 drift_due: bool = False, apps: Optional[List[str]] = None) -> List[str]:
         # config_drift.expected_units ride along with monitored_services in
         # the same single `systemctl show` call (see __SERVICES__ below,
         # which now also asks for UnitFileState) -- cheap enough to check on
@@ -703,6 +762,20 @@ class FleetCollector:
                 args.append(f"__driftfiles__:{','.join(files)}")
             if device.config_drift.expected_sshd_options:
                 args.append("__sshdcheck__")
+        if apps:
+            # systemd-kind implementations ride along in the same single
+            # `systemctl show` call as the monitored units above (the
+            # "service" application strategy reads their full state from
+            # __SERVICES__); every requested implementation -- systemd or
+            # not -- also goes to the due-gated __APPS__ section, whose
+            # simple status lines feed the pm2/container/process strategies.
+            additions = 0
+            for spec in apps[:50]:
+                kind, _, name = str(spec).partition("|")
+                if kind == "systemd" and additions < 20 and name and _UNIT_RE.fullmatch(name) and name not in args:
+                    args.append(name)
+                    additions += 1
+            args.append(f"__APPS__:{','.join(str(spec) for spec in apps[:50])}")
         if device.collection_method == "local": return ["sh", "-s", "--", *args]
         ssh=["ssh","-p",str(device.ssh_port),"-o",f"ConnectTimeout={max(1,int(self.timeout))}","-o","ServerAliveInterval=3"]
         if self._password_for(device): return ["sshpass","-e",*ssh,"-o","BatchMode=no",f"{device.ssh_user}@{device.address}","sh","-s","--",*args]
@@ -723,11 +796,14 @@ class FleetCollector:
         last_drift=self._last_drift_check.get(device.id)
         drift_due=(not device.config_drift.is_empty()
                   and (last_drift is None or time.monotonic()-last_drift>=self.drift_check_seconds))
+        last_apps=self._last_apps_check.get(device.id)
+        apps_due=last_apps is None or time.monotonic()-last_apps>=self.apps_check_seconds
+        app_specs=self.app_specs.get(device.id) if apps_due else None
         try:
             env={**os.environ,"LC_ALL":"C"}
             device_password=self._password_for(device)
             if device_password: env["SSHPASS"]=device_password
-            proc=self.runner(self._command(device,jlogs_due,apt_due,drift_due),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
+            proc=self.runner(self._command(device,jlogs_due,apt_due,drift_due,apps=app_specs),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
             if proc.returncode: raise RuntimeError((proc.stderr or f"command exited {proc.returncode}").strip()[:240])
             self._last_jlogs[device.id]=time.monotonic()
             # Only reset the apt cadence clock when a check actually ran
@@ -737,6 +813,7 @@ class FleetCollector:
             # after the very first collection.
             if apt_due: self._last_apt_check[device.id]=time.monotonic()
             if drift_due: self._last_drift_check[device.id]=time.monotonic()
+            if apps_due: self._last_apps_check[device.id]=time.monotonic()
             data=sections(proc.stdout); cpu,counter=parse_cpu(data,self.previous_cpu.get(device.id)); self.previous_cpu[device.id]=counter
             os_values={}
             for row in data.get("OS","").splitlines():
@@ -772,6 +849,11 @@ class FleetCollector:
                  "important_paths":list(device.important_paths),
                  "config_drift_expected":_config_drift_expected_dict(device),
                  "services":services,"critical_services":list(device.critical_services),
+                 # Not due this cycle -- keep the last real checks (the
+                 # jlogs/packages idiom) so the "process" application
+                 # strategy ages them via its freshness floor instead of
+                 # flapping to "unknown" on every non-due poll.
+                 "app_checks":parse_app_checks(data.get("APPS","")) if apps_due else (list(old.app_checks) if old else []),
                  "collector_status":{"system":{"status":"ok"},"storage":{"status":"ok"},
                                      "media_errors":{"status":"ok" if io_errors_available else "unavailable",
                                                      "error":None if io_errors_available else "kernel logs are not readable"},
@@ -980,6 +1062,18 @@ class FleetCollector:
         result=DeviceState.from_dict(raw); self.snapshots[device.id]=result; return result
 
     def collect(self) -> List[DeviceState]:
+        if self.application_specs is not None:
+            # The application service (pinoc.applications) owns *which*
+            # implementations each device should report -- refreshed once per
+            # collect() on this (main) thread so the pool workers below only
+            # ever read the wholesale-replaced dict. A refresh failure keeps
+            # the last good specs: a broken spec source must never silently
+            # disable the fleet's app checks.
+            try:
+                self.app_specs={str(device_id):[str(spec) for spec in specs][:50]
+                                for device_id, specs in dict(self.application_specs()).items() if specs}
+            except Exception as exc:
+                LOG.warning("application spec refresh failed; keeping last good specs: %s",exc)
         with ThreadPoolExecutor(max_workers=self.max_workers,thread_name_prefix="fleet-device") as pool:
             futures={pool.submit(self.collect_device,d):d for d in self.devices}
             results=[]
