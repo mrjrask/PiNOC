@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -154,6 +154,25 @@ CREATE INDEX app_instances_device ON application_instances(device_id);
 CREATE TABLE application_health_snapshots(snapshot_id INTEGER PRIMARY KEY,app_slug TEXT NOT NULL,instance_id INTEGER,device_id TEXT,health TEXT NOT NULL,reasons_json TEXT NOT NULL DEFAULT '[]',strategy TEXT NOT NULL,source TEXT NOT NULL DEFAULT 'strategy',observed_at TEXT NOT NULL,checked_at TEXT NOT NULL,ttl_seconds INTEGER,confidence REAL NOT NULL DEFAULT 1.0);
 CREATE INDEX app_snapshots_app_time ON application_health_snapshots(app_slug,checked_at);
 CREATE INDEX app_snapshots_instance_time ON application_health_snapshots(instance_id,checked_at);""",
+# Repository model (PiNOC 2.0 Phase 1, see pinoc/repositories.py):
+# ``repositories`` is keyed by a stable slug plus a UNIQUE canonical_url
+# (host/path with every scheme/userinfo/.git spelling normalized away), so
+# one remote is always exactly one object no matter which device or source
+# reports it -- IP or path changes never create duplicates. ``deployments``
+# is one working tree per (repository, device, local path): multiple
+# checkouts of one repo, each with an observed revision/dirty state against
+# the repository's desired revision. ``deployment_events`` keeps
+# point-in-time state/revision transitions separate from current state;
+# HistoryManager.maintenance() prunes them.
+"""CREATE TABLE repositories(repo_id INTEGER PRIMARY KEY,slug TEXT NOT NULL UNIQUE,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',canonical_url TEXT NOT NULL UNIQUE,remote_url TEXT,default_branch TEXT,technology TEXT,project_slug TEXT,owner TEXT,tags_json TEXT NOT NULL DEFAULT '[]',lifecycle TEXT NOT NULL DEFAULT 'active',desired_commit_sha TEXT,desired_branch TEXT,state TEXT NOT NULL DEFAULT 'unknown',state_reasons_json TEXT NOT NULL DEFAULT '[]',last_observed_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,archived_at TEXT,archived_reason TEXT);
+CREATE INDEX repos_project ON repositories(project_slug);
+CREATE TABLE deployments(deployment_id INTEGER PRIMARY KEY,repo_slug TEXT NOT NULL,device_id TEXT NOT NULL,local_path TEXT NOT NULL DEFAULT '',application_slug TEXT,instance_id INTEGER,service TEXT,branch TEXT,observed_commit_sha TEXT,dirty INTEGER NOT NULL DEFAULT 0,ahead INTEGER,behind INTEGER,state TEXT NOT NULL DEFAULT 'unknown',state_reasons_json TEXT NOT NULL DEFAULT '[]',source TEXT NOT NULL DEFAULT 'agent_candidates',last_seen_at TEXT,last_observed_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(repo_slug,device_id,local_path));
+CREATE INDEX deployments_repo ON deployments(repo_slug);
+CREATE INDEX deployments_device ON deployments(device_id);
+CREATE INDEX deployments_application ON deployments(application_slug);
+CREATE TABLE deployment_events(event_id INTEGER PRIMARY KEY,repo_slug TEXT NOT NULL,deployment_id INTEGER,device_id TEXT,event_type TEXT NOT NULL,old_state TEXT,new_state TEXT,old_sha TEXT,new_sha TEXT,source TEXT,reasons_json TEXT NOT NULL DEFAULT '[]',observed_at TEXT,recorded_at TEXT NOT NULL);
+CREATE INDEX deployment_events_repo_time ON deployment_events(repo_slug,recorded_at);
+CREATE INDEX deployment_events_recorded ON deployment_events(recorded_at);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

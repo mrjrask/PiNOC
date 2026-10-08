@@ -198,6 +198,19 @@ def validate_applications(value):
         if isinstance(timeout,bool) or not isinstance(timeout,(int,float)) or not 1<=timeout<=300:
             raise ValueError(f"applications.command_templates.{name}.timeout_seconds must be a number between 1 and 300")
 
+def validate_repositories(value):
+    section=value.get("repositories")
+    if section is None:return
+    if not isinstance(section,dict):raise ValueError("repositories must be an object")
+    if "enabled" in section and not isinstance(section.get("enabled"),bool):raise ValueError("repositories.enabled must be a boolean")
+    for name,low,high in (("refresh_seconds",5,86400),("stale_seconds",60,2592000)):
+        setting=section.get(name)
+        if setting is not None and (isinstance(setting,bool) or not isinstance(setting,(int,float)) or not low<=setting<=high):
+            raise ValueError(f"repositories.{name} must be a number between {low} and {high}")
+    retention=section.get("event_retention_days")
+    if retention is not None and (isinstance(retention,bool) or not isinstance(retention,int) or not 1<=retention<=3650):
+        raise ValueError("repositories.event_retention_days must be an integer between 1 and 3650")
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
@@ -219,6 +232,7 @@ def validate_config(value,base_dir=Path(".")):
     validate_slos(value,{d.id for d in devices},known_roles,known_tags)
     validate_reports(value,known_roles,known_tags)
     validate_applications(value)
+    validate_repositories(value)
     return value
 
 def _atomic_write(path,value,backups=3):

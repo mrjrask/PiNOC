@@ -852,4 +852,48 @@ async function applications(){
   if(match)await select(decodeURIComponent(match[1]));
   startAutoRefresh(loadGrid);
 }
-return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,incidents,incidentDetail,slos,reports,projects,applications,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();
+// Repository registry view (Phase 1 P1-R03): canonical codebases plus the
+// working trees deployed from them. Every value comes from /api/v1/repositories
+// and /api/v1/deployments -- local cache/DB reads only; the page itself never
+// touches a repository. Deployment states map onto the existing health dot
+// palette so stale/drifted/dirty read at a glance.
+async function repositories(){
+  const root=document.querySelector('#repositories');if(!root)return;
+  const detailRoot=document.querySelector('#repository-detail');
+  const DOT={clean:'healthy',dirty:'warning',drifted:'degraded',stale:'stale',unknown:'unknown'};
+  const dot=s=>`<span class="dot ${DOT[s]||'unknown'}"></span>`;
+  const loadGrid=async()=>{
+    let data;try{data=await(await fetch('/api/v1/repositories')).json()}catch(e){root.innerHTML='<p class="muted">Repository registry unavailable.</p>';return}
+    const list=data.repositories||[];
+    if(!list.length){root.innerHTML='<p class="muted">No repositories yet — create one via the API (<code>POST /api/v1/repositories</code>), or wait for discovery from agent workspace scans.</p>';return}
+    root.innerHTML=`<div class="device-grid">`+list.map(r=>{
+      const desired=r.desired_commit_sha?`<dt>Desired</dt><dd>${esc(r.desired_commit_sha.slice(0,7))}${r.desired_branch?` on ${esc(r.desired_branch)}`:''}</dd>`:(r.desired_branch?`<dt>Desired</dt><dd>branch ${esc(r.desired_branch)}</dd>`:'');
+      return `<a class="device-card repository-card" href="#repository=${encodeURIComponent(r.id)}" data-id="${encodeURIComponent(r.id)}"><div class="device-head">${dot(r.state)}<div><h3>${esc(r.name)}</h3><small>${esc(r.lifecycle)}${r.archived?' · archived':''}${r.technology?` · ${esc(r.technology)}`:''}</small></div><span class="muted">${r.deployment_count||0} deployment${(r.deployment_count||0)===1?'':'s'}</span></div><dl><dt>Canonical</dt><dd>${esc(r.canonical_url)}</dd>${desired}</dl></a>`;
+    }).join('')+'</div>';
+    root.querySelectorAll('.repository-card').forEach(card=>{card.onclick=()=>select(card.dataset.id)});
+  };
+  const select=async id=>{
+    let data;try{data=await(await fetch(`/api/v1/repositories/${encodeURIComponent(id)}`)).json()}catch(e){return}
+    if(!detailRoot)return;
+    const r=data.repository||{};
+    detailRoot.hidden=false;
+    const depRows=(r.deployments||[]).map(d=>`<tr><td>${esc(d.device?.friendly_name||d.device?.hostname||d.device_id)}</td><td>${esc(d.local_path)}</td><td>${esc(d.branch||'—')}${d.observed_short_sha?` @ ${esc(d.observed_short_sha)}`:''}</td><td>${d.dirty?'<span class="severity-warning">dirty</span>':''}${d.ahead!=null||d.behind!=null?` <span class="muted">↑${d.ahead??'–'} ↓${d.behind??'–'}</span>`:''}</td><td>${dot(d.state)}${esc(d.state)}</td><td>${esc(d.source||'—')}</td><td>${localTime(d.last_seen_at)}</td></tr>`);
+    const facts=[['remote',r.remote_url],['default branch',r.default_branch],['technology',r.technology],['project',r.project],['owner',r.owner],['tags',(r.tags||[]).join(', ')],['desired',r.desired_commit_sha?`${r.desired_commit_sha.slice(0,7)}${r.desired_branch?` on ${r.desired_branch}`:''}`:(r.desired_branch?`branch ${r.desired_branch}`:null)],['last observed',localTime(r.last_observed_at)],['created',localTime(r.created_at)],['updated',localTime(r.updated_at)],['archived',r.archived_at?localTime(r.archived_at)+(r.archived_reason?` (${r.archived_reason})`:''):null]];
+    detailRoot.innerHTML=`<div class="device-head">${dot(r.state)}<div><h2>${esc(r.name)}</h2><small>${esc(r.lifecycle)}${r.archived?' · archived (read-only)':''}</small></div><span class="row-actions">${r.archived?`<button class="link-button" data-action="restore">Restore</button>`:`<button class="link-button" data-action="archive">Archive</button>`}</span></div>
+    ${(r.description)?`<p>${esc(r.description)}</p>`:''}
+    <dl class="details">${facts.filter(([,v])=>v).map(([k,v])=>`<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
+    ${(r.state_reasons||[]).length?`<p class="muted">${r.state_reasons.map(esc).join('; ')}</p>`:''}
+    <h3>Deployments (${(r.deployments||[]).length})</h3>${table(['Device','Path','Revision','Tree','State','Source','Last seen'],depRows)}`;
+    detailRoot.querySelectorAll('button[data-action]').forEach(btn=>btn.onclick=async()=>{
+      const response=await mutate(`/api/v1/repositories/${encodeURIComponent(r.id)}/${btn.dataset.action}`,{method:'POST'});
+      const result=await response.json().catch(()=>({}));
+      if(!response.ok){alert(result.error||'action failed');return}
+      await Promise.all([loadGrid(),select(id)]);
+    });
+  };
+  await loadGrid();
+  const match=location.hash.match(/repository=([^&]+)/);
+  if(match)await select(decodeURIComponent(match[1]));
+  startAutoRefresh(loadGrid);
+}
+return{connection,dashboard,device,alerts,events,databaseStatus,consoleStatus,integrations,audit,settings,schedules,rollouts,anomalies,correlationStatus,onboarding,topology,incidents,incidentDetail,slos,reports,projects,applications,repositories,startAutoRefresh,formatBytes:bytes,formatTemperature:temperature,formatPercent:pct,humanValue,runbookMarkdown:runbookMd,runbookGate,dashboards,glance,fleetFilterPresets}})();

@@ -38,6 +38,23 @@ other collection domains.
   material in endpoints is redacted in every API response, and every
   policy change is audited. The console shows an application card grid and
   a drill-down (application → instances → devices → services).
+- **Repository model:** every codebase, identified by its canonical remote
+  (the `git@`, `ssh://`, `https://`, and trailing-`.git` spellings of one
+  remote all normalize to the same object, so an IP or path change never
+  creates a duplicate). A *deployment* is one working tree of that
+  repository on one device, so multiple checkouts sit side by side on
+  different commits and PiNOC can answer "which devices run this repository?"
+  from its own tables with no live SSH. Each deployment records the observed
+  revision against the repository's desired one and is shown as clean, dirty,
+  drifted, stale, or unknown -- a failed collection never erases the last
+  success, it merely lets the observation age to *stale* while the last
+  concrete state is preserved in the reason. Observations arrive through a
+  background refresh that reads local sources only (device state, development
+  jobs, workspaces, agent discovery); Phase 1 is read-only toward the working
+  trees themselves, and Phase 2 deployment controls consume these records. The
+  console shows a repository card grid, a drill-down listing every deployment
+  and exact revision, and a per-project software view that groups deployments
+  by application.
 - **Operational history:** SQLite/WAL storage, configurable sampling and
   retention, graphs, storage forecasts, transition events, persistent alert
   lifecycles (active, acknowledged, muted, and resolved), outbound alert
