@@ -1970,6 +1970,186 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def applications_page():
         return render_template("applications.html")
 
+    # -- Repositories (PiNOC 2.0 Phase 1, P1-R03) ------------------------------
+    # Self-contained block, the same way the applications one above: the
+    # service owns the repository/deployment registries plus its refresh
+    # thread, which performs local reads only (device state, the
+    # agents/workspaces/development_jobs tables) -- no remote work happens
+    # in request threads and no new remote work is introduced. Phase 1 is
+    # read-only toward repositories themselves: the only writes are this
+    # registry's own tables, every one audited, and every output redacted
+    # (repository URLs may embed credentials).
+    from pinoc.repositories import RepositoryError, RepositoryService
+    app.extensions["pinoc_repositories"] = RepositoryService(
+        history.db, state=state, history=history,
+        config=(app.config.get("PINOC_CONFIG") or {}).get("repositories"),
+        audit=actions.audit if actions else None,
+        redact=redact if security is not None else None,
+    ) if history is not None else None
+    app.config["TOKEN_SCOPE_PERMISSIONS"].update({
+        "api_v1_repositories": "view", "api_v1_repositories_create": "config.write",
+        "api_v1_repository": "view", "api_v1_repository_update": "config.write",
+        "api_v1_repository_archive": "config.write", "api_v1_repository_restore": "config.write",
+        "api_v1_deployments": "view", "api_v1_deployment": "view",
+        "api_v1_deployment_update": "config.write",
+        "api_v1_project_software": "view",
+    })
+
+    def _repositories_service() -> Optional[RepositoryService]:
+        return app.extensions.get("pinoc_repositories")
+
+    def _repository_error(exc: RepositoryError):
+        if "not found" in str(exc):
+            return jsonify({"error": str(exc)}), 404
+        if ("already exists" in str(exc) or "already taken" in str(exc)
+                or "read-only" in str(exc) or "identity" in str(exc)
+                or "not found" in str(exc)):
+            return jsonify({"error": str(exc)}), 409
+        return jsonify({"error": str(exc)}), 400
+
+    @app.get("/api/v1/repositories")
+    def api_v1_repositories():
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _repositories_service()
+        if service is None:
+            return jsonify({"error": "repository registry is not available"}), 503
+        try:
+            repos = service.list(
+                include_archived=request.args.get("include_archived") == "true",
+                lifecycle=request.args.get("lifecycle"),
+                project=request.args.get("project"),
+                state=request.args.get("state"))
+        except RepositoryError as exc:
+            return _repository_error(exc)
+        return jsonify({"repositories": _redact(repos)})
+
+    @app.post("/api/v1/repositories")
+    def api_v1_repositories_create():
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _repositories_service()
+        if service is None or not service._available():
+            return jsonify({"error": "repository registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            repository = service.create(body, actor=_actor())
+        except RepositoryError as exc:
+            return _repository_error(exc)
+        return jsonify({"repository": _redact(repository)}), 201
+
+    @app.get("/api/v1/repositories/<repo_id>")
+    def api_v1_repository(repo_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _repositories_service()
+        if service is None:
+            return jsonify({"error": "repository registry is not available"}), 503
+        repository = service.get(repo_id)
+        if repository is None:
+            return jsonify({"error": "repository not found"}), 404
+        return jsonify({"repository": _redact(repository)})
+
+    @app.patch("/api/v1/repositories/<repo_id>")
+    @app.put("/api/v1/repositories/<repo_id>")
+    def api_v1_repository_update(repo_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _repositories_service()
+        if service is None:
+            return jsonify({"error": "repository registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            repository = service.update(repo_id, body, actor=_actor())
+        except RepositoryError as exc:
+            return _repository_error(exc)
+        return jsonify({"repository": _redact(repository)})
+
+    def _repository_lifecycle_action(repo_id, action):
+        service = _repositories_service()
+        if service is None:
+            return jsonify({"error": "repository registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            repository = (service.archive(repo_id, actor=_actor(),
+                                           reason=str(body.get("reason") or "")) if action == "archive"
+                           else service.restore(repo_id, actor=_actor()))
+        except RepositoryError as exc:
+            return _repository_error(exc)
+        return jsonify({"repository": _redact(repository)})
+
+    @app.post("/api/v1/repositories/<repo_id>/archive")
+    def api_v1_repository_archive(repo_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        return _repository_lifecycle_action(repo_id, "archive")
+
+    @app.post("/api/v1/repositories/<repo_id>/restore")
+    def api_v1_repository_restore(repo_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        return _repository_lifecycle_action(repo_id, "restore")
+
+    @app.get("/api/v1/deployments")
+    def api_v1_deployments():
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _repositories_service()
+        if service is None:
+            return jsonify({"error": "repository registry is not available"}), 503
+        try:
+            deployments = service.deployments(
+                repository=request.args.get("repository"),
+                device=request.args.get("device"),
+                project=request.args.get("project"),
+                application=request.args.get("application"),
+                state=request.args.get("state"))
+        except RepositoryError as exc:
+            return _repository_error(exc)
+        return jsonify({"deployments": _redact(deployments)})
+
+    @app.get("/api/v1/deployments/<deployment_id>")
+    def api_v1_deployment(deployment_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _repositories_service()
+        if service is None:
+            return jsonify({"error": "repository registry is not available"}), 503
+        deployment = service.deployment(deployment_id)
+        if deployment is None:
+            return jsonify({"error": "deployment not found"}), 404
+        return jsonify({"deployment": _redact(deployment)})
+
+    @app.patch("/api/v1/deployments/<deployment_id>")
+    def api_v1_deployment_update(deployment_id):
+        if security and not security.allowed(g.identity, "config.write"):
+            return jsonify({"error": "permission denied"}), 403
+        service = _repositories_service()
+        if service is None:
+            return jsonify({"error": "repository registry is not available"}), 503
+        body = request.get_json(silent=True) or {}
+        try:
+            deployment = service.update_deployment(deployment_id, body, actor=_actor())
+        except RepositoryError as exc:
+            return _repository_error(exc)
+        return jsonify({"deployment": _redact(deployment)})
+
+    @app.get("/api/v1/projects/<project_id>/software")
+    def api_v1_project_software(project_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _repositories_service()
+        if service is None:
+            return jsonify({"error": "repository registry is not available"}), 503
+        try:
+            return jsonify(_redact(service.project_software(project_id)))
+        except RepositoryError as exc:
+            return _repository_error(exc)
+
+    @app.get("/repositories")
+    def repositories_page():
+        return render_template("repositories.html")
+
     return app
 
 

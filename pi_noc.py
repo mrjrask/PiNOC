@@ -1477,7 +1477,8 @@ def main() -> None:
     history = HistoryManager(Database(database_path), history_config, state, notifier=notifications,
                               anomalies=CONFIG.get("anomaly_detection"), correlation=CONFIG.get("alert_correlation"),
                               network_topology=CONFIG.get("network_topology"), slos=CONFIG.get("slos"),
-                              applications=CONFIG.get("applications"))
+                              applications=CONFIG.get("applications"),
+                              repositories=CONFIG.get("repositories"))
     state.add_publish_hook(history.submit)
     # Backfilled after both are constructed: NotificationService is built
     # before the history Database exists, but incident timelines (see
@@ -1584,6 +1585,15 @@ def main() -> None:
     if applications_service is not None:
         applications_service.start()
 
+    # Repositories (PiNOC 2.0 Phase 1). create_app already built
+    # pinoc.repositories.RepositoryService (a self-contained block reading
+    # CONFIG["repositories"], the same way the services above are built);
+    # its refresh thread performs local reads only -- it never does remote
+    # work. This only starts/stops that loop.
+    repositories_service = extensions.get("pinoc_repositories")
+    if repositories_service is not None:
+        repositories_service.start()
+
     previous_signal_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
     }
@@ -1618,6 +1628,8 @@ def main() -> None:
                 reports_service.stop()
             if applications_service is not None:
                 applications_service.stop()
+            if repositories_service is not None:
+                repositories_service.stop()
             notifications.stop()
             history.stop()
         finally:
