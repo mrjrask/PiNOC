@@ -755,6 +755,7 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     @app.get("/adsb")
     @app.get("/displays")
     @app.get("/software")
+    @app.get("/venvs")
     @app.get("/network-inventory")
     def integration_page(): return render_template("integrations.html", endpoint=request.path)
 
@@ -2267,6 +2268,108 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
                 yield buffer.getvalue()
         return Response(generate(), mimetype="text/csv",
                         headers={"Content-Disposition": 'attachment; filename="pinoc-software.csv"'})
+
+    # ------------------------------------------------------------------ venvs
+    # Python virtual-environment inventory (PiNOC 2.0 Phase 1). The service
+    # owns the durable venvs/venv_packages tables; what each device *scans*
+    # is owned by the service too (the fleet spec hook below: discovery
+    # roots plus every known venv path, so a deleted environment reports
+    # "missing" instead of vanishing). Phase 1 is read-only toward the
+    # environments: the one POST re-requests exactly this inventory (it
+    # rides the normal fleet poll; the deep pip check runs only because the
+    # refresh asked for it) -- it never modifies a venv, and every output
+    # passes through the security layer's recursive redact().
+    from pinoc.venvs import VenvError, VenvsService
+    app.extensions["pinoc_venvs"] = VenvsService(
+        history.db, state=state, history=history,
+        config=(app.config.get("PINOC_CONFIG") or {}).get("venvs"),
+        audit=actions.audit if actions else None,
+        redact=redact if security is not None else None,
+    ) if history is not None else None
+    venvs_service = app.extensions["pinoc_venvs"]
+    if venvs_service is not None and coordinator is not None \
+            and getattr(coordinator, "fleet_collector", None) is not None:
+        coordinator.fleet_collector.venv_specs = venvs_service.device_venv_roots
+    app.config["TOKEN_SCOPE_PERMISSIONS"].update({
+        "api_v1_venvs": "view",
+        "api_v1_device_venvs": "view",
+        "api_v1_venv_packages": "view",
+        "api_v1_venv_attention": "view",
+        "api_v1_venv_refresh": "actions.execute",
+    })
+
+    def _venvs_service() -> Optional[VenvsService]:
+        return app.extensions.get("pinoc_venvs")
+
+    def _venv_error(exc: VenvError):
+        if "not found" in str(exc):
+            return jsonify({"error": str(exc)}), 404
+        return jsonify({"error": str(exc)}), 400
+
+    @app.get("/api/v1/venvs")
+    def api_v1_venvs():
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _venvs_service()
+        if service is None:
+            return jsonify({"error": "venv inventory is not available"}), 503
+        try:
+            venvs = service.list(
+                device=request.args.get("device"),
+                state=request.args.get("state"),
+                project=request.args.get("project"),
+                repo=request.args.get("repo"),
+                app=request.args.get("app"))
+        except VenvError as exc:
+            return _venv_error(exc)
+        return jsonify({"venvs": _redact(venvs)})
+
+    @app.get("/api/v1/venvs/attention")
+    def api_v1_venv_attention():
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _venvs_service()
+        if service is None:
+            return jsonify({"error": "venv inventory is not available"}), 503
+        limit = max(1, min(500, request.args.get("limit", 200, type=int)))
+        return jsonify({"venvs": _redact(service.attention(limit=limit))})
+
+    @app.get("/api/v1/devices/<device_id>/venvs")
+    def api_v1_device_venvs(device_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _venvs_service()
+        if service is None:
+            return jsonify({"error": "venv inventory is not available"}), 503
+        posture = service.device_venvs(device_id)
+        if posture is None:
+            return jsonify({"error": "device not found"}), 404
+        return jsonify(_redact(posture))
+
+    @app.get("/api/v1/venvs/<int:venv_id>/packages")
+    def api_v1_venv_packages(venv_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _venvs_service()
+        if service is None:
+            return jsonify({"error": "venv inventory is not available"}), 503
+        snapshot = service.packages(venv_id, limit=request.args.get("limit", 1000, type=int))
+        if snapshot is None:
+            return jsonify({"error": "venv not found"}), 404
+        return jsonify(_redact(snapshot))
+
+    @app.post("/api/v1/venvs/<int:venv_id>/refresh")
+    def api_v1_venv_refresh(venv_id):
+        # Phase 1's only write: re-request the inventory. It enqueues the
+        # venv.refresh action, which forces the fleet's venv scan on the
+        # device's next poll (plus the deep pip check for this environment).
+        service = _venvs_service()
+        if service is None:
+            return jsonify({"error": "venv inventory is not available"}), 503
+        venv = service.venv(venv_id)
+        if venv is None:
+            return jsonify({"error": "venv not found"}), 404
+        return submit_action(venv["device_id"], "venv.refresh", venv["path"])
 
     return app
 

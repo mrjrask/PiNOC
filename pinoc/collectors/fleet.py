@@ -12,7 +12,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from pinoc.device_config import DeviceConfig, MAX_DRIFT_FILES
 from pinoc.health import evaluate
@@ -32,9 +32,12 @@ SCRIPT = r'''set +e
 # `apt-get --just-print upgrade` simulates a dependency resolution over the
 # whole local apt cache and must not run on every fleet poll. "__RUNTIMES__"
 # (software inventory runtimes: python3/node/npm/git versions) rides the same
-# due-gating idiom on its own, still lower-frequency, cadence.
-jlogs_lines=""; jlogs_units=""; apt_due=0; authcheck_due=0; drift_files=""; sshdcheck_due=0; apps_due=0; apps_specs=""; runtimes_due=0
-for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; __apt__) apt_due=1;; __authcheck__) authcheck_due=1;; __driftfiles__:*) drift_files=${arg#__driftfiles__:};; __sshdcheck__) sshdcheck_due=1;; __APPS__:*) apps_due=1; apps_specs=${arg#__APPS__:};; __RUNTIMES__) runtimes_due=1;; esac; done
+# due-gating idiom on its own, still lower-frequency, cadence. "__VENVSCAN__"
+# (python venv inventory: paths, Python versions, package listings) rides it
+# on its own low-frequency cadence too; "__VENVPKGS__" is passed only when a
+# venv refresh was explicitly requested.
+jlogs_lines=""; jlogs_units=""; apt_due=0; authcheck_due=0; drift_files=""; sshdcheck_due=0; apps_due=0; apps_specs=""; runtimes_due=0; venvs_due=0; venv_roots=""; venv_pkgs=0; venv_pkg_paths=""
+for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; __apt__) apt_due=1;; __authcheck__) authcheck_due=1;; __driftfiles__:*) drift_files=${arg#__driftfiles__:};; __sshdcheck__) sshdcheck_due=1;; __APPS__:*) apps_due=1; apps_specs=${arg#__APPS__:};; __RUNTIMES__) runtimes_due=1;; __VENVSCAN__:*) venvs_due=1; venv_roots=${arg#__VENVSCAN__:};; __VENVPKGS__:*) venv_pkgs=1; venv_pkg_paths=${arg#__VENVPKGS__:};; esac; done
 echo __OS__; cat /etc/os-release 2>/dev/null; echo __UNAME__; uname -srm
 echo __MODEL__; tr -d '\000' </proc/device-tree/model 2>/dev/null; echo
 echo __UPTIME__; cat /proc/uptime; echo __LOAD__; cat /proc/loadavg
@@ -123,6 +126,91 @@ if [ "$runtimes_due" = "1" ]; then
   v=$(node --version 2>/dev/null | head -1); printf 'node|%s\n' "${v:-unknown}"
   v=$(npm --version 2>/dev/null | head -1); printf 'npm|%s\n' "${v:-unknown}"
   v=$(git --version 2>/dev/null | head -1 | sed 's/^git version //'); printf 'git|%s\n' "${v:-unknown}"
+fi
+echo __VENVSCAN__
+# Python venv inventory (PiNOC 2.0 Phase 1): passed on the low-frequency
+# cycle the venvs service selects (or when a venv refresh was requested for
+# this device). One "V|<path>|<python>|<package count>|<flags>" line per
+# environment, then one "P|<path>|<dist-info basename>" line per installed
+# package (bounded). Roots come from the venvs service: discovery roots
+# (configured project roots, repository checkout trees) plus every venv path
+# it already knows, marked "!" so a deleted path reports "missing" instead of
+# simply stopping to appear. Filesystem-only by design: pyvenv.cfg for the
+# Python version, the dist-info listings for the package inventory. Nothing
+# here executes an activation script or any venv code (spec: "Never execute
+# activation scripts as root"); the deep pip --outdated check is the
+# separate __VENVPKGS__ section below, run only on explicit refresh.
+if [ "$venvs_due" = "1" ] && [ -n "$venv_roots" ]; then
+  scan_venv() {
+    v="$1"
+    if [ ! -d "$v" ]; then
+      printf 'V|%s|unknown|0|missing\n' "$v"; return
+    fi
+    if [ ! -r "$v" ] || [ ! -x "$v" ]; then
+      printf 'V|%s|unknown|0|inaccessible\n' "$v"; return
+    fi
+    ver="unknown"
+    [ -r "$v/pyvenv.cfg" ] && ver=$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' "$v/pyvenv.cfg" 2>/dev/null | head -1)
+    [ -n "$ver" ] || ver="unknown"
+    if [ ! -x "$v/bin/python" ] && [ ! -x "$v/bin/python3" ]; then
+      flags="broken"
+    elif [ ! -r "$v/pyvenv.cfg" ]; then
+      flags="broken"   # the cfg that defines the venv is gone
+    else
+      flags="ok"
+      home=$(sed -n 's/^home[[:space:]]*=[[:space:]]*//p' "$v/pyvenv.cfg" 2>/dev/null | head -1)
+      if [ -n "$home" ] && [ ! -x "$home/python3" ] && [ ! -x "$home/python" ]; then
+        flags="broken"   # the base interpreter the cfg points at is gone (moved/removed)
+      fi
+    fi
+    count=$(find "$v/lib" -maxdepth 3 -type d -name '*.dist-info' 2>/dev/null | head -2000 | wc -l | tr -d ' ')
+    printf 'V|%s|%s|%s|%s\n' "$v" "$ver" "$count" "$flags"
+    if [ "$flags" != "inaccessible" ]; then
+      find "$v/lib" -maxdepth 3 -type d -name '*.dist-info' 2>/dev/null | head -2000 | while read -r d; do
+        printf 'P|%s|%s\n' "$v" "${d##*/}"
+      done
+    fi
+  }
+  printf '%s' "$venv_roots" | tr ',' '\n' | while read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      !*) v="${entry#!}"; [ -n "$v" ] && scan_venv "$v" ;;
+      *)  [ -d "$entry" ] || continue
+          find "$entry" -maxdepth 4 -type f -name pyvenv.cfg 2>/dev/null | head -100 | while read -r cfg; do
+            scan_venv "$(dirname "$cfg")"
+          done ;;
+    esac
+  done
+fi
+echo __VENVPKGS__
+# Deep package refresh (PiNOC 2.0 Phase 1): passed only when a venv refresh
+# was explicitly requested for the named environments. Runs each venv's own
+# interpreter with `pip list --outdated` -- read-only: no activation script
+# is ever sourced, nothing is installed, and pip's own configuration is never
+# read or echoed (spec: "No secrets from pip configuration"); the JSON is
+# output-capped and parsed leniently on the host. Best-effort: no pip, no
+# network, or a slow PyPI simply means no outdated flags this round.
+if [ "$venv_pkgs" = "1" ] && [ -n "$venv_pkg_paths" ]; then
+  tmp_pkgs=$(mktemp 2>/dev/null) || tmp_pkgs="/tmp/pinoc-venv-pkgs.$$"
+  printf '%s' "$venv_pkg_paths" | tr ',' '\n' | while read -r v; do
+    [ -n "$v" ] || continue
+    py="$v/bin/python"; [ -x "$py" ] || py="$v/bin/python3"; [ -x "$py" ] || continue
+    printf 'O|%s|\n' "$v"
+    # Through the temp file (not a pipe) so the *pip* exit status survives:
+    # a pipeline's status would be head's, and a failed pip (no network, no
+    # pip, timeout) must read as "no verdict this round", never as "all
+    # current". The "complete" bit says the cap did not truncate the output
+    # -- a truncated listing is reported but never treated as a full verdict.
+    timeout 60 "$py" -m pip list --outdated --format=json --disable-pip-version-check --no-input >"$tmp_pkgs" 2>/dev/null
+    rc=$?
+    head -c 262144 "$tmp_pkgs" 2>/dev/null
+    echo
+    full=0
+    sz=$(wc -c < "$tmp_pkgs" 2>/dev/null | tr -d ' ')
+    [ -n "$sz" ] && [ "$sz" -le 262144 ] 2>/dev/null && [ "$rc" = "0" ] && full=1
+    printf 'Q|%s|%s|%s\n' "$v" "$rc" "$full"
+  done
+  rm -f "$tmp_pkgs"
 fi
 echo __DRIFTFILES__
 if [ -n "$drift_files" ]; then
@@ -450,6 +538,168 @@ def parse_runtimes(text: str, max_entries: int = 50) -> List[Dict[str, Any]]:
     return result
 
 
+def parse_dist_info(basename: str) -> Tuple[str, Optional[str]]:
+    """Split a ``site-packages`` dist-info directory basename into
+    (name, version): ``requests-2.31.0.dist-info`` ->
+    ("requests", "2.31.0"). The version is everything after the *last*
+    hyphen when it begins with a digit (names may themselves contain
+    hyphens, versions always start with one); a basename without a
+    parseable version yields version None rather than a guess."""
+    base = basename.strip()
+    if base.endswith(".dist-info"):
+        base = base[: -len(".dist-info")]
+    name, sep, version = base.rpartition("-")
+    if not sep:
+        return base, None
+    if version[:1].isdigit():
+        return name, version
+    return base, None
+
+
+def parse_venvs(text: str, max_venvs: int = 100, max_packages: int = 2000) -> List[Dict[str, Any]]:
+    """Parse the bounded __VENVSCAN__ section into per-venv entries.
+
+    One ``V|<path>|<python>|<count>|<flags>`` line per environment, then
+    ``P|<path>|<dist-info basename>`` lines with the package listing. The
+    same venv can be reported twice in one scan (discovered under a root
+    *and* listed explicitly as ``!path``); it appears once, with duplicate
+    package rows dropped. Malformed or over-long lines are skipped the way
+    every other fleet parser does them -- a bad line must never break the
+    whole poll.
+    """
+    venvs: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for row in text.splitlines():
+        parts = [part.strip() for part in row.split("|")]
+        if not parts or parts[0] not in ("V", "P") or len(parts) < 3:
+            continue
+        if parts[0] == "V":
+            if len(parts) < 5 or not parts[1]:
+                continue
+            path = parts[1][:400]
+            entry = venvs.get(path)
+            if entry is not None:
+                continue  # already reported (discovered + explicit): first wins
+            if len(venvs) >= int(max_venvs):
+                continue
+            try:
+                count = max(0, int(parts[3]))
+            except ValueError:
+                count = None
+            venvs[path] = {"path": path, "python": parts[2][:64] or "unknown",
+                           "package_count": count, "flags": parts[4][:32],
+                           "packages": [], "_seen": set()}
+            order.append(path)
+        else:
+            if not parts[1]:
+                continue
+            entry = venvs.get(parts[1][:400])
+            if entry is None or len(entry["packages"]) >= int(max_packages):
+                continue
+            name, version = parse_dist_info(parts[2][:200])
+            if not name or name in entry["_seen"]:
+                continue
+            entry["_seen"].add(name)
+            entry["packages"].append({"name": name, "version": version})
+    for path in order:
+        venvs[path].pop("_seen", None)
+    return [venvs[path] for path in order]
+
+
+def parse_venv_packages(text: str, max_entries: int = 2000) -> Dict[str, Dict[str, Any]]:
+    """Parse the __VENVPKGS__ section (the deep, on-demand pip check).
+
+    The script emits one ``O|<path>|`` marker per venv, then that venv's
+    `pip list --outdated --format=json` output (capped on the device, and
+    therefore possibly truncated mid-object), then a ``Q|<path>|<rc>|<full>``
+    line with pip's exit status and whether the cap truncated the output.
+    Parsing is deliberately lenient -- pull the (name, version,
+    latest_version) triples out of the pretty-printed JSON with a tolerant
+    scan instead of requiring it to round-trip through json.loads, so a
+    truncated final object still yields everything before it. The result
+    maps venv path -> ``{"ok", "complete", "packages"}`` where ``ok`` is
+    pip exiting 0 and ``complete`` is ok and untruncated: only then is the
+    verdict *definitive* for every package in the venv (a failed pip, or a
+    truncated listing, is never mistaken for "all current").
+    """
+    import re
+    result: Dict[str, Dict[str, Any]] = {}
+    current: Optional[str] = None
+    names: List[str] = []
+    versions: List[str] = []
+    latest: List[str] = []
+    cap = int(max_entries)
+
+    def flush(ok: bool, complete: bool) -> None:
+        nonlocal current, names, versions, latest
+        if current is None:
+            return
+        triples = _zip_pkg_triples(names[:cap], versions[:cap], latest[:cap])
+        result[current] = {"ok": ok, "complete": complete,
+                           "packages": [_venv_pkg(name, version, old)
+                                        for name, version, old in triples]}
+        current, names, versions, latest = None, [], [], []
+
+    for row in text.splitlines():
+        parts = row.split("|", 2)
+        if len(parts) >= 2 and parts[0] == "O":
+            flush(False, False)
+            current = parts[1].strip()[:400] or None
+        elif len(parts) >= 2 and parts[0] == "Q" and current is not None:
+            bits = parts[2].split("|") if len(parts) > 2 else []
+            ok = bool(bits) and bits[0].strip() == "0"
+            flush(ok, ok and len(bits) > 1 and bits[1].strip() == "1")
+        elif current is not None:
+            names.extend(re.findall(r'"name"\s*:\s*"([^"]+)"', row))
+            versions.extend(re.findall(r'"version"\s*:\s*"([^"]+)"', row))
+            latest.extend(re.findall(r'"latest_version"\s*:\s*"([^"]+)"', row))
+    flush(False, False)
+    return result
+
+
+def _venv_pkg(name: str, version: Optional[str], latest: Optional[str]) -> Dict[str, Any]:
+    return {"name": name[:200], "version": version[:64] if version else None,
+            "latest_version": latest[:64] if latest else None, "outdated": True}
+
+
+def _zip_pkg_triples(names: List[str], versions: List[str], latest: List[str]) -> List[Tuple[str, Optional[str], Optional[str]]]:
+    count = min(len(names), len(versions))
+    return [(names[i], versions[i], latest[i] if i < len(latest) else None)
+            for i in range(count)]
+
+
+def _venv_entries(data: Dict[str, str]) -> List[Dict[str, Any]]:
+    """The __VENVSCAN__ section (filesystem facts) merged with the
+    __VENVPKGS__ section (pip-resolved outdated flags) into the per-venv
+    entries the DeviceState cache carries.
+
+    When the deep check ran *complete* (pip ok, output untruncated) every
+    package in the filesystem listing gets a definite verdict -- the output
+    of `pip list --outdated` is the full set of outdated packages, so one
+    not listed is current. When the check ran but failed or truncated,
+    only the packages pip actually listed are flagged; the rest keep no
+    "outdated" key at all, and a venv with no check this round keeps none
+    either -- the inventory never invents a verdict (the venvs service
+    carries the last known flag forward instead).
+    """
+    entries = parse_venvs(data.get("VENVSCAN", ""))
+    verdicts = parse_venv_packages(data.get("VENVPKGS", ""))
+    for entry in entries:
+        verdict = verdicts.get(entry["path"])
+        if verdict is None:
+            continue
+        flagged = {package["name"]: package for package in verdict["packages"]}
+        for package in entry["packages"]:
+            match = flagged.get(package["name"])
+            if verdict.get("complete"):
+                package["outdated"] = match is not None
+            elif match is not None:
+                package["outdated"] = True
+            if match is not None:
+                package["latest_version"] = match["latest_version"]
+    return entries
+
+
 def parse_app_checks(text: str, max_entries: int = 50) -> List[Dict[str, Any]]:
     """Parse the bounded __APPS__ section into per-implementation state.
 
@@ -699,7 +949,8 @@ class FleetCollector:
                  listener_change_duration_seconds: float = 60.0,
                  drift_check_seconds: float = 300.0,
                  apps_check_seconds: float = 300.0,
-                 runtimes_check_seconds: float = 3600.0) -> None:
+                 runtimes_check_seconds: float = 3600.0,
+                 venvs_check_seconds: float = 21600.0) -> None:
         self.devices=devices; self.max_workers=max(1,min(int(max_workers),16)); self.timeout=float(timeout)
         self.password=password; self.runner=runner
         # Per-device password override (device_id -> password): compromising
@@ -758,6 +1009,24 @@ class FleetCollector:
         # error that would fail the whole poll.
         self.runtimes_check_seconds=max(60.0,float(runtimes_check_seconds))
         self._last_runtimes_check: Dict[str, float] = {}
+        # Python venv discovery (PiNOC 2.0 Phase 1): same due-gating idiom
+        # as runtimes above, on its own (default 6h) cadence. *Which*
+        # paths each device scans is owned by the venvs service
+        # (pinoc.venvs): discovery roots (configured project roots, the
+        # repositories model's checkout trees) plus every venv path it
+        # already knows -- the last part is what makes a *deleted* venv
+        # report "missing" instead of simply stopping to appear. Like
+        # app_specs, the map is replaced wholesale on the collect() thread.
+        self.venvs_check_seconds=max(60.0,float(venvs_check_seconds))
+        self._last_venvs_check: Dict[str, float] = {}
+        self.venv_roots: Dict[str, List[str]] = {}
+        self.venv_specs: Optional[Callable[[], Dict[str, List[str]]]] = None
+        # Explicit venv refreshes (the venv.refresh action): a device with a
+        # pending request gets its venv scan forced on the next poll, with
+        # the named environments also getting the deep (network-using) pip
+        # check. Popped in collect_device() on a *successful* collection
+        # only -- a failed poll keeps the request queued for the next cycle.
+        self._forced_venvs: Dict[str, Set[str]] = {}
         # Security-surface monitoring (auth failures, listening ports): each
         # threshold/hysteresis pair follows the exact same open-until-you-
         # drop-back-down shape history.HistoryManager._alerts() already uses
@@ -778,7 +1047,9 @@ class FleetCollector:
 
     def _command(self, device: DeviceConfig, jlogs_due: bool = False, apt_due: bool = False,
                  drift_due: bool = False, apps: Optional[List[str]] = None,
-                 runtimes_due: bool = False) -> List[str]:
+                 runtimes_due: bool = False,
+                 venvs: Optional[List[str]] = None,
+                 venv_pkg_paths: Optional[List[str]] = None) -> List[str]:
         # config_drift.expected_units ride along with monitored_services in
         # the same single `systemctl show` call (see __SERVICES__ below,
         # which now also asks for UnitFileState) -- cheap enough to check on
@@ -824,6 +1095,12 @@ class FleetCollector:
             args.append(f"__APPS__:{','.join(str(spec) for spec in apps[:50])}")
         if runtimes_due:
             args.append("__RUNTIMES__")
+        if venvs:
+            # Discovery roots plus every known venv path ("!"-marked), the
+            # venvs service's due/forced selection for this device.
+            args.append(f"__VENVSCAN__:{','.join(venvs)}")
+        if venv_pkg_paths:
+            args.append(f"__VENVPKGS__:{','.join(venv_pkg_paths)}")
         if device.collection_method == "local": return ["sh", "-s", "--", *args]
         ssh=["ssh","-p",str(device.ssh_port),"-o",f"ConnectTimeout={max(1,int(self.timeout))}","-o","ServerAliveInterval=3"]
         if self._password_for(device): return ["sshpass","-e",*ssh,"-o","BatchMode=no",f"{device.ssh_user}@{device.address}","sh","-s","--",*args]
@@ -849,11 +1126,28 @@ class FleetCollector:
         app_specs=self.app_specs.get(device.id) if apps_due else None
         last_runtimes=self._last_runtimes_check.get(device.id)
         runtimes_due=last_runtimes is None or time.monotonic()-last_runtimes>=self.runtimes_check_seconds
+        last_venvs=self._last_venvs_check.get(device.id)
+        venvs_due=last_venvs is None or time.monotonic()-last_venvs>=self.venvs_check_seconds
+        # An explicit venv refresh (the venv.refresh action) forces the scan
+        # on the next poll even when it is not due yet, and names the
+        # environments to run the deep pip check on. It is popped only on a
+        # *successful* collection below -- a failed poll retries it.
+        forced_venvs=sorted(self._forced_venvs.get(device.id) or ())
+        if forced_venvs: venvs_due=True
+        venv_roots=[entry for entry in self.venv_roots.get(device.id) or () if entry][:40] if venvs_due else []
+        if forced_venvs and not venv_roots: venv_roots=["!"+path for path in forced_venvs[:5]]
+        venvs_ran=bool(venv_roots)
         try:
             env={**os.environ,"LC_ALL":"C"}
             device_password=self._password_for(device)
             if device_password: env["SSHPASS"]=device_password
-            proc=self.runner(self._command(device,jlogs_due,apt_due,drift_due,apps=app_specs,runtimes_due=runtimes_due),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
+            # The deep pip check is network-bound (it resolves latest
+            # versions against PyPI); a poll carrying one gets extra room
+            # inside the runner timeout instead of being cut off mid-scan.
+            proc=self.runner(self._command(device,jlogs_due,apt_due,drift_due,apps=app_specs,runtimes_due=runtimes_due,
+                                            venvs=venv_roots,venv_pkg_paths=forced_venvs or None),
+                             input=SCRIPT,text=True,capture_output=True,
+                             timeout=self.timeout+(90.0 if forced_venvs else 0.0),env=env,check=False)
             if proc.returncode: raise RuntimeError((proc.stderr or f"command exited {proc.returncode}").strip()[:240])
             self._last_jlogs[device.id]=time.monotonic()
             # Only reset the apt cadence clock when a check actually ran
@@ -865,6 +1159,9 @@ class FleetCollector:
             if drift_due: self._last_drift_check[device.id]=time.monotonic()
             if apps_due: self._last_apps_check[device.id]=time.monotonic()
             if runtimes_due: self._last_runtimes_check[device.id]=time.monotonic()
+            if venvs_ran:
+                self._last_venvs_check[device.id]=time.monotonic()
+                self._forced_venvs.pop(device.id, None)
             data=sections(proc.stdout); cpu,counter=parse_cpu(data,self.previous_cpu.get(device.id)); self.previous_cpu[device.id]=counter
             os_values={}
             for row in data.get("OS","").splitlines():
@@ -910,6 +1207,14 @@ class FleetCollector:
                  # via its freshness floor instead of flapping to
                  # "unknown" on every non-due poll.
                  "runtimes":parse_runtimes(data.get("RUNTIMES","")) if runtimes_due else (list(old.runtimes) if old else []),
+                 # Not due this cycle -- keep the last real scan (the
+                 # jlogs/packages idiom) so the venvs service ages it via
+                 # its freshness floor instead of flapping; venv_scan_at is
+                 # the scan's own clock, which the service uses to tell a
+                 # *deleted* venv (missing, on a fresh scan) from a failed
+                 # poll (stale, on a stale scan).
+                 "venvs":_venv_entries(data) if venvs_ran else (list(old.venvs) if old else []),
+                 "venv_scan_at":now if venvs_ran else (old.venv_scan_at if old else None),
                  "collector_status":{"system":{"status":"ok"},"storage":{"status":"ok"},
                                      "media_errors":{"status":"ok" if io_errors_available else "unavailable",
                                                      "error":None if io_errors_available else "kernel logs are not readable"},
@@ -1130,6 +1435,19 @@ class FleetCollector:
                                 for device_id, specs in dict(self.application_specs()).items() if specs}
             except Exception as exc:
                 LOG.warning("application spec refresh failed; keeping last good specs: %s",exc)
+        if self.venv_specs is not None:
+            # The venvs service (pinoc.venvs) owns *which* paths each device
+            # should scan (discovery roots plus known venv paths) -- same
+            # once-per-cycle wholesale-replace contract as above.
+            try:
+                self.venv_roots={str(device_id):[str(entry) for entry in entries][:40]
+                                 for device_id, entries in dict(self.venv_specs()).items() if entries}
+            except Exception as exc:
+                LOG.warning("venv spec refresh failed; keeping last good specs: %s",exc)
+        known_ids={device.id for device in self.devices}
+        for device_id in list(self._forced_venvs):
+            if device_id not in known_ids:
+                del self._forced_venvs[device_id]
         with ThreadPoolExecutor(max_workers=self.max_workers,thread_name_prefix="fleet-device") as pool:
             futures={pool.submit(self.collect_device,d):d for d in self.devices}
             results=[]
@@ -1149,6 +1467,22 @@ class FleetCollector:
                         device,self.snapshots.get(device.id),
                         datetime.now(timezone.utc).isoformat(),exc))
             return results
+
+    def request_venv_refresh(self, device_id: str, paths: List[str]) -> None:
+        """Queue an explicit venv refresh (the venv.refresh action): the
+        next collection of this device runs the venv scan forced, even when
+        it is not due yet, plus the deep pip check for the named
+        environments. The refresh rides the normal fleet poll -- it never
+        opens a second transport channel to the device. A path-less request
+        is a no-op (there is nothing to deep-check): it still wakes the
+        fleet cycle, and it deliberately leaves no pending entry behind, so
+        an empty set can never linger and re-force scans on later polls."""
+        pending = self._forced_venvs.setdefault(device_id, set())
+        for path in [str(path) for path in paths[:5]]:
+            if path:
+                pending.add(path[:400])
+        if not pending:
+            self._forced_venvs.pop(device_id, None)
 
 
 def parse_network(data: Dict[str,str]) -> Dict[str,Any]:

@@ -46,6 +46,17 @@ class DeviceState:
     # "unknown" rather than an error). Feeds the fleet software inventory's
     # "runtime" components (PiNOC 2.0 Phase 1, P1-R04).
     runtimes: List[Dict[str, Any]] = field(default_factory=list)
+    # Discovered Python virtual environments from the fleet's due-gated
+    # __VENVSCAN__ section (see pinoc/collectors/fleet.py): one entry per
+    # venv -- {path, python, packages: [{name, version, outdated,
+    # latest_version}], flags ("ok"/"broken"/"inaccessible"/"missing")}.
+    # Feeds pinoc.venvs.VenvsService (PiNOC 2.0 Phase 1, P1-R05).
+    venvs: List[Dict[str, Any]] = field(default_factory=list)
+    # When the device's venv scan last actually ran (the scan's own clock,
+    # not the device's collection clock): the venvs service needs this to
+    # tell "the scan ran and this venv vanished" (missing) from "the
+    # collection failed, so nothing was re-scanned" (stale).
+    venv_scan_at: Optional[str] = None
     applications: Dict[str, Any] = field(default_factory=dict)
     integrations: Dict[str, Any] = field(default_factory=dict)
     alerts: List[Dict[str, Any]] = field(default_factory=list)

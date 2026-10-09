@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -187,6 +187,25 @@ CREATE INDEX deployment_events_recorded ON deployment_events(recorded_at);""",
 CREATE INDEX software_components_device ON software_components(device_id);
 CREATE INDEX software_components_name ON software_components(name);
 CREATE INDEX software_components_state ON software_components(state);""",
+# Python virtual-environment inventory (PiNOC 2.0 Phase 1, see pinoc/venvs.py):
+# one durable row per (device, venv path) -- the environment's Python version,
+# package count, repo/app/project associations learned from the repositories
+# and applications models, and its freshness-driven state
+# (healthy / broken / inaccessible / missing / stale). A deleted environment
+# stays visible as *missing* instead of vanishing; a failed scan never erases
+# the last known facts, it only lets the row age to *stale*. Point-in-time
+# package snapshots live in venv_packages (one row per package per scan,
+# pruned by history maintenance on their own retention) so the packages
+# endpoint shows a timestamped inventory, plus pip-resolved outdated flags
+# when a deep (on-demand, network-using) refresh has run.
+"""CREATE TABLE venvs(venv_id INTEGER PRIMARY KEY,device_id TEXT NOT NULL,path TEXT NOT NULL,repo_slug TEXT,app_slug TEXT,project_slug TEXT,python_version TEXT,package_count INTEGER,outdated_count INTEGER,state TEXT NOT NULL DEFAULT 'unknown',state_reasons_json TEXT NOT NULL DEFAULT '[]',source TEXT NOT NULL,confidence REAL NOT NULL DEFAULT 1.0,scanned_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(device_id,path));
+CREATE INDEX venvs_device ON venvs(device_id);
+CREATE INDEX venvs_state ON venvs(state);
+CREATE INDEX venvs_repo ON venvs(repo_slug);
+CREATE INDEX venvs_project ON venvs(project_slug);
+CREATE TABLE venv_packages(id INTEGER PRIMARY KEY,venv_id INTEGER NOT NULL,device_id TEXT NOT NULL,name TEXT NOT NULL,version TEXT,outdated INTEGER,latest_version TEXT,scanned_at TEXT NOT NULL);
+CREATE INDEX venv_packages_venv ON venv_packages(venv_id,scanned_at);
+CREATE INDEX venv_packages_scanned ON venv_packages(scanned_at);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()
@@ -279,6 +298,16 @@ class Database:
     def execute(self, sql: str, params: Iterable[Any]=()) -> int:
         with self._open() as con:
             cur=con.execute(sql,tuple(params)); self.last_write=utcnow(); self.available=True; return int(cur.lastrowid or 0)
+
+    def executemany(self, sql: str, params: Iterable[Iterable[Any]]) -> None:
+        # One transaction for the whole batch (a package snapshot replace
+        # is a bulk insert); rows() silently swallows read errors, and this
+        # swallows write errors the same way -- a failed batch must never
+        # break the calling refresh loop.
+        try:
+            with self._open() as con:
+                con.executemany(sql,(tuple(p) for p in params)); self.last_write=utcnow(); self.available=True
+        except Exception as exc: self.error=str(exc)
 
     def rows(self, sql: str, params: Iterable[Any]=()) -> list[Dict[str,Any]]:
         if not self.available: return []
