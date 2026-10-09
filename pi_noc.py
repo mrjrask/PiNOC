@@ -1227,6 +1227,7 @@ class SharedSnapshotCoordinator:
         security_monitoring = CONFIG.get("security_monitoring", {})
         applications_config = CONFIG.get("applications", {})
         software_config = CONFIG.get("software", {})
+        venvs_config = CONFIG.get("venvs", {})
         self.fleet_collector = FleetCollector(
             devices, int(CONFIG.get("fleet_max_workers", 4)),
             float(CONFIG.get("ssh_command_timeout", 8)), read_env_value("CM5_SSH_PASS"),
@@ -1241,7 +1242,9 @@ class SharedSnapshotCoordinator:
             drift_check_seconds=float(polling.get("config_drift_check_seconds", 300)),
             apps_check_seconds=float(applications_config.get("check_seconds", 300)),
             runtimes_check_seconds=float(
-                software_config.get("runtimes_check_seconds", 3600)))
+                software_config.get("runtimes_check_seconds", 3600)),
+            venvs_check_seconds=float(
+                venvs_config.get("venvs_check_seconds", 21600)))
         self.configured_fleet_devices = tuple(devices)
         global_thresholds = CONFIG.get("health_thresholds", {})
         try:
@@ -1346,6 +1349,20 @@ class SharedSnapshotCoordinator:
     def refresh_device(self, _device_id: str) -> None:
         # Fleet collection remains batched, but is always dispatched by the
         # scheduler rather than an HTTP/action worker thread.
+        self.scheduler.refresh_task("fleet")
+
+    def venv_refresh(self, device_id: str, path: Optional[str] = None) -> None:
+        # The venv.refresh action: queue a *forced* venv scan for the
+        # device's next fleet poll (plus the deep, network-using pip check
+        # for the named environment when one is given), then let the normal
+        # schedule run it -- the refresh rides the fleet poll, it never
+        # opens a second transport channel. See
+        # FleetCollector.request_venv_refresh.
+        fleet = self.fleet_collector
+        if fleet is None or not hasattr(fleet, "request_venv_refresh"):
+            LOG.warning("venv refresh requested but the fleet collector is unavailable")
+            return
+        fleet.request_venv_refresh(device_id, [path] if path else [])
         self.scheduler.refresh_task("fleet")
 
     def collect_local(self) -> None:
@@ -1481,7 +1498,8 @@ def main() -> None:
                               anomalies=CONFIG.get("anomaly_detection"), correlation=CONFIG.get("alert_correlation"),
                               network_topology=CONFIG.get("network_topology"), slos=CONFIG.get("slos"),
                               applications=CONFIG.get("applications"),
-                              repositories=CONFIG.get("repositories"))
+                              repositories=CONFIG.get("repositories"),
+                              venvs=CONFIG.get("venvs"))
     state.add_publish_hook(history.submit)
     # Backfilled after both are constructed: NotificationService is built
     # before the history Database exists, but incident timelines (see
@@ -1607,6 +1625,17 @@ def main() -> None:
     if software_service is not None:
         software_service.start()
 
+    # Python virtual-environment inventory (PiNOC 2.0 Phase 1). create_app
+    # already built pinoc.venvs.VenvsService (a self-contained block
+    # reading CONFIG["venvs"], the same way the services above are built);
+    # its refresh thread performs local reads only -- the one new bounded
+    # fleet read it consumes, __VENVSCAN__, is due-gated by the collector,
+    # and the deep pip check runs only on an explicitly requested
+    # refresh. This only starts/stops that loop.
+    venvs_service = extensions.get("pinoc_venvs")
+    if venvs_service is not None:
+        venvs_service.start()
+
     previous_signal_handlers = {
         signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)
     }
@@ -1645,6 +1674,8 @@ def main() -> None:
                 repositories_service.stop()
             if software_service is not None:
                 software_service.stop()
+            if venvs_service is not None:
+                venvs_service.stop()
             notifications.stop()
             history.stop()
         finally:

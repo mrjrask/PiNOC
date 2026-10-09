@@ -112,6 +112,7 @@ class ActionDispatcher:
           "cache.drop":ActionDefinition("cache.drop","Drop page caches","actions.execute","strong",30,handler=self._cache_drop),
           "config_drift.reenable_unit":ActionDefinition("config_drift.reenable_unit","Re-enable drifted unit","actions.execute","strong",30,handler=self._config_drift_reenable_unit),
           "config_drift.restore_file":ActionDefinition("config_drift.restore_file","Restore file from backup","actions.execute","strong",30,handler=self._config_drift_restore_file),
+          "venv.refresh":ActionDefinition("venv.refresh","Refresh venv inventory",timeout=10,conflict="refresh",handler=self._venv_refresh),
         }
         if db and db.available:
             db.execute("UPDATE action_jobs SET status='failed',completed_at=?,error='PiNOC restarted while action was running' WHERE status IN ('running','queued')",(utcnow(),))
@@ -200,6 +201,15 @@ class ActionDispatcher:
     def _refresh(self,row,timeout):
         if not self.coordinator:raise ActionError("collector scheduling unavailable")
         self.coordinator.refresh_device(row["device_id"]) if hasattr(self.coordinator,"refresh_device") else self.coordinator.refresh();return {"exit_code":0,"summary":"Refresh scheduled"}
+    def _venv_refresh(self,row,timeout):
+        # Phase 1 is read-only toward the venvs themselves: this only queues
+        # a forced venv scan (plus the deep pip check for the named
+        # environment, when a target was given) on the device's next fleet
+        # poll. Read-only: nothing is installed, upgraded, or modified.
+        if not self.coordinator or not hasattr(self.coordinator,"venv_refresh"):
+            raise ActionError("venv refresh scheduling unavailable")
+        self.coordinator.venv_refresh(row["device_id"],row.get("target"))
+        return {"exit_code":0,"summary":"Venv inventory refresh scheduled"}
     def _service(self,row,timeout):return self._command(self.state.device(row["device_id"]),["sudo","-n","systemctl",row["action"].split(".")[1],row["target"]],timeout)
     def _integration_service(self,row,timeout):
         device=self.state.device(row["device_id"]);service=integration_service(device,row["action"])

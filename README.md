@@ -69,6 +69,25 @@ other collection domains.
   read-only. The console's integrations page renders the live snapshot and
   the durable inventory, and the inventory filters and exports as CSV/JSON
   the same way the rest of the fleet does.
+- **Python virtual environments:** a durable inventory of the venvs on each
+  device -- path, Python version, package listing, pip's outdated verdicts,
+  and a freshness-driven state (healthy, broken, inaccessible, missing, or
+  stale). Discovery rides the fleet poll on its own low cadence: filesystem
+  only (the pyvenv.cfg Python version and the site-packages dist-info
+  listing -- nothing from a venv is ever executed, and no activation script
+  is sourced). Environments are found under configured project roots, the
+  repositories model's checkout trees, and every path PiNOC has seen before,
+  which is what makes a *deleted* venv report **missing** instead of simply
+  vanishing; a venv under a checkout tree associates to that repository and
+  the application the deployment runs, and to their project. Package
+  listings are timestamped point-in-time snapshots; the *outdated* verdicts
+  come from a deep check (the venv's own interpreter running
+  `pip list --outdated` read-only, output-capped, best-effort) that runs
+  only when an operator refreshes that one environment -- the periodic
+  cadence never touches the network -- and when it does not run, the last
+  known verdicts carry forward by name. The console's integrations page
+  lists the environments (worst-state first) with a per-venv refresh; a
+  failed scan ages the last result to *stale* instead of erasing it.
 - **Operational history:** SQLite/WAL storage, configurable sampling and
   retention, graphs, storage forecasts, transition events, persistent alert
   lifecycles (active, acknowledged, muted, and resolved), outbound alert

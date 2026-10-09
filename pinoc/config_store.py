@@ -221,6 +221,27 @@ def validate_software(value):
         if setting is not None and (isinstance(setting,bool) or not isinstance(setting,(int,float)) or not low<=setting<=high):
             raise ValueError(f"software.{name} must be a number between {low} and {high}")
 
+def validate_venvs(value):
+    section=value.get("venvs")
+    if section is None:return
+    if not isinstance(section,dict):raise ValueError("venvs must be an object")
+    if "enabled" in section and not isinstance(section.get("enabled"),bool):raise ValueError("venvs.enabled must be a boolean")
+    for name,low,high in (("refresh_seconds",30,86400),("stale_seconds",60,2592000),("venvs_check_seconds",60,86400)):
+        setting=section.get(name)
+        if setting is not None and (isinstance(setting,bool) or not isinstance(setting,(int,float)) or not low<=setting<=high):
+            raise ValueError(f"venvs.{name} must be a number between {low} and {high}")
+    for name,low,high in (("package_retention_days",1,3650),("max_venvs",1,500),("max_packages",1,10000)):
+        setting=section.get(name)
+        if setting is not None and (isinstance(setting,bool) or not isinstance(setting,int) or not low<=setting<=high):
+            raise ValueError(f"venvs.{name} must be an integer between {low} and {high}")
+    roots=section.get("roots")
+    if roots is None:return
+    if not isinstance(roots,list):raise ValueError("venvs.roots must be a list of paths")
+    if len(roots)>50:raise ValueError("at most 50 venvs.roots entries are allowed")
+    for root in roots:
+        if not isinstance(root,str) or not root.strip() or len(root)>400 or "\x00" in root:
+            raise ValueError(f"invalid venvs.roots entry: {root!r}")
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
@@ -244,6 +265,7 @@ def validate_config(value,base_dir=Path(".")):
     validate_applications(value)
     validate_repositories(value)
     validate_software(value)
+    validate_venvs(value)
     return value
 
 def _atomic_write(path,value,backups=3):
