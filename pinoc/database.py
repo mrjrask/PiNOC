@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 LOG = logging.getLogger("pinoc.database")
 UTC = timezone.utc
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 MIGRATIONS = (
 """CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL);
@@ -173,6 +173,20 @@ CREATE INDEX deployments_application ON deployments(application_slug);
 CREATE TABLE deployment_events(event_id INTEGER PRIMARY KEY,repo_slug TEXT NOT NULL,deployment_id INTEGER,device_id TEXT,event_type TEXT NOT NULL,old_state TEXT,new_state TEXT,old_sha TEXT,new_sha TEXT,source TEXT,reasons_json TEXT NOT NULL DEFAULT '[]',observed_at TEXT,recorded_at TEXT NOT NULL);
 CREATE INDEX deployment_events_repo_time ON deployment_events(repo_slug,recorded_at);
 CREATE INDEX deployment_events_recorded ON deployment_events(recorded_at);""",
+# Fleet software and version inventory (PiNOC 2.0 Phase 1, see pinoc/software.py):
+# ``software_components`` is the durable per-device software posture. Each
+# component is one versioned thing on one device -- the OS, kernel,
+# architecture, a runtime (python/node/npm/git), the PiNOC agent, or an
+# application's version -- holding the raw version, a normalized form for
+# comparison, package-update counts, its source, and a freshness-driven state
+# (current / update_available / security_update / stale / unknown). A failed
+# collection never erases the last observed version; it only lets the row age
+# to *stale*. (device, application, name, kind) is unique; version-change
+# transitions are recorded through the history events log, not in this table.
+"""CREATE TABLE software_components(component_id INTEGER PRIMARY KEY,device_id TEXT NOT NULL,application_slug TEXT,name TEXT NOT NULL,kind TEXT NOT NULL,version TEXT,normalized_version TEXT,pending_updates INTEGER,security_updates INTEGER,source TEXT NOT NULL,confidence REAL NOT NULL DEFAULT 1.0,state TEXT NOT NULL DEFAULT 'unknown',state_reasons_json TEXT NOT NULL DEFAULT '[]',observed_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(device_id,application_slug,name,kind));
+CREATE INDEX software_components_device ON software_components(device_id);
+CREATE INDEX software_components_name ON software_components(name);
+CREATE INDEX software_components_state ON software_components(state);""",
 )
 
 def utcnow() -> str: return datetime.now(UTC).isoformat()

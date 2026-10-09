@@ -203,9 +203,11 @@ class TestDatabaseSchema(unittest.TestCase):
         self.db = Database(f"{self._tmp.name}/db.sqlite")
         assert self.db.initialize()
 
-    def test_schema_version_is_22(self):
-        self.assertEqual(SCHEMA_VERSION, 22)
-        self.assertEqual(self.db.scalar("SELECT version FROM schema_version"), 22)
+    def test_schema_version_matches_constant(self):
+        # Repositories introduced schema v22; assert the DB migrated to the
+        # current constant (later Phase 1 migrations advance it further).
+        self.assertGreaterEqual(SCHEMA_VERSION, 22)
+        self.assertEqual(self.db.scalar("SELECT version FROM schema_version"), SCHEMA_VERSION)
 
     def test_migration_creates_the_three_tables(self):
         tables = {row["name"] for row in self.db.rows(

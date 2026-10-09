@@ -30,9 +30,11 @@ SCRIPT = r'''set +e
 # only on the low-frequency cycles the PiNOC host selects. "__apt__" is
 # passed only on the (much lower-frequency) cycle a package check is due --
 # `apt-get --just-print upgrade` simulates a dependency resolution over the
-# whole local apt cache and must not run on every fleet poll.
-jlogs_lines=""; jlogs_units=""; apt_due=0; authcheck_due=0; drift_files=""; sshdcheck_due=0; apps_due=0; apps_specs=""
-for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; __apt__) apt_due=1;; __authcheck__) authcheck_due=1;; __driftfiles__:*) drift_files=${arg#__driftfiles__:};; __sshdcheck__) sshdcheck_due=1;; __APPS__:*) apps_due=1; apps_specs=${arg#__APPS__:};; esac; done
+# whole local apt cache and must not run on every fleet poll. "__RUNTIMES__"
+# (software inventory runtimes: python3/node/npm/git versions) rides the same
+# due-gating idiom on its own, still lower-frequency, cadence.
+jlogs_lines=""; jlogs_units=""; apt_due=0; authcheck_due=0; drift_files=""; sshdcheck_due=0; apps_due=0; apps_specs=""; runtimes_due=0
+for arg in "$@"; do case "$arg" in __jlogs__:*) rest=${arg#__jlogs__:}; jlogs_lines=${rest%%:*}; jlogs_units=${rest#*:};; __apt__) apt_due=1;; __authcheck__) authcheck_due=1;; __driftfiles__:*) drift_files=${arg#__driftfiles__:};; __sshdcheck__) sshdcheck_due=1;; __APPS__:*) apps_due=1; apps_specs=${arg#__APPS__:};; __RUNTIMES__) runtimes_due=1;; esac; done
 echo __OS__; cat /etc/os-release 2>/dev/null; echo __UNAME__; uname -srm
 echo __MODEL__; tr -d '\000' </proc/device-tree/model 2>/dev/null; echo
 echo __UPTIME__; cat /proc/uptime; echo __LOAD__; cat /proc/loadavg
@@ -109,6 +111,18 @@ if [ "$apps_due" = "1" ] && [ -n "$apps_specs" ]; then
     esac
     [ -n "$status" ] && printf '%s|%s|%s\n' "$name" "$kind" "$status"
   done
+fi
+echo __RUNTIMES__
+# Software-inventory runtimes (PiNOC 2.0 Phase 1): passed only on the
+# low-frequency cycle the PiNOC host selects. One "name|version" line per
+# runtime; a host missing a tool reports "unknown" for it (set +e above keeps
+# the poll alive), so the inventory can tell "installed, version X" from
+# "not installed" instead of guessing.
+if [ "$runtimes_due" = "1" ]; then
+  v=$(python3 --version 2>/dev/null | head -1 | sed 's/^Python //'); printf 'python3|%s\n' "${v:-unknown}"
+  v=$(node --version 2>/dev/null | head -1); printf 'node|%s\n' "${v:-unknown}"
+  v=$(npm --version 2>/dev/null | head -1); printf 'npm|%s\n' "${v:-unknown}"
+  v=$(git --version 2>/dev/null | head -1 | sed 's/^git version //'); printf 'git|%s\n' "${v:-unknown}"
 fi
 echo __DRIFTFILES__
 if [ -n "$drift_files" ]; then
@@ -413,6 +427,29 @@ def parse_services(text: str, critical: Iterable[str], system_uptime: float = 0)
 _UNIT_RE = re.compile(r"[A-Za-z0-9@:_.\-]{1,128}")
 
 
+def parse_runtimes(text: str, max_entries: int = 50) -> List[Dict[str, Any]]:
+    """Parse the bounded __RUNTIMES__ section into per-runtime versions.
+
+    One line per runtime: ``name|version`` (python3, node, npm, git). The
+    names are fixed by the script itself (never device-controlled); a host
+    missing a tool reports ``unknown`` rather than an error, so the fleet
+    software inventory can tell "installed, version X" from "not installed"
+    instead of guessing.
+    """
+    result=[]
+    for row in text.splitlines():
+        parts=[part.strip() for part in row.split("|")]
+        if len(parts) < 2:
+            continue
+        name, version = parts[0], parts[1]
+        if not name or not version:
+            continue
+        result.append({"name":name[:64],"version":version[:64] or "unknown"})
+        if len(result) >= max_entries:
+            break
+    return result
+
+
 def parse_app_checks(text: str, max_entries: int = 50) -> List[Dict[str, Any]]:
     """Parse the bounded __APPS__ section into per-implementation state.
 
@@ -661,7 +698,8 @@ class FleetCollector:
                  auth_fail_hysteresis: float = 2,
                  listener_change_duration_seconds: float = 60.0,
                  drift_check_seconds: float = 300.0,
-                 apps_check_seconds: float = 300.0) -> None:
+                 apps_check_seconds: float = 300.0,
+                 runtimes_check_seconds: float = 3600.0) -> None:
         self.devices=devices; self.max_workers=max(1,min(int(max_workers),16)); self.timeout=float(timeout)
         self.password=password; self.runner=runner
         # Per-device password override (device_id -> password): compromising
@@ -713,6 +751,13 @@ class FleetCollector:
         self._last_apps_check: Dict[str, float] = {}
         self.app_specs: Dict[str, List[str]] = {}
         self.application_specs: Optional[Callable[[], Dict[str, List[str]]]] = None
+        # Software-inventory runtimes (PiNOC 2.0 Phase 1): same due-gating
+        # idiom as the app checks above -- the host re-reports its runtime
+        # versions (python3/node/npm/git) only on this low-frequency cycle.
+        # A missing tool reports "unknown" (set +e in the script), never an
+        # error that would fail the whole poll.
+        self.runtimes_check_seconds=max(60.0,float(runtimes_check_seconds))
+        self._last_runtimes_check: Dict[str, float] = {}
         # Security-surface monitoring (auth failures, listening ports): each
         # threshold/hysteresis pair follows the exact same open-until-you-
         # drop-back-down shape history.HistoryManager._alerts() already uses
@@ -732,7 +777,8 @@ class FleetCollector:
         return self.passwords.get(device.id) or self.password
 
     def _command(self, device: DeviceConfig, jlogs_due: bool = False, apt_due: bool = False,
-                 drift_due: bool = False, apps: Optional[List[str]] = None) -> List[str]:
+                 drift_due: bool = False, apps: Optional[List[str]] = None,
+                 runtimes_due: bool = False) -> List[str]:
         # config_drift.expected_units ride along with monitored_services in
         # the same single `systemctl show` call (see __SERVICES__ below,
         # which now also asks for UnitFileState) -- cheap enough to check on
@@ -776,6 +822,8 @@ class FleetCollector:
                     args.append(name)
                     additions += 1
             args.append(f"__APPS__:{','.join(str(spec) for spec in apps[:50])}")
+        if runtimes_due:
+            args.append("__RUNTIMES__")
         if device.collection_method == "local": return ["sh", "-s", "--", *args]
         ssh=["ssh","-p",str(device.ssh_port),"-o",f"ConnectTimeout={max(1,int(self.timeout))}","-o","ServerAliveInterval=3"]
         if self._password_for(device): return ["sshpass","-e",*ssh,"-o","BatchMode=no",f"{device.ssh_user}@{device.address}","sh","-s","--",*args]
@@ -799,11 +847,13 @@ class FleetCollector:
         last_apps=self._last_apps_check.get(device.id)
         apps_due=last_apps is None or time.monotonic()-last_apps>=self.apps_check_seconds
         app_specs=self.app_specs.get(device.id) if apps_due else None
+        last_runtimes=self._last_runtimes_check.get(device.id)
+        runtimes_due=last_runtimes is None or time.monotonic()-last_runtimes>=self.runtimes_check_seconds
         try:
             env={**os.environ,"LC_ALL":"C"}
             device_password=self._password_for(device)
             if device_password: env["SSHPASS"]=device_password
-            proc=self.runner(self._command(device,jlogs_due,apt_due,drift_due,apps=app_specs),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
+            proc=self.runner(self._command(device,jlogs_due,apt_due,drift_due,apps=app_specs,runtimes_due=runtimes_due),input=SCRIPT,text=True,capture_output=True,timeout=self.timeout,env=env,check=False)
             if proc.returncode: raise RuntimeError((proc.stderr or f"command exited {proc.returncode}").strip()[:240])
             self._last_jlogs[device.id]=time.monotonic()
             # Only reset the apt cadence clock when a check actually ran
@@ -814,6 +864,7 @@ class FleetCollector:
             if apt_due: self._last_apt_check[device.id]=time.monotonic()
             if drift_due: self._last_drift_check[device.id]=time.monotonic()
             if apps_due: self._last_apps_check[device.id]=time.monotonic()
+            if runtimes_due: self._last_runtimes_check[device.id]=time.monotonic()
             data=sections(proc.stdout); cpu,counter=parse_cpu(data,self.previous_cpu.get(device.id)); self.previous_cpu[device.id]=counter
             os_values={}
             for row in data.get("OS","").splitlines():
@@ -854,6 +905,11 @@ class FleetCollector:
                  # strategy ages them via its freshness floor instead of
                  # flapping to "unknown" on every non-due poll.
                  "app_checks":parse_app_checks(data.get("APPS","")) if apps_due else (list(old.app_checks) if old else []),
+                 # Not due this cycle -- keep the last real runtimes (the
+                 # jlogs/packages idiom) so the software inventory ages them
+                 # via its freshness floor instead of flapping to
+                 # "unknown" on every non-due poll.
+                 "runtimes":parse_runtimes(data.get("RUNTIMES","")) if runtimes_due else (list(old.runtimes) if old else []),
                  "collector_status":{"system":{"status":"ok"},"storage":{"status":"ok"},
                                      "media_errors":{"status":"ok" if io_errors_available else "unavailable",
                                                      "error":None if io_errors_available else "kernel logs are not readable"},

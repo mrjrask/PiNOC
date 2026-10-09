@@ -211,6 +211,16 @@ def validate_repositories(value):
     if retention is not None and (isinstance(retention,bool) or not isinstance(retention,int) or not 1<=retention<=3650):
         raise ValueError("repositories.event_retention_days must be an integer between 1 and 3650")
 
+def validate_software(value):
+    section=value.get("software")
+    if section is None:return
+    if not isinstance(section,dict):raise ValueError("software must be an object")
+    if "enabled" in section and not isinstance(section.get("enabled"),bool):raise ValueError("software.enabled must be a boolean")
+    for name,low,high in (("refresh_seconds",30,86400),("stale_seconds",60,2592000),("runtimes_check_seconds",60,86400)):
+        setting=section.get(name)
+        if setting is not None and (isinstance(setting,bool) or not isinstance(setting,(int,float)) or not low<=setting<=high):
+            raise ValueError(f"software.{name} must be a number between {low} and {high}")
+
 def validate_config(value,base_dir=Path(".")):
     if not isinstance(value,dict):raise ValueError("configuration must be an object")
     polling=value.get("polling",{})
@@ -233,6 +243,7 @@ def validate_config(value,base_dir=Path(".")):
     validate_reports(value,known_roles,known_tags)
     validate_applications(value)
     validate_repositories(value)
+    validate_software(value)
     return value
 
 def _atomic_write(path,value,backups=3):
