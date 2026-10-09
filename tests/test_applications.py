@@ -163,7 +163,10 @@ __SSHD__
 class TestDatabaseSchema(unittest.TestCase):
     def test_schema_version_matches_migration_count(self):
         self.assertEqual(SCHEMA_VERSION, len(MIGRATIONS))
-        self.assertEqual(SCHEMA_VERSION, 22)
+        # Applications introduced schema v21; later Phase 1 migrations
+        # (repositories, software, ...) advance it further, so only pin the
+        # invariant (version == migration count) and a lower bound.
+        self.assertGreaterEqual(SCHEMA_VERSION, 21)
 
     def test_application_tables_and_columns(self):
         tmp = tempfile.TemporaryDirectory()

@@ -55,6 +55,20 @@ other collection domains.
   console shows a repository card grid, a drill-down listing every deployment
   and exact revision, and a per-project software view that groups deployments
   by application.
+- **Software inventory:** a durable, per-device record of every versioned
+  thing on the fleet -- operating system, kernel, architecture, the python3 /
+  node / npm / git runtimes, the package manager's pending and security
+  updates, the PiNOC agent version, and each application's version. Every
+  component keeps its raw version next to a normalized comparison form and
+  reports one of current, update_available, security_update, stale, or
+  unknown: a failed collection never erases the last known version, it lets
+  the record age to *stale* while the last concrete state is preserved. The
+  one new read the fleet performs for this (bounded, due-gated runtime
+  versions) rides the existing poll, so the API and console answer from
+  durable records -- no live SSH, no package credentials, Phase 1 is
+  read-only. The console's integrations page renders the live snapshot and
+  the durable inventory, and the inventory filters and exports as CSV/JSON
+  the same way the rest of the fleet does.
 - **Operational history:** SQLite/WAL storage, configurable sampling and
   retention, graphs, storage forecasts, transition events, persistent alert
   lifecycles (active, acknowledged, muted, and resolved), outbound alert

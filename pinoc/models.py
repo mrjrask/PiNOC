@@ -40,6 +40,12 @@ class DeviceState:
     # per (name, kind) the host asked for, where kind is systemd/pm2/
     # container/process. Feeds the "process" application health strategy.
     app_checks: List[Dict[str, Any]] = field(default_factory=list)
+    # Bounded runtime versions reported by the fleet collector's due-gated
+    # __RUNTIMES__ section (see pinoc/collectors/fleet.py): one entry per
+    # runtime the host has (python3, node, npm, git; a missing tool reports
+    # "unknown" rather than an error). Feeds the fleet software inventory's
+    # "runtime" components (PiNOC 2.0 Phase 1, P1-R04).
+    runtimes: List[Dict[str, Any]] = field(default_factory=list)
     applications: Dict[str, Any] = field(default_factory=dict)
     integrations: Dict[str, Any] = field(default_factory=dict)
     alerts: List[Dict[str, Any]] = field(default_factory=list)

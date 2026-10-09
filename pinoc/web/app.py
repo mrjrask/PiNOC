@@ -2150,6 +2150,124 @@ def create_app(state: PiNOCState, config: Optional[Dict[str, Any]] = None, histo
     def repositories_page():
         return render_template("repositories.html")
 
+    # -- Fleet software and version inventory (PiNOC 2.0 Phase 1, P1-R04) --
+    # Self-contained block, the same way the repositories one above: the
+    # service owns the software_components table plus its refresh thread,
+    # which performs local reads only (device state's OS/kernel/arch/
+    # runtimes, the packages integration entry, the agents table, the
+    # applications tables) -- no remote work happens in request threads and
+    # no *new* remote work is introduced (the one new bounded fleet read,
+    # __RUNTIMES__, is due-gated by the collector on its own cadence).
+    # Phase 1 is read-only toward the devices: there is no operator CRUD and
+    # no package credentials, and every output passes through the security
+    # layer's recursive redact() before it leaves the process. (The legacy
+    # /software page and /api/software live-snapshot above are untouched: this
+    # block adds the durable inventory under the /api/v1/ namespace.)
+    from pinoc.software import SoftwareError, SoftwareService
+    app.extensions["pinoc_software"] = SoftwareService(
+        history.db, state=state, history=history,
+        config=(app.config.get("PINOC_CONFIG") or {}).get("software"),
+        audit=actions.audit if actions else None,
+        redact=redact if security is not None else None,
+    ) if history is not None else None
+    app.config["TOKEN_SCOPE_PERMISSIONS"].update({
+        "api_v1_software": "view",
+        "api_v1_device_software": "view",
+        "api_v1_software_updates": "view",
+        "api_v1_software_export": "view",
+    })
+
+    def _software_service() -> Optional[SoftwareService]:
+        return app.extensions.get("pinoc_software")
+
+    def _software_error(exc: SoftwareError):
+        if "not found" in str(exc):
+            return jsonify({"error": str(exc)}), 404
+        return jsonify({"error": str(exc)}), 400
+
+    @app.get("/api/v1/software")
+    def api_v1_software():
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _software_service()
+        if service is None:
+            return jsonify({"error": "software inventory is not available"}), 503
+        try:
+            components = service.list(
+                device=request.args.get("device"),
+                name=request.args.get("name"),
+                kind=request.args.get("kind"),
+                application=request.args.get("application"),
+                project=request.args.get("project"),
+                state=request.args.get("state"))
+        except SoftwareError as exc:
+            return _software_error(exc)
+        return jsonify({"components": _redact(components)})
+
+    @app.get("/api/v1/devices/<device_id>/software")
+    def api_v1_device_software(device_id):
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _software_service()
+        if service is None:
+            return jsonify({"error": "software inventory is not available"}), 503
+        posture = service.device_software(device_id)
+        if posture is None:
+            return jsonify({"error": "device not found"}), 404
+        return jsonify(_redact(posture))
+
+    @app.get("/api/v1/software/updates")
+    def api_v1_software_updates():
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _software_service()
+        if service is None:
+            return jsonify({"error": "software inventory is not available"}), 503
+        try:
+            result = service.updates(
+                device=request.args.get("device"),
+                name=request.args.get("name"),
+                kind=request.args.get("kind"),
+                application=request.args.get("application"),
+                project=request.args.get("project"))
+        except SoftwareError as exc:
+            return _software_error(exc)
+        return jsonify(_redact(result))
+
+    @app.get("/api/v1/software/export")
+    def api_v1_software_export():
+        if not _preset_view_allowed():
+            return jsonify({"error": "permission denied"}), 403
+        service = _software_service()
+        if service is None:
+            return jsonify({"error": "software inventory is not available"}), 503
+        fmt = request.args.get("format", "json").lower()
+        if fmt not in ("csv", "json"):
+            return jsonify({"error": "format must be csv or json"}), 400
+        try:
+            payload = service.export(
+                device=request.args.get("device"),
+                name=request.args.get("name"),
+                kind=request.args.get("kind"),
+                application=request.args.get("application"),
+                project=request.args.get("project"),
+                state=request.args.get("state"))
+        except SoftwareError as exc:
+            return _software_error(exc)
+        payload = _redact(payload)
+        if fmt == "json":
+            return jsonify({**payload, "generated_at": datetime.now(timezone.utc).isoformat()})
+        def generate():
+            buffer = io.StringIO()
+            csv.writer(buffer).writerow(payload["columns"])
+            yield buffer.getvalue()
+            for row in payload["rows"]:
+                buffer = io.StringIO()
+                csv.writer(buffer).writerow([csv_safe(row.get(column)) for column in payload["columns"]])
+                yield buffer.getvalue()
+        return Response(generate(), mimetype="text/csv",
+                        headers={"Content-Disposition": 'attachment; filename="pinoc-software.csv"'})
+
     return app
 
 
